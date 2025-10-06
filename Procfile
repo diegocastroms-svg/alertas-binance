@@ -1,1 +1,2 @@
- worker: python monitor.py
+ worker: python main.py
+
