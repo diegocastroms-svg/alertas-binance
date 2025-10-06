@@ -8,7 +8,7 @@ import aiohttp
 # ----------------- Config -----------------
 BINANCE_HTTP = "https://api.binance.com"  # .com para evitar erro 451
 INTERVAL = "5m"                  # 1m/3m/5m/15m
-SHORTLIST_N = 400                # 🔥 até 400 pares (Render pago aguenta tranquilo)
+SHORTLIST_N = 50                # 🔥 até 50 pares (Render pago aguenta tranquilo)
 COOLDOWN_SEC = 15 * 60           # 1 alerta por símbolo a cada 15 min
 MIN_PCT = 1.0                    # filtro inicial 24h
 MIN_QV = 300_000.0               # filtro inicial 24h (quote volume)
@@ -257,3 +257,4 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         pass
+
