@@ -12,16 +12,15 @@ BINANCE_HTTP = "https://api.binance.com"
 # ========== ENV ==========
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 CHAT_ID        = os.getenv("CHAT_ID", "").strip()
-WEBHOOK_BASE   = os.getenv("WEBHOOK_BASE", "").rstrip("/")  # ex: https://seuapp.onrender.com/webhook
+WEBHOOK_BASE   = os.getenv("WEBHOOK_BASE", "").rstrip("/")
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "")
 
 # -------- Configurações principais --------
-INTERVAL      = "5m"            # 1m/3m/5m/15m
-SHORTLIST_N   = 50              # quantos pares “quentes” analisar
-COOLDOWN_SEC  = 15 * 60         # evita spam: 1 alerta / 15min por símbolo
-TOP_FILTERS   = dict(min_quote_vol=300000.0, min_pct=1.0)  # filtro inicial
+INTERVAL      = "5m"
+SHORTLIST_N   = 50
+COOLDOWN_SEC  = 15 * 60
+TOP_FILTERS   = dict(min_quote_vol=300000.0, min_pct=1.0)
 
-# Indicadores
 EMA_FAST = 9
 MA_SLOW  = 20
 MA_MED   = 50
@@ -33,34 +32,27 @@ def fmt_symbol(symbol: str) -> str:
     return symbol
 
 def binance_pair_link(symbol: str) -> str:
-    """
-    Gera link universal da Binance (corrige 404).
-    Exemplo: CELOUSDT -> https://www.binance.com/en/trade/CELO_USDT?type=spot
-    """
-    base = symbol[:-4] if symbol.endswith("USDT") else symbol
-    return f"https://www.binance.com/en/trade/{base}_USDT?type=spot"
-
-def binance_price_link(symbol: str) -> str:
-    """
-    Link alternativo da página de preço da moeda.
-    Exemplo: CELOUSDT -> https://www.binance.com/en/price/celo
-    """
-    base = symbol[:-4] if symbol.endswith("USDT") else symbol
-    return f"https://www.binance.com/en/price/{base.lower()}"
+    # ✅ Corrigido: link oficial que abre sem 404
+    base = symbol.replace("USDT", "_USDT")
+    return f"https://www.binance.com/en/trade/{base}?type=spot"
 
 async def send_alert(session: aiohttp.ClientSession, text: str):
-    # (1) Opcional: webhook Flask
     if WEBHOOK_BASE and WEBHOOK_SECRET:
         try:
             async with session.post(f"{WEBHOOK_BASE}/{WEBHOOK_SECRET}", json={"message": text}, timeout=10) as r:
                 await r.text()
         except Exception as e:
             print("Webhook error:", e)
-    # (2) Telegram direto
+
     if TELEGRAM_TOKEN and CHAT_ID:
         try:
             tg_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-            payload = {"chat_id": CHAT_ID, "text": text, "parse_mode": "Markdown", "disable_web_page_preview": True}
+            payload = {
+                "chat_id": CHAT_ID,
+                "text": text,
+                "parse_mode": "Markdown",
+                "disable_web_page_preview": True
+            }
             async with session.post(tg_url, data=payload, timeout=10) as r:
                 await r.text()
         except Exception as e:
@@ -85,7 +77,7 @@ def compute_indicators(df: pd.DataFrame):
     df["hh20"]   = df["high"].rolling(20).max()
     return df
 
-# -------- Regras dos 5 modelos de alta --------
+# -------- Regras de sinal --------
 def check_signals(df: pd.DataFrame):
     if len(df) < 60:
         return []
@@ -93,63 +85,30 @@ def check_signals(df: pd.DataFrame):
     last, prev = df.iloc[-1], df.iloc[-2]
     out = []
 
-    # 1) 🚀 PUMP Explosivo
-    pump = (
-        (last["volume"] > (last["vol_ma9"] * 2.0)) and
-        (last["rsi14"] > 60) and
-        (last["ema9"] > last["ma20"]) and
-        (last["close"] > prev["close"] * 1.01)
-    )
-    if pump:
+    # 🚀 PUMP
+    if (last["volume"] > (last["vol_ma9"] * 2.0)) and (last["rsi14"] > 60) and (last["ema9"] > last["ma20"]) and (last["close"] > prev["close"] * 1.01):
         out.append(("PUMP", f"Vol {last['volume']:.0f} > 2x média | RSI {last['rsi14']:.1f} | EMA9>MA20"))
 
-    # 2) 💥 Rompimento
-    breakout = (
-        (last["close"] > last["hh20"]) and
-        (last["volume"] > last["vol_ma9"] * 1.2) and
-        (last["rsi14"] > 55) and
-        (last["ema9"] > last["ma20"])
-    )
-    if breakout:
+    # 💥 Breakout
+    if (last["close"] > last["hh20"]) and (last["volume"] > last["vol_ma9"] * 1.2) and (last["rsi14"] > 55) and (last["ema9"] > last["ma20"]):
         out.append(("BREAKOUT", f"Fechou acima da máxima 20 | Vol>média | RSI {last['rsi14']:.1f}"))
 
-    # 3) 📈 Tendência Sustentada
-    trend = (
-        (df["ema9"].iloc[-3:] > df["ma20"].iloc[-3:]).all() and
-        (df["ma20"].iloc[-1] > df["ma50"].iloc[-1]) and
-        (55 <= last["rsi14"] <= 70)
-    )
-    if trend:
-        out.append(("TENDÊNCIA", f"EMA9>MA20>MA50 | RSI {last['rsi14']:.1f} (zona saudável)"))
+    # 📈 Tendência
+    if (df["ema9"].iloc[-3:] > df["ma20"].iloc[-3:]).all() and (df["ma20"].iloc[-1] > df["ma50"].iloc[-1]) and (55 <= last["rsi14"] <= 70):
+        out.append(("TENDÊNCIA", f"EMA9>MA20>MA50 | RSI {last['rsi14']:.1f}"))
 
-    # 4) 🔄 Reversão de Fundo
+    # 🔄 Reversão
     prev_rsi = df["rsi14"].iloc[-3]
-    rev = (
-        (prev_rsi < 45) and (last["rsi14"] > 50) and
-        (df["ema9"].iloc[-2] <= df["ma20"].iloc[-2]) and
-        (df["ema9"].iloc[-1]  > df["ma20"].iloc[-1]) and
-        (last["close"] > prev["close"]) and
-        (last["volume"] >= last["vol_ma9"] * 1.10)
-    )
-    if rev:
+    if (prev_rsi < 45) and (last["rsi14"] > 50) and (df["ema9"].iloc[-2] <= df["ma20"].iloc[-2]) and (df["ema9"].iloc[-1] > df["ma20"].iloc[-1]) and (last["volume"] >= last["vol_ma9"] * 1.10):
         out.append(("REVERSÃO", f"RSI {prev_rsi:.1f}→{last['rsi14']:.1f} | EMA9 cruzou MA20 | Vol>média"))
 
-    # 5) ♻️ Reteste/Pullback
-    touched_ma20 = (df["low"].iloc[-3:] <= df["ma20"].iloc[-3:]).any()
-    touched_ema9 = (df["low"].iloc[-3:] <= df["ema9"].iloc[-3:]).any()
-    reteste = (
-        (df["ma20"].iloc[-1] > df["ma50"].iloc[-1]) and
-        (touched_ma20 or touched_ema9) and
-        (last["close"] > last["ema9"]) and
-        (last["rsi14"] > 55) and
-        (last["volume"] >= last["vol_ma9"] * 1.00)
-    )
-    if reteste:
-        out.append(("RETESTE", f"Retomada após toque na média | RSI {last['rsi14']:.1f} | Vol>=média"))
+    # ♻️ Reteste
+    if (df["ma20"].iloc[-1] > df["ma50"].iloc[-1]) and ((df["low"].iloc[-3:] <= df["ma20"].iloc[-3:]).any() or (df["low"].iloc[-3:] <= df["ema9"].iloc[-3:]).any()) and (last["close"] > last["ema9"]) and (last["rsi14"] > 55):
+        out.append(("RETESTE", f"Retomada após toque na média | RSI {last['rsi14']:.1f}"))
 
     return out
 
-# -------- Coleta de dados --------
+# -------- Coleta --------
 async def get_klines(session, symbol: str, interval="5m", limit=200):
     params = {"symbol": symbol, "interval": interval, "limit": limit}
     url = f"{BINANCE_HTTP}/api/v3/klines?{urlencode(params)}"
@@ -163,10 +122,10 @@ async def get_klines(session, symbol: str, interval="5m", limit=200):
     df["low"]    = df["low"].astype(float)
     df["close"]  = df["close"].astype(float)
     df["volume"] = df["volume"].astype(float)
-    return df[["open","high","low","close","volume","high","low"]]
+    return df[["open","high","low","close","volume"]]
 
 async def get_24h(session):
-    url = f"https://api.binance.me/api/v3/ticker/24hr"
+    url = f"{BINANCE_HTTP}/api/v3/ticker/24hr"
     async with session.get(url, timeout=10) as r:
         r.raise_for_status()
         return await r.json()
@@ -175,10 +134,8 @@ def shortlist_from_24h(tickers, n=50):
     usdt = []
     for t in tickers:
         s = t.get("symbol","")
-        if not s.endswith("USDT"):
-            continue
-        if any(x in s for x in ("UP","DOWN","BULL","BEAR")):
-            continue
+        if not s.endswith("USDT"): continue
+        if any(x in s for x in ("UP","DOWN","BULL","BEAR")): continue
         pct = abs(float(t.get("priceChangePercent","0") or 0.0))
         qv  = float(t.get("quoteVolume","0") or 0.0)
         if pct >= TOP_FILTERS["min_pct"] and qv >= TOP_FILTERS["min_quote_vol"]:
@@ -186,31 +143,18 @@ def shortlist_from_24h(tickers, n=50):
     usdt.sort(key=lambda x: (x[1], x[2]), reverse=True)
     return [x[0] for x in usdt[:n]]
 
-# -------- Controle de spam --------
+# -------- Controle --------
 class Monitor:
-    def __init__(self):
-        self.cooldown = defaultdict(lambda: 0.0)
+    def __init__(self): self.cooldown = defaultdict(lambda: 0.0)
+    def allowed(self, symbol): return time.time() - self.cooldown[symbol] >= COOLDOWN_SEC
+    def mark(self, symbol): self.cooldown[symbol] = time.time()
 
-    def allowed(self, symbol: str) -> bool:
-        return time.time() - self.cooldown[symbol] >= COOLDOWN_SEC
-
-    def mark(self, symbol: str):
-        self.cooldown[symbol] = time.time()
-
-def kind_emoji(kind: str) -> str:
-    return {
-        "PUMP": "🚀",
-        "BREAKOUT": "💥",
-        "TENDÊNCIA": "📈",
-        "REVERSÃO": "🔄",
-        "RETESTE": "♻️"
-    }.get(kind, "📌")
-
+def kind_emoji(kind): return {"PUMP":"🚀","BREAKOUT":"💥","TENDÊNCIA":"📈","REVERSÃO":"🔄","RETESTE":"♻️"}.get(kind,"📌")
 def pick_priority_kind(signals):
-    prio = {"PUMP":0, "BREAKOUT":1, "REVERSÃO":2, "RETESTE":3, "TENDÊNCIA":4}
+    prio = {"PUMP":0,"BREAKOUT":1,"REVERSÃO":2,"RETESTE":3,"TENDÊNCIA":4}
     return sorted(signals, key=lambda x: prio.get(x[0], 9))[0][0] if signals else "SINAL"
 
-async def candle_worker(session, symbol: str, monitor: Monitor):
+async def candle_worker(session, symbol, monitor):
     try:
         df = await get_klines(session, symbol, interval=INTERVAL, limit=200)
         df = compute_indicators(df)
@@ -221,16 +165,13 @@ async def candle_worker(session, symbol: str, monitor: Monitor):
             first_kind = pick_priority_kind(signals)
             emoji = kind_emoji(first_kind)
             sym_pretty = fmt_symbol(symbol)
-
             bullets = "\n".join([f"• {kind_emoji(k)} *{k}*: {desc}" for k, desc in signals])
-
             txt = (
                 f"{emoji} *{sym_pretty} — {first_kind} DETECTADO!*\n"
                 f"💰 Preço: `{last_price:.6f}`\n"
                 f"🧠 Sinal técnico:\n{bullets}\n\n"
                 f"⏰ {ts}\n"
-                f"🔗 [Abrir na Binance]({binance_pair_link(symbol)})\n"
-                f"ℹ️ [Ver preço atual]({binance_price_link(symbol)})"
+                f"🔗 [Abrir na Binance]({binance_pair_link(symbol)})"
             )
             await send_alert(session, txt)
             monitor.mark(symbol)
@@ -244,11 +185,9 @@ async def main():
         watchlist = shortlist_from_24h(tickers, SHORTLIST_N)
         ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
         await send_alert(session, f"✅ Monitor online [{INTERVAL}] — acompanhando {len(watchlist)} pares | {ts}")
-
         print("Shortlist inicial:", watchlist[:10], "… total:", len(watchlist))
         while True:
-            tasks = [candle_worker(session, s, monitor) for s in watchlist]
-            await asyncio.gather(*tasks)
+            await asyncio.gather(*[candle_worker(session, s, monitor) for s in watchlist])
             await asyncio.sleep(180)
             try:
                 tickers = await get_24h(session)
