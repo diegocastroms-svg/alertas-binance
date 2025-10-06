@@ -8,7 +8,7 @@ import aiohttp
 # ----------------- Config -----------------
 BINANCE_HTTP = "https://api.binance.com"  # .com para evitar erro 451
 INTERVAL = "5m"                  # 1m/3m/5m/15m
-SHORTLIST_N = 40                 # quantos pares USDT “quentes” monitorar
+SHORTLIST_N = 400                # 🔥 até 400 pares (Render pago aguenta tranquilo)
 COOLDOWN_SEC = 15 * 60           # 1 alerta por símbolo a cada 15 min
 MIN_PCT = 1.0                    # filtro inicial 24h
 MIN_QV = 300_000.0               # filtro inicial 24h (quote volume)
@@ -115,27 +115,27 @@ def check_signals(close, high, low, volume, ema9, ma20, ma50, rsi14, vol_ma, hh2
     last, prev = n - 1, n - 2
     out = []
 
-    # 1) PUMP Explosivo
+    # 1) 🚀 PUMP Explosivo
     if (volume[last] > (vol_ma[last] * 2.0)
         and rsi14[last] > 60
         and ema9[last] > ma20[last]
         and close[last] > close[prev] * 1.01):
         out.append(("PUMP", f"Vol {volume[last]:.0f} > 2x média | RSI {rsi14[last]:.1f} | EMA9>MA20"))
 
-    # 2) Rompimento (Breakout)
+    # 2) 💥 Rompimento (Breakout)
     if (close[last] > hh20[last]
         and volume[last] > vol_ma[last] * 1.2
         and rsi14[last] > 55
         and ema9[last] > ma20[last]):
         out.append(("BREAKOUT", f"Fechou acima da máxima 20 | Vol>média | RSI {rsi14[last]:.1f}"))
 
-    # 3) Tendência Sustentada
+    # 3) 📈 Tendência Sustentada
     if (ema9[last-2] > ma20[last-2] and ema9[last-1] > ma20[last-1] and ema9[last] > ma20[last]
         and ma20[last] > ma50[last]
         and 55 <= rsi14[last] <= 70):
         out.append(("TENDÊNCIA", f"EMA9>MA20>MA50 | RSI {rsi14[last]:.1f}"))
 
-    # 4) Reversão de Fundo
+    # 4) 🔄 Reversão de Fundo
     prev_rsi = rsi14[last-3] if last >= 3 else 50.0
     if (prev_rsi < 45 and rsi14[last] > 50
         and ema9[last-1] <= ma20[last-1] and ema9[last] > ma20[last]
@@ -143,7 +143,7 @@ def check_signals(close, high, low, volume, ema9, ma20, ma50, rsi14, vol_ma, hh2
         and volume[last] >= vol_ma[last] * 1.10):
         out.append(("REVERSÃO", f"RSI {prev_rsi:.1f}→{rsi14[last]:.1f} | EMA9 cruzou MA20 | Vol>média"))
 
-    # 5) Reteste / Pullback
+    # 5) ♻️ Reteste / Pullback
     touched_ma20 = any(low[i] <= ma20[i] for i in range(max(0, last-2), last+1))
     touched_ema9 = any(low[i] <= ema9[i] for i in range(max(0, last-2), last+1))
     if (ma20[last] > ma50[last]
@@ -178,7 +178,7 @@ async def get_24h(session):
         r.raise_for_status()
         return await r.json()
 
-def shortlist_from_24h(tickers, n=40):
+def shortlist_from_24h(tickers, n=400):
     usdt = []
     for t in tickers:
         s = t.get("symbol","")
@@ -240,8 +240,8 @@ async def main():
         watchlist = shortlist_from_24h(tickers, SHORTLIST_N)
 
         ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-        await send_alert(session, f"✅ Monitor online [{INTERVAL}] — acompanhando {len(watchlist)} pares | {ts}")
-        print("Shortlist:", watchlist[:10], "… total:", len(watchlist))
+        await send_alert(session, f"💻 *Modo FULL ativo* — monitorando {len(watchlist)} pares SPOT | {ts}")
+        print(f"💻 Modo FULL ativo — analisando {len(watchlist)} pares.")
 
         while True:
             await asyncio.gather(*[candle_worker(session, s, monitor) for s in watchlist])
