@@ -16,11 +16,12 @@ WEBHOOK_BASE   = os.getenv("WEBHOOK_BASE", "").rstrip("/")
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "")
 
 # -------- Configurações principais --------
-INTERVAL      = "5m"
-SHORTLIST_N   = 50
-COOLDOWN_SEC  = 15 * 60
-TOP_FILTERS   = dict(min_quote_vol=300000.0, min_pct=1.0)
+INTERVAL      = "5m"           
+SHORTLIST_N   = 50              
+COOLDOWN_SEC  = 15 * 60         
+TOP_FILTERS   = dict(min_quote_vol=300000.0, min_pct=1.0)  
 
+# Indicadores
 EMA_FAST = 9
 MA_SLOW  = 20
 MA_MED   = 50
@@ -32,9 +33,9 @@ def fmt_symbol(symbol: str) -> str:
     return symbol
 
 def binance_pair_link(symbol: str) -> str:
-    # ✅ Corrigido: link oficial que abre sem 404
+    # 🔗 Versão original que funcionava antes das 13h30
     base = symbol.replace("USDT", "_USDT")
-    return f"https://www.binance.com/en/trade/{base}?type=spot"
+    return f"https://www.binance.com/pt/trade/{base}"
 
 async def send_alert(session: aiohttp.ClientSession, text: str):
     if WEBHOOK_BASE and WEBHOOK_SECRET:
@@ -43,16 +44,10 @@ async def send_alert(session: aiohttp.ClientSession, text: str):
                 await r.text()
         except Exception as e:
             print("Webhook error:", e)
-
     if TELEGRAM_TOKEN and CHAT_ID:
         try:
             tg_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-            payload = {
-                "chat_id": CHAT_ID,
-                "text": text,
-                "parse_mode": "Markdown",
-                "disable_web_page_preview": True
-            }
+            payload = {"chat_id": CHAT_ID, "text": text, "parse_mode": "Markdown", "disable_web_page_preview": True}
             async with session.post(tg_url, data=payload, timeout=10) as r:
                 await r.text()
         except Exception as e:
@@ -77,7 +72,7 @@ def compute_indicators(df: pd.DataFrame):
     df["hh20"]   = df["high"].rolling(20).max()
     return df
 
-# -------- Regras de sinal --------
+# -------- Regras --------
 def check_signals(df: pd.DataFrame):
     if len(df) < 60:
         return []
@@ -93,11 +88,11 @@ def check_signals(df: pd.DataFrame):
     if (last["close"] > last["hh20"]) and (last["volume"] > last["vol_ma9"] * 1.2) and (last["rsi14"] > 55) and (last["ema9"] > last["ma20"]):
         out.append(("BREAKOUT", f"Fechou acima da máxima 20 | Vol>média | RSI {last['rsi14']:.1f}"))
 
-    # 📈 Tendência
+    # 📈 Tendência Sustentada
     if (df["ema9"].iloc[-3:] > df["ma20"].iloc[-3:]).all() and (df["ma20"].iloc[-1] > df["ma50"].iloc[-1]) and (55 <= last["rsi14"] <= 70):
         out.append(("TENDÊNCIA", f"EMA9>MA20>MA50 | RSI {last['rsi14']:.1f}"))
 
-    # 🔄 Reversão
+    # 🔄 Reversão de Fundo
     prev_rsi = df["rsi14"].iloc[-3]
     if (prev_rsi < 45) and (last["rsi14"] > 50) and (df["ema9"].iloc[-2] <= df["ma20"].iloc[-2]) and (df["ema9"].iloc[-1] > df["ma20"].iloc[-1]) and (last["volume"] >= last["vol_ma9"] * 1.10):
         out.append(("REVERSÃO", f"RSI {prev_rsi:.1f}→{last['rsi14']:.1f} | EMA9 cruzou MA20 | Vol>média"))
@@ -117,15 +112,15 @@ async def get_klines(session, symbol: str, interval="5m", limit=200):
         data = await r.json()
     cols = ["open_time","open","high","low","close","volume","close_time","qav","num_trades","taker_base","taker_quote","ignore"]
     df = pd.DataFrame(data, columns=cols)
-    df["open"]   = df["open"].astype(float)
-    df["high"]   = df["high"].astype(float)
-    df["low"]    = df["low"].astype(float)
-    df["close"]  = df["close"].astype(float)
+    df["open"] = df["open"].astype(float)
+    df["high"] = df["high"].astype(float)
+    df["low"] = df["low"].astype(float)
+    df["close"] = df["close"].astype(float)
     df["volume"] = df["volume"].astype(float)
     return df[["open","high","low","close","volume"]]
 
 async def get_24h(session):
-    url = f"{BINANCE_HTTP}/api/v3/ticker/24hr"
+    url = "https://api.binance.me/api/v3/ticker/24hr"
     async with session.get(url, timeout=10) as r:
         r.raise_for_status()
         return await r.json()
@@ -134,8 +129,10 @@ def shortlist_from_24h(tickers, n=50):
     usdt = []
     for t in tickers:
         s = t.get("symbol","")
-        if not s.endswith("USDT"): continue
-        if any(x in s for x in ("UP","DOWN","BULL","BEAR")): continue
+        if not s.endswith("USDT"): 
+            continue
+        if any(x in s for x in ("UP","DOWN","BULL","BEAR")): 
+            continue
         pct = abs(float(t.get("priceChangePercent","0") or 0.0))
         qv  = float(t.get("quoteVolume","0") or 0.0)
         if pct >= TOP_FILTERS["min_pct"] and qv >= TOP_FILTERS["min_quote_vol"]:
@@ -145,11 +142,16 @@ def shortlist_from_24h(tickers, n=50):
 
 # -------- Controle --------
 class Monitor:
-    def __init__(self): self.cooldown = defaultdict(lambda: 0.0)
-    def allowed(self, symbol): return time.time() - self.cooldown[symbol] >= COOLDOWN_SEC
-    def mark(self, symbol): self.cooldown[symbol] = time.time()
+    def __init__(self):
+        self.cooldown = defaultdict(lambda: 0.0)
+    def allowed(self, symbol):
+        return time.time() - self.cooldown[symbol] >= COOLDOWN_SEC
+    def mark(self, symbol):
+        self.cooldown[symbol] = time.time()
 
-def kind_emoji(kind): return {"PUMP":"🚀","BREAKOUT":"💥","TENDÊNCIA":"📈","REVERSÃO":"🔄","RETESTE":"♻️"}.get(kind,"📌")
+def kind_emoji(kind):
+    return {"PUMP":"🚀","BREAKOUT":"💥","TENDÊNCIA":"📈","REVERSÃO":"🔄","RETESTE":"♻️"}.get(kind,"📌")
+
 def pick_priority_kind(signals):
     prio = {"PUMP":0,"BREAKOUT":1,"REVERSÃO":2,"RETESTE":3,"TENDÊNCIA":4}
     return sorted(signals, key=lambda x: prio.get(x[0], 9))[0][0] if signals else "SINAL"
