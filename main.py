@@ -31,7 +31,7 @@ def fmt_symbol(symbol: str) -> str:
 
 def binance_pair_link(symbol: str) -> str:
     base = symbol.replace("USDT", "_USDT")
-    return f"https://www.binance.com/pt/trade/{base}"
+    return f"https://www.binance.com/en/trade/{base}?type=spot"
 
 async def send_alert(session: aiohttp.ClientSession, text: str):
     # (1) webhook opcional
@@ -257,3 +257,4 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         pass
+
