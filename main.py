@@ -34,22 +34,22 @@ def fmt_symbol(symbol: str) -> str:
 
 def binance_pair_link(symbol: str) -> str:
     """
-    Gera link universal da Binance, compatível com todos os idiomas.
-    Exemplo: CELOUSDT -> https://www.binance.com/en/trade?symbol=CELO_USDT
+    Gera link universal da Binance (corrige 404).
+    Exemplo: CELOUSDT -> https://www.binance.com/en/trade/CELO_USDT?type=spot
     """
     base = symbol[:-4] if symbol.endswith("USDT") else symbol
-    return f"https://www.binance.com/en/trade?symbol={base}_USDT"
+    return f"https://www.binance.com/en/trade/{base}_USDT?type=spot"
 
 def binance_price_link(symbol: str) -> str:
     """
-    Link alternativo para página de preço da moeda.
+    Link alternativo da página de preço da moeda.
     Exemplo: CELOUSDT -> https://www.binance.com/en/price/celo
     """
     base = symbol[:-4] if symbol.endswith("USDT") else symbol
     return f"https://www.binance.com/en/price/{base.lower()}"
 
 async def send_alert(session: aiohttp.ClientSession, text: str):
-    # (1) Opcional: seu webhook Flask
+    # (1) Opcional: webhook Flask
     if WEBHOOK_BASE and WEBHOOK_SECRET:
         try:
             async with session.post(f"{WEBHOOK_BASE}/{WEBHOOK_SECRET}", json={"message": text}, timeout=10) as r:
@@ -87,7 +87,7 @@ def compute_indicators(df: pd.DataFrame):
 
 # -------- Regras dos 5 modelos de alta --------
 def check_signals(df: pd.DataFrame):
-    if len(df) < 60: 
+    if len(df) < 60:
         return []
 
     last, prev = df.iloc[-1], df.iloc[-2]
@@ -127,7 +127,7 @@ def check_signals(df: pd.DataFrame):
     rev = (
         (prev_rsi < 45) and (last["rsi14"] > 50) and
         (df["ema9"].iloc[-2] <= df["ma20"].iloc[-2]) and
-        (df["ema9"].iloc[-1]  > df["ma20"].iloc[-1])  and
+        (df["ema9"].iloc[-1]  > df["ma20"].iloc[-1]) and
         (last["close"] > prev["close"]) and
         (last["volume"] >= last["vol_ma9"] * 1.10)
     )
@@ -175,9 +175,9 @@ def shortlist_from_24h(tickers, n=50):
     usdt = []
     for t in tickers:
         s = t.get("symbol","")
-        if not s.endswith("USDT"): 
+        if not s.endswith("USDT"):
             continue
-        if any(x in s for x in ("UP","DOWN","BULL","BEAR")): 
+        if any(x in s for x in ("UP","DOWN","BULL","BEAR")):
             continue
         pct = abs(float(t.get("priceChangePercent","0") or 0.0))
         qv  = float(t.get("quoteVolume","0") or 0.0)
@@ -261,5 +261,3 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         pass
-
-
