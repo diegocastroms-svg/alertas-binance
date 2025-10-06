@@ -158,7 +158,7 @@ async def get_klines(session, symbol: str, interval="5m", limit=200):
     return df[["open","high","low","close","volume","high","low"]]
 
 async def get_24h(session):
-    url = f"{BINANCE_HTTP}/api/v3/ticker/24hr"
+    url = f"https://api.binance.me/api/v3/ticker/24hr"
     async with session.get(url, timeout=10) as r:
         r.raise_for_status()
         return await r.json()
@@ -257,3 +257,4 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         pass
+
