@@ -30,12 +30,9 @@ def fmt_symbol(symbol: str) -> str:
     return symbol[:-4] + "/USDT" if symbol.endswith("USDT") else symbol
 
 def binance_pair_link(symbol: str) -> str:
-    """
-    Gera link 100% compatível com qualquer par SPOT da Binance,
-    mesmo os de nomes especiais (ex: 1000SATS, MEME, MAVIA etc).
-    """
     base = symbol.upper().replace("USDT", "_USDT")
-    return f"https://www.binance.com/en/trade/{base}?type=spot"
+    return f"https://www.binance.com/en/trade?symbol={base}"
+
 
 async def send_alert(session: aiohttp.ClientSession, text: str):
     # (1) webhook opcional
@@ -261,5 +258,6 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         pass
+
 
 
