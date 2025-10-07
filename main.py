@@ -31,11 +31,11 @@ def fmt_symbol(symbol: str) -> str:
 
 def binance_pair_link(symbol: str) -> str:
     """
-    Gera link universal da Binance para qualquer par SPOT.
-    Corrige erro de links abrindo moedas erradas (ex: 1000SATS → BTC).
+    Link estável para qualquer par SPOT da Binance.
+    Usa underscore e força o modo spot para evitar redirecionamentos errados.
     """
-    base = symbol.upper().replace("USDT", "")  # remove o sufixo
-    return f"https://www.binance.com/en/trade?symbol={base}USDT"
+    base = symbol.upper().replace("USDT", "")
+    return f"https://www.binance.com/en/trade/{base}_USDT?type=spot"
 
 async def send_alert(session: aiohttp.ClientSession, text: str):
     # (1) webhook opcional
@@ -273,6 +273,7 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         pass
+
 
 
 
