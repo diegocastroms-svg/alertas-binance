@@ -236,12 +236,10 @@ async def candle_worker(session, symbol: str, monitor: Monitor):
                 f"💰 Preço: <code>{last_price:.6f}</code>\n"
                 f"🧠 Sinal técnico:\n{bullets}\n\n"
                 f"⏰ {ts}\n"
-                f"🔗 <a href='{binance_pair_link(symbol)}'>Abrir na Binance</a>"
+                f"🔗 {binance_links(symbol)}"
             )
 
-            await send_alert(session, txt)
-            monitor.mark(symbol)
-
+            
             await send_alert(session, txt)
             monitor.mark(symbol)
     except Exception as e:
@@ -290,6 +288,7 @@ if __name__ == "__main__":
         return "✅ Binance Alerts Bot está ativo e monitorando!"
 
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+
 
 
 
