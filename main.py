@@ -8,7 +8,7 @@ import aiohttp
 # ----------------- Config -----------------
 BINANCE_HTTP = "https://api.binance.com"  # .com para evitar erro 451
 INTERVAL = "5m"                  # 1m/3m/5m/15m
-SHORTLIST_N = 40                # 🔥 até 40 pares (Render pago aguenta tranquilo)
+SHORTLIST_N = 25                # 🔥 até 25 pares (Render pago aguenta tranquilo)
 COOLDOWN_SEC = 15 * 60           # 1 alerta por símbolo a cada 15 min
 MIN_PCT = 1.0                    # filtro inicial 24h
 MIN_QV = 300_000.0               # filtro inicial 24h (quote volume)
@@ -30,9 +30,12 @@ def fmt_symbol(symbol: str) -> str:
     return symbol[:-4] + "/USDT" if symbol.endswith("USDT") else symbol
 
 def binance_pair_link(symbol: str) -> str:
-    base = symbol.upper().replace("USDT", "_USDT")
-    return f"https://www.binance.com/en/trade?symbol={base}"
-
+    """
+    Gera link universal da Binance para qualquer par SPOT.
+    Corrige erro de links abrindo moedas erradas (ex: 1000SATS → BTC).
+    """
+    base = symbol.upper().replace("USDT", "")  # remove o sufixo
+    return f"https://www.binance.com/en/trade?symbol={base}USDT"
 
 async def send_alert(session: aiohttp.ClientSession, text: str):
     # (1) webhook opcional
@@ -270,6 +273,7 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         pass
+
 
 
 
