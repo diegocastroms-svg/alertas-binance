@@ -8,8 +8,8 @@ from flask import Flask
 
 # ----------------- Config -----------------
 BINANCE_HTTP = "https://api.binance.com"   # .com para evitar erro 451
-INTERVAL = "15m"                            # timeframe principal
-CONFIRM_INTERVAL = "1h"                     # timeframe de confirmação
+INTERVAL = "5m"                             # timeframe principal (rápido)
+CONFIRM_INTERVAL = "15m"                    # timeframe de confirmação
 SHORTLIST_N = 40                            # até 40 pares
 COOLDOWN_SEC = 15 * 60                      # 1 alerta por símbolo a cada 15 min
 MIN_PCT = 1.0                               # filtro 24h inicial (var %)
@@ -24,7 +24,7 @@ RSI_LEN  = 14
 VOL_MA   = 9
 HH_WIN   = 20
 
-# MACD (clássico — pode ajustar para (8,21,5) se quiser mais sensível)
+# MACD (clássico; pode ajustar p/ (8,21,5) se quiser mais sensível)
 MACD_FAST   = 12
 MACD_SLOW   = 26
 MACD_SIGNAL = 9
@@ -193,19 +193,19 @@ def compute_indicators(open_, high, low, close, volume):
     obv_vals = obv(close, volume)
     return ema9, ma20, ma50, ma200, rsi14, vol_ma, vol_sd, hh20, res20, res50, dif, dea, hist, adx_vals, obv_vals
 
-# --------------- Regras (v8 PRO Trend) ---------------
+# --------------- Regras (v9 PRO FAST) ---------------
 def check_signals(symbol, open_, close, high, low, volume,
                   ema9, ma20, ma50, ma200, rsi14, vol_ma, vol_sd, hh20, res20, res50,
                   dif, dea, hist, adx_vals, obv_vals,
-                  # 1h confirmação
-                  ema9_1h=None, ma20_1h=None,
+                  # 15m confirmação
+                  ema9_15=None, ma20_15=None,
                   drop24h_pct=None):
     n = len(close)
     if n < 60: return []
     last, prev = n - 1, n - 2
     out = []
 
-    # Helpers 15m
+    # Helpers 5m
     price_above_200 = close[last] > ma200[last]
     cross_9_20_up   = (ema9[last-1] <= ma20[last-1] and ema9[last] > ma20[last])
     cross_9_20_dn   = (ema9[last-1] >= ma20[last-1] and ema9[last] < ma20[last])
@@ -217,16 +217,15 @@ def check_signals(symbol, open_, close, high, low, volume,
     obv_up          = (len(obv_vals)>5 and obv_vals[last] > obv_vals[max(0,last-5)])
     near200         = (abs(close[last] - ma200[last]) / (ma200[last] + 1e-12) < 0.005) or (low[last] <= ma200[last] <= high[last])
 
-    # Filtros de qualidade (sem atrasar)
+    # Filtros de qualidade (rápidos)
     no_top_div = not (close[last] > close[last-2] and rsi14[last] < rsi14[last-2])  # evita divergência de topo
-    candle_verde = close[last] > open_[last]                                       # exige candle verde
-    # (para o alerta inicial, não exigimos vol_inteligente nem candle_forte, para não atrasar)
-    vol_inteligente = volume[last] >= (vol_ma[last] + vol_sd[last])  # ainda usado em outros sinais
+    candle_verde = close[last] > open_[last]                                        # exige candle verde
+    vol_inteligente = volume[last] >= (vol_ma[last] + vol_sd[last])                 # spike real (média + 1 desvio)
 
-    # Confirmação 1h (se disponível)
-    oneh_ok = None
-    if ema9_1h is not None and ma20_1h is not None and len(ema9_1h) and len(ma20_1h):
-        oneh_ok = (ema9_1h[-1] > ma20_1h[-1])
+    # Confirmação 15m (se disponível)
+    conf15_ok = None
+    if ema9_15 is not None and ma20_15 is not None and len(ema9_15) and len(ma20_15):
+        conf15_ok = (ema9_15[-1] > ma20_15[-1])
 
     # ---------- Módulo Reversão pós-queda (24h) ----------
     if drop24h_pct is not None:
@@ -238,25 +237,26 @@ def check_signals(symbol, open_, close, high, low, volume,
             and candle_verde):
             out.append(("REVERSÃO_FORTE", f"RSI {rsi14[prev]:.1f}→{rsi14[last]:.1f} | Vol>1.3×média | Candle de reversão"))
 
-    # ---------- 🌅 Tendência de alta INICIANDO (alerta imediato no cruzamento) ----------
+    # ---------- 🌅 Tendência de alta INICIANDO (alerta imediato no cruzamento 5m) ----------
     if cross_9_20_up and price_above_200 and rsi14[last] >= 50 and candle_verde and no_top_div:
         notas = []
+        if conf15_ok is False:
+            notas.append("🕓 Aguardando confirmação no 15m — início antecipado.")
         if not adx_ok:
             notas.append("🕓 Aguardando confirmação do ADX — tendência em formação.")
-        if oneh_ok is False:
-            notas.append("🕓 Tendência 1h ainda não confirmou — possível início antecipado.")
         nota_txt = ("\n" + "\n".join(notas)) if notas else ""
-        out.append(("TENDÊNCIA_INICIANDO", f"Tendência de alta iniciando | EMA9>MA20 | RSI {rsi14[last]:.1f}{nota_txt}"))
+        out.append(("TENDÊNCIA_INICIANDO", f"Tendência de alta iniciando (5m) | EMA9>MA20 | RSI {rsi14[last]:.1f}{nota_txt}"))
 
-    # ---------- 💎 Tendência real (confluência institucional + 1h) ----------
-    medias_alinhadas = (ema9[last] > ma20[last] > ma50[last] > ma200[last])
+    # ---------- 💎 Tendência CONFIRMADA (confluência 5m + 15m OU ADX) ----------
+    medias_alinhadas_5m = (ema9[last] > ma20[last] > ma50[last] > ma200[last])
     rsi_ok = 55 <= rsi14[last] <= 70
     vol_ok = volume[last] >= vol_ma[last] * 1.1
-    mtf_ok = (oneh_ok is True)  # precisa confirmação 1h para 💎
+    confirmado = (conf15_ok is True) or adx_ok
 
-    if price_above_200 and medias_alinhadas and adx_ok and adx_rising \
-       and (dif[last] > dea[last]) and obv_up and rsi_ok and vol_ok and mtf_ok:
-        out.append(("TENDÊNCIA_REAL", f"Médias alinhadas + ADX {adx_val:.1f}↑ + MACD + OBV↑ + RSI {rsi14[last]:.1f} | Confirmado 1h"))
+    if price_above_200 and medias_alinhadas_5m and confirmado and adx_rising \
+       and macd_up and obv_up and rsi_ok and vol_ok:
+        label_conf = "15m" if (conf15_ok is True and not adx_ok) else ("ADX" if (adx_ok and not conf15_ok) else "15m + ADX")
+        out.append(("TENDÊNCIA_REAL", f"Confirmação: {label_conf} | Médias 5m alinhadas | ADX {adx_val:.1f}↑ | MACD | OBV↑ | RSI {rsi14[last]:.1f}"))
 
     # ---------- Clássicos (com filtro MA200 para alta) ----------
     if (price_above_200
@@ -319,7 +319,7 @@ def check_signals(symbol, open_, close, high, low, volume,
     return out
 
 # --------------- Binance ---------------
-async def get_klines(session, symbol: str, interval="15m", limit=200):
+async def get_klines(session, symbol: str, interval="5m", limit=200):
     params = {"symbol": symbol, "interval": interval, "limit": limit}
     url = f"{BINANCE_HTTP}/api/v3/klines?{urlencode(params)}"
     async with session.get(url, timeout=12) as r:
@@ -372,8 +372,8 @@ class Monitor:
 
 def kind_emoji(kind: str) -> str:
     return {
-        "TENDÊNCIA_INICIANDO":"🌅","INÍCIO_ALTA":"🌅",
-        "TENDÊNCIA_REAL":"💎","PUMP":"🚀","BREAKOUT":"💥","TENDÊNCIA":"📈","REVERSÃO":"🔄",
+        "TENDÊNCIA_INICIANDO":"🌅","TENDÊNCIA_REAL":"💎",
+        "PUMP":"🚀","BREAKOUT":"💥","TENDÊNCIA":"📈","REVERSÃO":"🔄",
         "RETESTE":"♻️","RESISTÊNCIA_CURTA":"🧱","RESISTÊNCIA_LONGA":"🏗️",
         "SUPORTE_200":"🟨","ROMPIMENTO_200":"🟩",
         "QUEDA_EXAGERADA":"🧊","REVERSÃO_FORTE":"🧲",
@@ -391,20 +391,20 @@ def pick_priority_kind(signals):
 # --------------- Worker por símbolo ---------------
 async def candle_worker(session, symbol: str, monitor: Monitor, drop_map):
     try:
-        # 15m
+        # 5m (principal)
         open_, high, low, close, volume = await get_klines(session, symbol, interval=INTERVAL, limit=200)
         ema9, ma20, ma50, ma200, rsi14, vol_ma, vol_sd, hh20, res20, res50, dif, dea, hist, adx_vals, obv_vals = compute_indicators(open_, high, low, close, volume)
 
-        # 1h (apenas EMA9 e MA20 para confirmação)
-        open1h, high1h, low1h, close1h, vol1h = await get_klines(session, symbol, interval=CONFIRM_INTERVAL, limit=200)
-        ema9_1h = ema(close1h, EMA_FAST) if close1h else []
-        ma20_1h = sma(close1h, MA_SLOW) if close1h else []
+        # 15m (confirmação: apenas EMA9 e MA20)
+        open15, high15, low15, close15, vol15 = await get_klines(session, symbol, interval=CONFIRM_INTERVAL, limit=200)
+        ema9_15 = ema(close15, EMA_FAST) if close15 else []
+        ma20_15 = sma(close15, MA_SLOW) if close15 else []
 
         drop24 = drop_map.get(symbol)
         signals = check_signals(symbol, open_, close, high, low, volume,
                                 ema9, ma20, ma50, ma200, rsi14, vol_ma, vol_sd, hh20, res20, res50,
                                 dif, dea, hist, adx_vals, obv_vals,
-                                ema9_1h=ema9_1h, ma20_1h=ma20_1h,
+                                ema9_15=ema9_15, ma20_15=ma20_15,
                                 drop24h_pct=drop24)
 
         if signals and monitor.allowed(symbol):
@@ -444,12 +444,12 @@ async def main():
                     drop_map[s] = None
 
         ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-        await send_alert(session, f"<b>💻 Modo FULL ativo</b> — monitorando {len(watchlist)} pares SPOT | {ts}")
-        print(f"💻 Modo FULL ativo — analisando {len(watchlist)} pares.")
+        await send_alert(session, f"<b>💻 Modo FAST ativo</b> — monitorando {len(watchlist)} pares SPOT (5m + 15m) | {ts}")
+        print(f"💻 Modo FAST ativo — analisando {len(watchlist)} pares (5m + 15m).")
 
         while True:
             await asyncio.gather(*[candle_worker(session, s, monitor, drop_map) for s in watchlist])
-            await asyncio.sleep(600)  # alinhado ao 15m
+            await asyncio.sleep(120)  # checagem a cada ~2 min (evita rate limit; vela 5m fechada é respeitada)
             try:
                 tickers = await get_24h(session)
                 watchlist = shortlist_from_24h(tickers, SHORTLIST_N)
@@ -478,5 +478,5 @@ if __name__ == "__main__":
     app = Flask(__name__)
     @app.route("/")
     def home():
-        return "✅ Binance Alerts Bot — v8 PRO Trend (15m + 1h, alerta antecipado com nota ADX) ativo!"
+        return "✅ Binance Alerts Bot — v9 PRO FAST (5m + 15m, alerta antecipado + confirmação 15m/ADX) ativo!"
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
