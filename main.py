@@ -1,4 +1,4 @@
-import os, asyncio, time
+import os, asyncio, time, math
 from urllib.parse import urlencode
 from collections import defaultdict, deque
 from datetime import datetime, timezone
@@ -8,8 +8,9 @@ from flask import Flask
 
 # ----------------- Config -----------------
 BINANCE_HTTP = "https://api.binance.com"   # .com para evitar erro 451
-INTERVAL = "15m"                            # timeframe
-SHORTLIST_N = 40                            # até 40 pares
+INTERVAL = "15m"                            # timeframe principal
+CONFIRM_INTERVAL = "1h"                     # timeframe de confirmação
+SHORTLIST_N = 50                            # até 50 pares
 COOLDOWN_SEC = 15 * 60                      # 1 alerta por símbolo a cada 15 min
 MIN_PCT = 1.0                               # filtro 24h inicial (var %)
 MIN_QV  = 300_000.0                         # filtro 24h inicial (quote volume)
@@ -23,13 +24,13 @@ RSI_LEN  = 14
 VOL_MA   = 9
 HH_WIN   = 20
 
-# MACD (ajustado p/ cripto, mas clássico também funciona)
-MACD_FAST   = 12     # pode testar (8)
-MACD_SLOW   = 26     # pode testar (21)
-MACD_SIGNAL = 9      # pode testar (5)
+# MACD (clássico — pode ajustar para (8,21,5) se quiser mais sensível)
+MACD_FAST   = 12
+MACD_SLOW   = 26
+MACD_SIGNAL = 9
 
 # ADX
-ADX_LEN = 14         # pode testar 10 em cripto
+ADX_LEN = 14
 
 # Reversão pós-queda (rebote)
 DROP_PCT_TRIGGER = -10.0   # queda <= -10% em 24h
@@ -97,6 +98,17 @@ def rolling_max(seq, n):
         out.append(max(q))
     return out
 
+def rolling_std(seq, n):
+    # desvio-padrão simples da janela (n pequeno => custo ok)
+    out, q = [], deque()
+    for x in seq:
+        q.append(x)
+        if len(q) > n: q.popleft()
+        m = sum(q) / len(q)
+        var = sum((v - m) ** 2 for v in q) / len(q)
+        out.append(math.sqrt(var))
+    return out
+
 def rsi_wilder(closes, period=14):
     if len(closes) == 0: return []
     deltas = [0.0] + [closes[i] - closes[i-1] for i in range(1, len(closes))]
@@ -136,7 +148,6 @@ def adx(high, low, close, period=ADX_LEN):
         ndm[i] = down if (down > up and down > 0) else 0.0
         tr[i]  = max(high[i]-low[i], abs(high[i]-close[i-1]), abs(low[i]-close[i-1]))
 
-    # Wilder smoothing
     atr  = [0.0]*n
     pdi  = [0.0]*n
     ndi  = [0.0]*n
@@ -153,7 +164,6 @@ def adx(high, low, close, period=ADX_LEN):
         ndi[i]  = 100.0 * (sndm / (atr[i] + 1e-12))
         dx[i]   = 100.0 * abs(pdi[i] - ndi[i]) / (pdi[i] + ndi[i] + 1e-12)
 
-    # ADX: EMA do DX
     adx_vals = ema(dx, period)
     return adx_vals
 
@@ -175,33 +185,48 @@ def compute_indicators(open_, high, low, close, volume):
     ma200  = sma(close, MA_LONG)
     rsi14  = rsi_wilder(close, RSI_LEN)
     vol_ma = sma(volume, VOL_MA)
+    vol_sd = rolling_std(volume, VOL_MA)
     hh20   = rolling_max(high, HH_WIN)
     res20  = rolling_max(high, 20)
     res50  = rolling_max(high, 50)
     dif, dea, hist = macd(close)
     adx_vals = adx(high, low, close, ADX_LEN)
     obv_vals = obv(close, volume)
-    return ema9, ma20, ma50, ma200, rsi14, vol_ma, hh20, res20, res50, dif, dea, hist, adx_vals, obv_vals
+    return ema9, ma20, ma50, ma200, rsi14, vol_ma, vol_sd, hh20, res20, res50, dif, dea, hist, adx_vals, obv_vals
 
-# --------------- Regras (v7 institucional) ---------------
+# --------------- Regras (v8 PRO) ---------------
 def check_signals(symbol, open_, close, high, low, volume,
-                  ema9, ma20, ma50, ma200, rsi14, vol_ma, hh20, res20, res50,
+                  ema9, ma20, ma50, ma200, rsi14, vol_ma, vol_sd, hh20, res20, res50,
                   dif, dea, hist, adx_vals, obv_vals,
+                  # 1h confirmação
+                  ema9_1h=None, ma20_1h=None,
                   drop24h_pct=None):
     n = len(close)
     if n < 60: return []
     last, prev = n - 1, n - 2
     out = []
 
-    # Helpers
+    # Helpers 15m
     price_above_200 = close[last] > ma200[last]
     cross_9_20_up   = (ema9[last-1] <= ma20[last-1] and ema9[last] > ma20[last])
     cross_9_20_dn   = (ema9[last-1] >= ma20[last-1] and ema9[last] < ma20[last])
     macd_up         = (len(dea)>1 and dif[last] > dea[last] and dif[prev] <= dea[prev])
     macd_dn         = (len(dea)>1 and dif[last] < dea[last] and dif[prev] >= dea[prev])
     adx_ok          = (len(adx_vals)>last and adx_vals[last] >= 25.0)
+    adx_rising      = (len(adx_vals)>last and last>=2 and adx_vals[last] > adx_vals[last-1] > adx_vals[last-2])
     obv_up          = (len(obv_vals)>5 and obv_vals[last] > obv_vals[max(0,last-5)])
     near200         = (abs(close[last] - ma200[last]) / (ma200[last] + 1e-12) < 0.005) or (low[last] <= ma200[last] <= high[last])
+
+    # Filtros PRO
+    no_top_div = not (close[last] > close[last-2] and rsi14[last] < rsi14[last-2])  # evita divergência de topo
+    rng = max(high[last] - low[last], 1e-12)
+    candle_forte = (close[last] > open_[last]) and ((close[last] - open_[last]) >= 0.7 * rng)
+    vol_inteligente = volume[last] >= (vol_ma[last] + vol_sd[last])  # spike real (média + 1 desvio)
+
+    # Confirmação 1h (se disponível)
+    oneh_ok = None
+    if ema9_1h is not None and ma20_1h is not None and len(ema9_1h) and len(ma20_1h):
+        oneh_ok = (ema9_1h[-1] > ma20_1h[-1])
 
     # ---------- Módulo Reversão pós-queda (24h) ----------
     if drop24h_pct is not None:
@@ -209,25 +234,29 @@ def check_signals(symbol, open_, close, high, low, volume,
             out.append(("QUEDA_EXAGERADA", f"Queda {drop24h_pct:.1f}% nas 24h — monitorando rebote"))
         if (drop24h_pct <= DROP_PCT_TRIGGER
             and rsi14[prev] < 35 and rsi14[last] >= RSI_REBOUND_MIN
-            and volume[last] > vol_ma[last] * 1.3):
-            out.append(("REVERSÃO_FORTE", f"RSI {rsi14[prev]:.1f}→{rsi14[last]:.1f} | Vol>1.3×média — possível rebote 24–48h"))
+            and volume[last] > vol_ma[last] * 1.3
+            and candle_forte):
+            out.append(("REVERSÃO_FORTE", f"RSI {rsi14[prev]:.1f}→{rsi14[last]:.1f} | Vol>1.3×média | Candle forte"))
 
-    # ---------- Início de alta e contexto MA200 ----------
-    if cross_9_20_up and not price_above_200 and rsi14[last] >= 48 and volume[last] >= vol_ma[last] * 1.0 and close[last] > open_[last]:
-        out.append(("REVERSÃO_OBS", f"EMA9↑MA20 abaixo da MA200 | RSI {rsi14[last]:.1f}"))
-    if cross_9_20_up and price_above_200 and rsi14[last] >= 50 and volume[last] > vol_ma[last] * 1.2 and close[last] > open_[last]:
-        out.append(("INÍCIO_ALTA", f"EMA9 cruzou MA20 ↑ | RSI {rsi14[last]:.1f} | Vol>média | >MA200"))
+    # ---------- Início de alta (com PRO + nota 1h) ----------
+    if cross_9_20_up and price_above_200 and rsi14[last] >= 50 \
+       and vol_inteligente and candle_forte and no_top_div and adx_rising:
+        nota_1h = ""
+        if oneh_ok is False:
+            nota_1h = "\n🕓 Tendência 1h ainda não confirmou — possível rebote ou início antecipado."
+        out.append(("INÍCIO_ALTA", f"EMA9 cruzou MA20 ↑ | RSI {rsi14[last]:.1f} | Vol spike | ADX↑{'' if nota_1h=='' else ' (aguardando 1h)'}{nota_1h}"))
 
-    # ---------- Tendência real (confluência institucional) ----------
-    # Regras: médias alinhadas + força (ADX) + momento (MACD) + volume/OBV + RSI saudável
+    # ---------- Tendência real (confluência institucional + 1h) ----------
     medias_alinhadas = (ema9[last] > ma20[last] > ma50[last] > ma200[last])
     rsi_ok = 55 <= rsi14[last] <= 70
     vol_ok = volume[last] >= vol_ma[last] * 1.1
+    mtf_ok = (oneh_ok is True)  # precisa confirmação 1h para 💎
 
-    if price_above_200 and medias_alinhadas and adx_ok and (dif[last] > dea[last]) and obv_up and rsi_ok and vol_ok:
-        out.append(("TENDÊNCIA_REAL", f"Médias alinhadas + ADX {adx_vals[last]:.1f} + MACD + OBV↑ + RSI {rsi14[last]:.1f}"))
+    if price_above_200 and medias_alinhadas and adx_ok and adx_rising \
+       and (dif[last] > dea[last]) and obv_up and rsi_ok and vol_ok and mtf_ok:
+        out.append(("TENDÊNCIA_REAL", f"Médias alinhadas + ADX {adx_vals[last]:.1f}↑ + MACD + OBV↑ + RSI {rsi14[last]:.1f} | Confirmado 1h"))
 
-    # ---------- Sinais clássicos (com filtro MA200 para alta) ----------
+    # ---------- Clássicos (com filtro MA200 para alta) ----------
     if (price_above_200
         and volume[last] > (vol_ma[last] * 2.0)
         and rsi14[last] > 60
@@ -278,15 +307,10 @@ def check_signals(symbol, open_, close, high, low, volume,
         out.append(("ROMPIMENTO_200", "Cruzou MA200 ↑ | Vol>média"))
 
     # ---------- Saídas (alertas de venda / fraqueza) ----------
-    # perda de força (momentum)
     if rsi14[prev] > 55 and rsi14[last] < 50 and ema9[last] >= ma20[last]:
         out.append(("PERDA_FORÇA", f"RSI {rsi14[prev]:.1f}→{rsi14[last]:.1f} — momentum caindo"))
-
-    # saída técnica (tendência curta acabou)
     if cross_9_20_dn:
         out.append(("SAÍDA_TÉCNICA", "EMA9 cruzou MA20 ↓ — tendência enfraquecendo"))
-
-    # saída confirmada (desaceleração estrutural)
     if macd_dn:
         out.append(("SAÍDA_CONFIRMADA", "MACD DIF cruzou DEA ↓ — reversão provável"))
 
@@ -339,7 +363,6 @@ def shortlist_from_24h(tickers, n=400):
 class Monitor:
     def __init__(self):
         self.cooldown = defaultdict(lambda: 0.0)
-        self.drop24h = {}  # cache pct 24h por símbolo
     def allowed(self, symbol: str) -> bool:
         return time.time() - self.cooldown[symbol] >= COOLDOWN_SEC
     def mark(self, symbol: str):
@@ -357,28 +380,29 @@ def kind_emoji(kind: str) -> str:
 
 def pick_priority_kind(signals):
     prio = {
-        # entradas e contexto rápido
         "INÍCIO_ALTA":0,"TENDÊNCIA_REAL":1,"PUMP":2,"BREAKOUT":3,"REVERSÃO":4,"REVERSÃO_FORTE":5,
-        "REVERSÃO_OBS":6,"RETESTE":7,"ROMPIMENTO_200":8,
-        # contexto
-        "RESISTÊNCIA_CURTA":9,"RESISTÊNCIA_LONGA":10,"SUPORTE_200":11,"QUEDA_EXAGERADA":12,
-        # saídas
-        "PERDA_FORÇA":13,"SAÍDA_TÉCNICA":14,"SAÍDA_CONFIRMADA":15,
-        "TENDÊNCIA":16
+        "RETESTE":7,"ROMPIMENTO_200":8,"RESISTÊNCIA_CURTA":9,"RESISTÊNCIA_LONGA":10,"SUPORTE_200":11,"QUEDA_EXAGERADA":12,
+        "PERDA_FORÇA":13,"SAÍDA_TÉCNICA":14,"SAÍDA_CONFIRMADA":15,"TENDÊNCIA":16
     }
     return sorted(signals, key=lambda x: prio.get(x[0], 99))[0][0] if signals else "SINAL"
 
 # --------------- Worker por símbolo ---------------
 async def candle_worker(session, symbol: str, monitor: Monitor, drop_map):
     try:
+        # 15m
         open_, high, low, close, volume = await get_klines(session, symbol, interval=INTERVAL, limit=200)
-        ema9, ma20, ma50, ma200, rsi14, vol_ma, hh20, res20, res50, dif, dea, hist, adx_vals, obv_vals = compute_indicators(open_, high, low, close, volume)
+        ema9, ma20, ma50, ma200, rsi14, vol_ma, vol_sd, hh20, res20, res50, dif, dea, hist, adx_vals, obv_vals = compute_indicators(open_, high, low, close, volume)
 
-        # pct 24h do símbolo (se disponível)
+        # 1h (apenas EMA9 e MA20 para confirmação)
+        open1h, high1h, low1h, close1h, vol1h = await get_klines(session, symbol, interval=CONFIRM_INTERVAL, limit=200)
+        ema9_1h = ema(close1h, EMA_FAST) if close1h else []
+        ma20_1h = sma(close1h, MA_SLOW) if close1h else []
+
         drop24 = drop_map.get(symbol)
         signals = check_signals(symbol, open_, close, high, low, volume,
-                                ema9, ma20, ma50, ma200, rsi14, vol_ma, hh20, res20, res50,
+                                ema9, ma20, ma50, ma200, rsi14, vol_ma, vol_sd, hh20, res20, res50,
                                 dif, dea, hist, adx_vals, obv_vals,
+                                ema9_1h=ema9_1h, ma20_1h=ma20_1h,
                                 drop24h_pct=drop24)
 
         if signals and monitor.allowed(symbol):
@@ -393,7 +417,7 @@ async def candle_worker(session, symbol: str, monitor: Monitor, drop_map):
                 f"💰 Preço: <code>{last_price:.6f}</code>\n"
                 f"🧠 Sinal técnico:\n{bullets}\n\n"
                 f"⏰ {ts}\n"
-                f"🔗 {binance_links(symbol)}"
+                f"{binance_links(symbol)}"
             )
             await send_alert(session, txt)
             monitor.mark(symbol)
@@ -452,5 +476,5 @@ if __name__ == "__main__":
     app = Flask(__name__)
     @app.route("/")
     def home():
-        return "✅ Binance Alerts Bot — v7 (Institucional Cripto: tendência real + reversão + saídas) ativo!"
+        return "✅ Binance Alerts Bot — v8 PRO (15m + 1h, PRO filters) ativo!"
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
