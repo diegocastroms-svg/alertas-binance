@@ -228,17 +228,19 @@ async def candle_worker(session, symbol: str, monitor: Monitor):
             first_kind = pick_priority_kind(signals)
             emoji = kind_emoji(first_kind)
             sym_pretty = fmt_symbol(symbol)
+            
             bullets = "\n".join([f"• {kind_emoji(k)} <b>{k}</b>: {desc}" for k, desc in signals])
 
-bullets = "\n".join([f"• {kind_emoji(k)} <b>{k}</b>: {desc}" for k, desc in signals])
+            txt = (
+                f"{emoji} <b>{sym_pretty} — {first_kind} DETECTADO!</b>\n"
+                f"💰 Preço: <code>{last_price:.6f}</code>\n"
+                f"🧠 Sinal técnico:\n{bullets}\n\n"
+                f"⏰ {ts}\n"
+                f"🔗 <a href='{binance_pair_link(symbol)}'>Abrir na Binance</a>"
+            )
 
-txt = (
-    f"{emoji} <b>{sym_pretty} — {first_kind} DETECTADO!</b>\n"
-    f"💰 Preço: <code>{last_price:.6f}</code>\n"
-    f"🧠 Sinal técnico:\n{bullets}\n\n"
-    f"⏰ {ts}\n"
-    f"{binance_links(symbol)}"
-)
+            await send_alert(session, txt)
+            monitor.mark(symbol)
 
             await send_alert(session, txt)
             monitor.mark(symbol)
@@ -281,6 +283,7 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         pass
+
 
 
 
