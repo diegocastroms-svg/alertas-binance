@@ -268,8 +268,10 @@ async def main():
 
 if __name__ == "__main__":
     import threading
+    import os
+    from flask import Flask
 
-    # Roda o bot de alertas em paralelo
+    # --- Função principal do bot (roda em paralelo) ---
     def start_bot():
         import asyncio
         try:
@@ -277,9 +279,16 @@ if __name__ == "__main__":
         except KeyboardInterrupt:
             pass
 
+    # Inicia o bot em uma thread separada
     threading.Thread(target=start_bot, daemon=True).start()
 
-    # Roda o servidor web para o Render reconhecer o serviço
+    # --- Servidor Flask para manter o serviço ativo no Render ---
+    app = Flask(__name__)
+
+    @app.route("/")
+    def home():
+        return "✅ Binance Alerts Bot está ativo e monitorando!"
+
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
 
 
