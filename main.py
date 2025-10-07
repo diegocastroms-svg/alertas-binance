@@ -267,22 +267,21 @@ async def main():
                 print("Erro ao atualizar shortlist:", e)
 
 if __name__ == "__main__":
-    import threading, http.server, socketserver
+    import threading
 
-    # Mantém o bot rodando e abre uma porta falsa p/ Render não encerrar
-    def keep_alive():
-        PORT = int(os.environ.get("PORT", 10000))
-        handler = http.server.SimpleHTTPRequestHandler
-        with socketserver.TCPServer(("", PORT), handler) as httpd:
-            print(f"Servidor HTTP ativo na porta {PORT}")
-            httpd.serve_forever()
+    # Roda o bot de alertas em paralelo
+    def start_bot():
+        import asyncio
+        try:
+            asyncio.run(main())
+        except KeyboardInterrupt:
+            pass
 
-    threading.Thread(target=keep_alive, daemon=True).start()
+    threading.Thread(target=start_bot, daemon=True).start()
 
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        pass
+    # Roda o servidor web para o Render reconhecer o serviço
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+
 
 
 
