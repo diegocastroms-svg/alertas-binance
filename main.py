@@ -29,13 +29,17 @@ WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "")
 def fmt_symbol(symbol: str) -> str:
     return symbol[:-4] + "/USDT" if symbol.endswith("USDT") else symbol
 
-def binance_pair_link(symbol: str) -> str:
+def binance_links(symbol: str) -> str:
     """
-    Link estável para qualquer par SPOT da Binance.
-    Usa underscore e força o modo spot para evitar redirecionamentos errados.
+    Gera dois links para o mesmo par SPOT.
+    (A) /trade/<BASE>_USDT?type=spot
+    (B) /trade?type=spot&symbol=<BASE>_USDT
+    Assim, se a Binance mudar a rota de um par, o outro ainda abre.
     """
     base = symbol.upper().replace("USDT", "")
-    return f"https://www.binance.com/en/trade/{base}_USDT?type=spot"
+    a = f"https://www.binance.com/en/trade/{base}_USDT?type=spot"
+    b = f"https://www.binance.com/en/trade?type=spot&symbol={base}_USDT"
+    return f'🔗 <a href="{a}">Abrir (A)</a> | <a href="{b}">Abrir (B)</a>'
 
 async def send_alert(session: aiohttp.ClientSession, text: str):
     # (1) webhook opcional
@@ -49,7 +53,7 @@ async def send_alert(session: aiohttp.ClientSession, text: str):
     if TELEGRAM_TOKEN and CHAT_ID:
         try:
             url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-            payload = {"chat_id": CHAT_ID, "text": text, "parse_mode": "Markdown", "disable_web_page_preview": True}
+            payload = {"chat_id": CHAT_ID, "text": text, "parse_mode": "HTML", "disable_web_page_preview": True}
             async with session.post(url, data=payload, timeout=10) as r:
                 await r.text()
         except Exception as e:
@@ -224,14 +228,16 @@ async def candle_worker(session, symbol: str, monitor: Monitor):
             first_kind = pick_priority_kind(signals)
             emoji = kind_emoji(first_kind)
             sym_pretty = fmt_symbol(symbol)
-            bullets = "\n".join([f"• {kind_emoji(k)} *{k}*: {desc}" for k, desc in signals])
-            txt = (
-                f"{emoji} *{sym_pretty} — {first_kind} DETECTADO!*\n"
-                f"💰 Preço: `{last_price:.6f}`\n"
-                f"🧠 Sinal técnico:\n{bullets}\n\n"
-                f"⏰ {ts}\n"
-                f"🔗 [Abrir na Binance]({binance_pair_link(symbol)})"
-            )
+            bullets = "\n".join([f"• {kind_emoji(k)} <b>{k}</b>: {desc}" for k, desc in signals])
+
+txt = (
+    f"{emoji} <b>{sym_pretty} — {first_kind} DETECTADO!</b>\n"
+    f"💰 Preço: <code>{last_price:.6f}</code>\n"
+    f"🧠 Sinal técnico:\n{bullets}\n\n"
+    f"⏰ {ts}\n"
+    f"{binance_links(symbol)}"
+)
+
             await send_alert(session, txt)
             monitor.mark(symbol)
     except Exception as e:
@@ -273,6 +279,7 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         pass
+
 
 
 
