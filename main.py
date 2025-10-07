@@ -10,7 +10,7 @@ from flask import Flask
 BINANCE_HTTP = "https://api.binance.com"   # .com para evitar erro 451
 INTERVAL = "15m"                            # timeframe principal
 CONFIRM_INTERVAL = "1h"                     # timeframe de confirmação
-SHORTLIST_N = 50                            # até 50 pares
+SHORTLIST_N = 40                            # até 40 pares
 COOLDOWN_SEC = 15 * 60                      # 1 alerta por símbolo a cada 15 min
 MIN_PCT = 1.0                               # filtro 24h inicial (var %)
 MIN_QV  = 300_000.0                         # filtro 24h inicial (quote volume)
@@ -99,7 +99,6 @@ def rolling_max(seq, n):
     return out
 
 def rolling_std(seq, n):
-    # desvio-padrão simples da janela (n pequeno => custo ok)
     out, q = [], deque()
     for x in seq:
         q.append(x)
@@ -194,7 +193,7 @@ def compute_indicators(open_, high, low, close, volume):
     obv_vals = obv(close, volume)
     return ema9, ma20, ma50, ma200, rsi14, vol_ma, vol_sd, hh20, res20, res50, dif, dea, hist, adx_vals, obv_vals
 
-# --------------- Regras (v8 PRO) ---------------
+# --------------- Regras (v8 PRO Trend) ---------------
 def check_signals(symbol, open_, close, high, low, volume,
                   ema9, ma20, ma50, ma200, rsi14, vol_ma, vol_sd, hh20, res20, res50,
                   dif, dea, hist, adx_vals, obv_vals,
@@ -212,16 +211,17 @@ def check_signals(symbol, open_, close, high, low, volume,
     cross_9_20_dn   = (ema9[last-1] >= ma20[last-1] and ema9[last] < ma20[last])
     macd_up         = (len(dea)>1 and dif[last] > dea[last] and dif[prev] <= dea[prev])
     macd_dn         = (len(dea)>1 and dif[last] < dea[last] and dif[prev] >= dea[prev])
-    adx_ok          = (len(adx_vals)>last and adx_vals[last] >= 25.0)
+    adx_val         = adx_vals[last] if len(adx_vals)>last else 0.0
+    adx_ok          = adx_val >= 25.0
     adx_rising      = (len(adx_vals)>last and last>=2 and adx_vals[last] > adx_vals[last-1] > adx_vals[last-2])
     obv_up          = (len(obv_vals)>5 and obv_vals[last] > obv_vals[max(0,last-5)])
     near200         = (abs(close[last] - ma200[last]) / (ma200[last] + 1e-12) < 0.005) or (low[last] <= ma200[last] <= high[last])
 
-    # Filtros PRO
+    # Filtros de qualidade (sem atrasar)
     no_top_div = not (close[last] > close[last-2] and rsi14[last] < rsi14[last-2])  # evita divergência de topo
-    rng = max(high[last] - low[last], 1e-12)
-    candle_forte = (close[last] > open_[last]) and ((close[last] - open_[last]) >= 0.7 * rng)
-    vol_inteligente = volume[last] >= (vol_ma[last] + vol_sd[last])  # spike real (média + 1 desvio)
+    candle_verde = close[last] > open_[last]                                       # exige candle verde
+    # (para o alerta inicial, não exigimos vol_inteligente nem candle_forte, para não atrasar)
+    vol_inteligente = volume[last] >= (vol_ma[last] + vol_sd[last])  # ainda usado em outros sinais
 
     # Confirmação 1h (se disponível)
     oneh_ok = None
@@ -235,18 +235,20 @@ def check_signals(symbol, open_, close, high, low, volume,
         if (drop24h_pct <= DROP_PCT_TRIGGER
             and rsi14[prev] < 35 and rsi14[last] >= RSI_REBOUND_MIN
             and volume[last] > vol_ma[last] * 1.3
-            and candle_forte):
-            out.append(("REVERSÃO_FORTE", f"RSI {rsi14[prev]:.1f}→{rsi14[last]:.1f} | Vol>1.3×média | Candle forte"))
+            and candle_verde):
+            out.append(("REVERSÃO_FORTE", f"RSI {rsi14[prev]:.1f}→{rsi14[last]:.1f} | Vol>1.3×média | Candle de reversão"))
 
-    # ---------- Início de alta (com PRO + nota 1h) ----------
-    if cross_9_20_up and price_above_200 and rsi14[last] >= 50 \
-       and vol_inteligente and candle_forte and no_top_div and adx_rising:
-        nota_1h = ""
+    # ---------- 🌅 Tendência de alta INICIANDO (alerta imediato no cruzamento) ----------
+    if cross_9_20_up and price_above_200 and rsi14[last] >= 50 and candle_verde and no_top_div:
+        notas = []
+        if not adx_ok:
+            notas.append("🕓 Aguardando confirmação do ADX — tendência em formação.")
         if oneh_ok is False:
-            nota_1h = "\n🕓 Tendência 1h ainda não confirmou — possível rebote ou início antecipado."
-        out.append(("INÍCIO_ALTA", f"EMA9 cruzou MA20 ↑ | RSI {rsi14[last]:.1f} | Vol spike | ADX↑{'' if nota_1h=='' else ' (aguardando 1h)'}{nota_1h}"))
+            notas.append("🕓 Tendência 1h ainda não confirmou — possível início antecipado.")
+        nota_txt = ("\n" + "\n".join(notas)) if notas else ""
+        out.append(("TENDÊNCIA_INICIANDO", f"Tendência de alta iniciando | EMA9>MA20 | RSI {rsi14[last]:.1f}{nota_txt}"))
 
-    # ---------- Tendência real (confluência institucional + 1h) ----------
+    # ---------- 💎 Tendência real (confluência institucional + 1h) ----------
     medias_alinhadas = (ema9[last] > ma20[last] > ma50[last] > ma200[last])
     rsi_ok = 55 <= rsi14[last] <= 70
     vol_ok = volume[last] >= vol_ma[last] * 1.1
@@ -254,7 +256,7 @@ def check_signals(symbol, open_, close, high, low, volume,
 
     if price_above_200 and medias_alinhadas and adx_ok and adx_rising \
        and (dif[last] > dea[last]) and obv_up and rsi_ok and vol_ok and mtf_ok:
-        out.append(("TENDÊNCIA_REAL", f"Médias alinhadas + ADX {adx_vals[last]:.1f}↑ + MACD + OBV↑ + RSI {rsi14[last]:.1f} | Confirmado 1h"))
+        out.append(("TENDÊNCIA_REAL", f"Médias alinhadas + ADX {adx_val:.1f}↑ + MACD + OBV↑ + RSI {rsi14[last]:.1f} | Confirmado 1h"))
 
     # ---------- Clássicos (com filtro MA200 para alta) ----------
     if (price_above_200
@@ -370,8 +372,8 @@ class Monitor:
 
 def kind_emoji(kind: str) -> str:
     return {
-        "INÍCIO_ALTA":"🌅","REVERSÃO_OBS":"⚠️","TENDÊNCIA_REAL":"💎",
-        "PUMP":"🚀","BREAKOUT":"💥","TENDÊNCIA":"📈","REVERSÃO":"🔄",
+        "TENDÊNCIA_INICIANDO":"🌅","INÍCIO_ALTA":"🌅",
+        "TENDÊNCIA_REAL":"💎","PUMP":"🚀","BREAKOUT":"💥","TENDÊNCIA":"📈","REVERSÃO":"🔄",
         "RETESTE":"♻️","RESISTÊNCIA_CURTA":"🧱","RESISTÊNCIA_LONGA":"🏗️",
         "SUPORTE_200":"🟨","ROMPIMENTO_200":"🟩",
         "QUEDA_EXAGERADA":"🧊","REVERSÃO_FORTE":"🧲",
@@ -380,7 +382,7 @@ def kind_emoji(kind: str) -> str:
 
 def pick_priority_kind(signals):
     prio = {
-        "INÍCIO_ALTA":0,"TENDÊNCIA_REAL":1,"PUMP":2,"BREAKOUT":3,"REVERSÃO":4,"REVERSÃO_FORTE":5,
+        "TENDÊNCIA_INICIANDO":0,"TENDÊNCIA_REAL":1,"PUMP":2,"BREAKOUT":3,"REVERSÃO":4,"REVERSÃO_FORTE":5,
         "RETESTE":7,"ROMPIMENTO_200":8,"RESISTÊNCIA_CURTA":9,"RESISTÊNCIA_LONGA":10,"SUPORTE_200":11,"QUEDA_EXAGERADA":12,
         "PERDA_FORÇA":13,"SAÍDA_TÉCNICA":14,"SAÍDA_CONFIRMADA":15,"TENDÊNCIA":16
     }
@@ -413,7 +415,7 @@ async def candle_worker(session, symbol: str, monitor: Monitor, drop_map):
             sym_pretty = fmt_symbol(symbol)
             bullets = "\n".join([f"• {kind_emoji(k)} <b>{k}</b>: {desc}" for k, desc in signals])
             txt = (
-                f"{emoji} <b>{sym_pretty} — {first_kind} DETECTADO!</b>\n"
+                f"{emoji} <b>{sym_pretty} — {first_kind.replace('_',' ')} DETECTADO!</b>\n"
                 f"💰 Preço: <code>{last_price:.6f}</code>\n"
                 f"🧠 Sinal técnico:\n{bullets}\n\n"
                 f"⏰ {ts}\n"
@@ -476,5 +478,5 @@ if __name__ == "__main__":
     app = Flask(__name__)
     @app.route("/")
     def home():
-        return "✅ Binance Alerts Bot — v8 PRO (15m + 1h, PRO filters) ativo!"
+        return "✅ Binance Alerts Bot — v8 PRO Trend (15m + 1h, alerta antecipado com nota ADX) ativo!"
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
