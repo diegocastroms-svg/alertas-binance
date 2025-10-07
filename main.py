@@ -7,20 +7,33 @@ import aiohttp
 from flask import Flask
 
 # ----------------- Config -----------------
-BINANCE_HTTP = "https://api.binance.com"  # .com para evitar erro 451
-INTERVAL = "15m"                # timeframe (mantido em 15m)
-SHORTLIST_N = 50                # até 50 pares
-COOLDOWN_SEC = 15 * 60          # 1 alerta por símbolo a cada 15 min
-MIN_PCT = 1.0                   # filtro inicial 24h (%)
-MIN_QV = 300_000.0              # filtro inicial 24h (quote volume)
+BINANCE_HTTP = "https://api.binance.com"   # .com para evitar erro 451
+INTERVAL = "15m"                            # timeframe
+SHORTLIST_N = 40                            # até 40 pares
+COOLDOWN_SEC = 15 * 60                      # 1 alerta por símbolo a cada 15 min
+MIN_PCT = 1.0                               # filtro 24h inicial (var %)
+MIN_QV  = 300_000.0                         # filtro 24h inicial (quote volume)
 
+# Médias e parâmetros
 EMA_FAST = 9
-MA_SLOW = 20
-MA_MED = 50
-MA_LONG = 200                   # NOVO: MA200
-RSI_LEN = 14
-VOL_MA = 9
-HH_WIN = 20
+MA_SLOW  = 20
+MA_MED   = 50
+MA_LONG  = 200                               # MA200 (filtro global)
+RSI_LEN  = 14
+VOL_MA   = 9
+HH_WIN   = 20
+
+# MACD (ajustado p/ cripto, mas clássico também funciona)
+MACD_FAST   = 12     # pode testar (8)
+MACD_SLOW   = 26     # pode testar (21)
+MACD_SIGNAL = 9      # pode testar (5)
+
+# ADX
+ADX_LEN = 14         # pode testar 10 em cripto
+
+# Reversão pós-queda (rebote)
+DROP_PCT_TRIGGER = -10.0   # queda <= -10% em 24h
+RSI_REBOUND_MIN = 40.0     # RSI deve cruzar acima disso
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 CHAT_ID = os.getenv("CHAT_ID", "").strip()
@@ -32,11 +45,6 @@ def fmt_symbol(symbol: str) -> str:
     return symbol[:-4] + "/USDT" if symbol.endswith("USDT") else symbol
 
 def binance_links(symbol: str) -> str:
-    """
-    Dois links para o mesmo par SPOT:
-    (A) /trade/<BASE>_USDT?type=spot
-    (B) /trade?type=spot&symbol=<BASE>_USDT
-    """
     base = symbol.upper().replace("USDT", "")
     a = f"https://www.binance.com/en/trade/{base}_USDT?type=spot"
     b = f"https://www.binance.com/en/trade?type=spot&symbol={base}_USDT"
@@ -50,7 +58,7 @@ async def send_alert(session: aiohttp.ClientSession, text: str):
                 await r.text()
         except Exception as e:
             print("Webhook error:", e)
-    # (2) Telegram direto (HTML em MAIÚSCULO)
+    # (2) Telegram direto (HTML maiúsculo)
     if TELEGRAM_TOKEN and CHAT_ID:
         try:
             url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -105,60 +113,141 @@ def rsi_wilder(closes, period=14):
         rsis[i] = 100.0 - (100.0 / (1.0 + rs))
     return rsis
 
+def macd(close, fast=MACD_FAST, slow=MACD_SLOW, signal=MACD_SIGNAL):
+    if not close: return [], [], []
+    ema_fast = ema(close, fast)
+    ema_slow = ema(close, slow)
+    dif = [f - s for f, s in zip(ema_fast, ema_slow)]
+    dea = ema(dif, signal) if dif else []
+    hist = [(d - e) * 2 for d, e in zip(dif, dea)] if dea else []
+    return dif, dea, hist
+
+def adx(high, low, close, period=ADX_LEN):
+    n = len(close)
+    if n < period + 2:
+        return [0.0] * n
+    tr  = [0.0] * n
+    pdm = [0.0] * n
+    ndm = [0.0] * n
+    for i in range(1, n):
+        up   = high[i] - high[i-1]
+        down = low[i-1] - low[i]
+        pdm[i] = up   if (up > down and up > 0) else 0.0
+        ndm[i] = down if (down > up and down > 0) else 0.0
+        tr[i]  = max(high[i]-low[i], abs(high[i]-close[i-1]), abs(low[i]-close[i-1]))
+
+    # Wilder smoothing
+    atr  = [0.0]*n
+    pdi  = [0.0]*n
+    ndi  = [0.0]*n
+    dx   = [0.0]*n
+    atr[period] = sum(tr[1:period+1])
+    spdm = sum(pdm[1:period+1])
+    sndm = sum(ndm[1:period+1])
+
+    for i in range(period+1, n):
+        atr[i]  = atr[i-1] - (atr[i-1] / period) + tr[i]
+        spdm    = spdm - (spdm / period) + pdm[i]
+        sndm    = sndm - (sndm / period) + ndm[i]
+        pdi[i]  = 100.0 * (spdm / (atr[i] + 1e-12))
+        ndi[i]  = 100.0 * (sndm / (atr[i] + 1e-12))
+        dx[i]   = 100.0 * abs(pdi[i] - ndi[i]) / (pdi[i] + ndi[i] + 1e-12)
+
+    # ADX: EMA do DX
+    adx_vals = ema(dx, period)
+    return adx_vals
+
+def obv(close, volume):
+    out = [0.0]
+    for i in range(1, len(close)):
+        if close[i] > close[i-1]:
+            out.append(out[-1] + volume[i])
+        elif close[i] < close[i-1]:
+            out.append(out[-1] - volume[i])
+        else:
+            out.append(out[-1])
+    return out
+
 def compute_indicators(open_, high, low, close, volume):
     ema9   = ema(close, EMA_FAST)
     ma20   = sma(close, MA_SLOW)
     ma50   = sma(close, MA_MED)
-    ma200  = sma(close, MA_LONG)            # NOVO
+    ma200  = sma(close, MA_LONG)
     rsi14  = rsi_wilder(close, RSI_LEN)
     vol_ma = sma(volume, VOL_MA)
     hh20   = rolling_max(high, HH_WIN)
-    res20  = rolling_max(high, 20)          # resistência curta
-    res50  = rolling_max(high, 50)          # resistência longa
-    return ema9, ma20, ma50, ma200, rsi14, vol_ma, hh20, res20, res50
+    res20  = rolling_max(high, 20)
+    res50  = rolling_max(high, 50)
+    dif, dea, hist = macd(close)
+    adx_vals = adx(high, low, close, ADX_LEN)
+    obv_vals = obv(close, volume)
+    return ema9, ma20, ma50, ma200, rsi14, vol_ma, hh20, res20, res50, dif, dea, hist, adx_vals, obv_vals
 
-# --------------- Regras (com MA200 e início de alta) ---------------
-def check_signals(open_, close, high, low, volume, ema9, ma20, ma50, ma200, rsi14, vol_ma, hh20, res20, res50):
+# --------------- Regras (v7 institucional) ---------------
+def check_signals(symbol, open_, close, high, low, volume,
+                  ema9, ma20, ma50, ma200, rsi14, vol_ma, hh20, res20, res50,
+                  dif, dea, hist, adx_vals, obv_vals,
+                  drop24h_pct=None):
     n = len(close)
     if n < 60: return []
     last, prev = n - 1, n - 2
     out = []
 
+    # Helpers
     price_above_200 = close[last] > ma200[last]
     cross_9_20_up   = (ema9[last-1] <= ma20[last-1] and ema9[last] > ma20[last])
+    cross_9_20_dn   = (ema9[last-1] >= ma20[last-1] and ema9[last] < ma20[last])
+    macd_up         = (len(dea)>1 and dif[last] > dea[last] and dif[prev] <= dea[prev])
+    macd_dn         = (len(dea)>1 and dif[last] < dea[last] and dif[prev] >= dea[prev])
+    adx_ok          = (len(adx_vals)>last and adx_vals[last] >= 25.0)
+    obv_up          = (len(obv_vals)>5 and obv_vals[last] > obv_vals[max(0,last-5)])
+    near200         = (abs(close[last] - ma200[last]) / (ma200[last] + 1e-12) < 0.005) or (low[last] <= ma200[last] <= high[last])
 
-    # 0) ⚠️ Reversão em Observação (EMA9 cruza MA20, mas ainda abaixo da MA200)
+    # ---------- Módulo Reversão pós-queda (24h) ----------
+    if drop24h_pct is not None:
+        if drop24h_pct <= DROP_PCT_TRIGGER:
+            out.append(("QUEDA_EXAGERADA", f"Queda {drop24h_pct:.1f}% nas 24h — monitorando rebote"))
+        if (drop24h_pct <= DROP_PCT_TRIGGER
+            and rsi14[prev] < 35 and rsi14[last] >= RSI_REBOUND_MIN
+            and volume[last] > vol_ma[last] * 1.3):
+            out.append(("REVERSÃO_FORTE", f"RSI {rsi14[prev]:.1f}→{rsi14[last]:.1f} | Vol>1.3×média — possível rebote 24–48h"))
+
+    # ---------- Início de alta e contexto MA200 ----------
     if cross_9_20_up and not price_above_200 and rsi14[last] >= 48 and volume[last] >= vol_ma[last] * 1.0 and close[last] > open_[last]:
-        out.append(("REVERSÃO_OBS", f"EMA9↑MA20 abaixo da MA200 | RSI {rsi14[last]:.1f} | Vol>=média"))
-
-    # 1) 🌅 Início de Alta (EMA9 cruzou MA20 e preço acima da MA200)
+        out.append(("REVERSÃO_OBS", f"EMA9↑MA20 abaixo da MA200 | RSI {rsi14[last]:.1f}"))
     if cross_9_20_up and price_above_200 and rsi14[last] >= 50 and volume[last] > vol_ma[last] * 1.2 and close[last] > open_[last]:
         out.append(("INÍCIO_ALTA", f"EMA9 cruzou MA20 ↑ | RSI {rsi14[last]:.1f} | Vol>média | >MA200"))
 
-    # 2) 🚀 PUMP Explosivo (só se acima da MA200)
+    # ---------- Tendência real (confluência institucional) ----------
+    # Regras: médias alinhadas + força (ADX) + momento (MACD) + volume/OBV + RSI saudável
+    medias_alinhadas = (ema9[last] > ma20[last] > ma50[last] > ma200[last])
+    rsi_ok = 55 <= rsi14[last] <= 70
+    vol_ok = volume[last] >= vol_ma[last] * 1.1
+
+    if price_above_200 and medias_alinhadas and adx_ok and (dif[last] > dea[last]) and obv_up and rsi_ok and vol_ok:
+        out.append(("TENDÊNCIA_REAL", f"Médias alinhadas + ADX {adx_vals[last]:.1f} + MACD + OBV↑ + RSI {rsi14[last]:.1f}"))
+
+    # ---------- Sinais clássicos (com filtro MA200 para alta) ----------
     if (price_above_200
         and volume[last] > (vol_ma[last] * 2.0)
         and rsi14[last] > 60
         and ema9[last] > ma20[last]
         and close[last] > close[prev] * 1.01):
-        out.append(("PUMP", f"Vol {volume[last]:.0f} > 2x média | RSI {rsi14[last]:.1f} | EMA9>MA20 | >MA200"))
+        out.append(("PUMP", f"Vol {volume[last]:.0f} > 2× média | RSI {rsi14[last]:.1f} | EMA9>MA20 | >MA200"))
 
-    # 3) 💥 Rompimento (Breakout) (só se acima da MA200)
     if (price_above_200
         and close[last] > hh20[last]
         and volume[last] > vol_ma[last] * 1.2
         and rsi14[last] > 55
         and ema9[last] > ma20[last]):
-        out.append(("BREAKOUT", f"Fechou acima da máxima 20 | Vol>média | RSI {rsi14[last]:.1f} | >MA200"))
+        out.append(("BREAKOUT", f"Rompimento HH20 | Vol>média | RSI {rsi14[last]:.1f} | >MA200"))
 
-    # 4) 📈 Tendência Sustentada (só se acima da MA200)
     if (price_above_200
         and ema9[last-2] > ma20[last-2] and ema9[last-1] > ma20[last-1] and ema9[last] > ma20[last]
         and ma20[last] > ma50[last]
         and 55 <= rsi14[last] <= 70):
         out.append(("TENDÊNCIA", f"EMA9>MA20>MA50 | RSI {rsi14[last]:.1f} | >MA200"))
 
-    # 5) 🔄 Reversão de Fundo (só se acima da MA200)
     prev_rsi = rsi14[last-3] if last >= 3 else 50.0
     if (price_above_200
         and prev_rsi < 45 and rsi14[last] > 50
@@ -167,7 +256,6 @@ def check_signals(open_, close, high, low, volume, ema9, ma20, ma50, ma200, rsi1
         and volume[last] >= vol_ma[last] * 1.10):
         out.append(("REVERSÃO", f"RSI {prev_rsi:.1f}→{rsi14[last]:.1f} | EMA9 cruzou MA20 | Vol>média | >MA200"))
 
-    # 6) ♻️ Reteste / Pullback (só se acima da MA200)
     touched_ma20 = any(low[i] <= ma20[i] for i in range(max(0, last-2), last+1))
     touched_ema9 = any(low[i] <= ema9[i] for i in range(max(0, last-2), last+1))
     if (price_above_200
@@ -178,20 +266,29 @@ def check_signals(open_, close, high, low, volume, ema9, ma20, ma50, ma200, rsi1
         and volume[last] >= vol_ma[last] * 1.00):
         out.append(("RETESTE", f"Retomada após toque na média | RSI {rsi14[last]:.1f} | Vol>=média | >MA200"))
 
-    # 7) 🧱 Resistência tocada/rompida (independe da MA200)
+    # ---------- Resistências & MA200 ----------
     if close[last] >= res20[last]:
         out.append(("RESISTÊNCIA_CURTA", f"Fechou acima da resistência 20 ({res20[last]:.4f})"))
     if close[last] >= res50[last]:
         out.append(("RESISTÊNCIA_LONGA", f"Fechou acima da resistência 50 ({res50[last]:.4f})"))
 
-    # 8) 🟨 Suporte/Resistência na MA200 (zona crítica)
-    near200 = (abs(close[last] - ma200[last]) / (ma200[last] + 1e-12) < 0.005) or (low[last] <= ma200[last] <= high[last])
     if near200:
         out.append(("SUPORTE_200", f"Preço encostando na MA200 ({ma200[last]:.4f})"))
-
-    # 9) 🟩 Rompimento da MA200 (de baixo para cima)
     if close[prev] < ma200[prev] and close[last] > ma200[last] and volume[last] > vol_ma[last] * 1.1:
-        out.append(("ROMPIMENTO_200", f"Cruzou MA200 ↑ | Vol>média"))
+        out.append(("ROMPIMENTO_200", "Cruzou MA200 ↑ | Vol>média"))
+
+    # ---------- Saídas (alertas de venda / fraqueza) ----------
+    # perda de força (momentum)
+    if rsi14[prev] > 55 and rsi14[last] < 50 and ema9[last] >= ma20[last]:
+        out.append(("PERDA_FORÇA", f"RSI {rsi14[prev]:.1f}→{rsi14[last]:.1f} — momentum caindo"))
+
+    # saída técnica (tendência curta acabou)
+    if cross_9_20_dn:
+        out.append(("SAÍDA_TÉCNICA", "EMA9 cruzou MA20 ↓ — tendência enfraquecendo"))
+
+    # saída confirmada (desaceleração estrutural)
+    if macd_dn:
+        out.append(("SAÍDA_CONFIRMADA", "MACD DIF cruzou DEA ↓ — reversão provável"))
 
     return out
 
@@ -203,7 +300,7 @@ async def get_klines(session, symbol: str, interval="15m", limit=200):
         r.raise_for_status()
         data = await r.json()
 
-    # 🔒 Evita usar vela ainda aberta (close time em ms fica no k[6])
+    # 🔒 Evita usar vela ainda aberta (k[6] = close time ms)
     now_ms = int(time.time() * 1000)
     if data and now_ms < int(data[-1][6]):
         data = data[:-1]
@@ -227,21 +324,22 @@ def shortlist_from_24h(tickers, n=400):
     usdt = []
     for t in tickers:
         s = t.get("symbol","")
-        if not s.endswith("USDT"):
+        if not s.endswith("USDT"): 
             continue
         if any(x in s for x in ("UP","DOWN","BULL","BEAR")):
             continue
-        pct = abs(float(t.get("priceChangePercent","0") or 0.0))
+        pct = float(t.get("priceChangePercent","0") or 0.0)
         qv  = float(t.get("quoteVolume","0") or 0.0)
-        if pct >= MIN_PCT and qv >= MIN_QV:
+        if abs(pct) >= MIN_PCT and qv >= MIN_QV:
             usdt.append((s, pct, qv))
-    usdt.sort(key=lambda x: (x[1], x[2]), reverse=True)
+    usdt.sort(key=lambda x: (abs(x[1]), x[2]), reverse=True)
     return [x[0] for x in usdt[:n]]
 
 # --------------- Anti-spam ---------------
 class Monitor:
     def __init__(self):
         self.cooldown = defaultdict(lambda: 0.0)
+        self.drop24h = {}  # cache pct 24h por símbolo
     def allowed(self, symbol: str) -> bool:
         return time.time() - self.cooldown[symbol] >= COOLDOWN_SEC
     def mark(self, symbol: str):
@@ -249,28 +347,40 @@ class Monitor:
 
 def kind_emoji(kind: str) -> str:
     return {
-        "INÍCIO_ALTA":"🌅","REVERSÃO_OBS":"⚠️",
-        "PUMP":"🚀","BREAKOUT":"💥","TENDÊNCIA":"📈",
-        "REVERSÃO":"🔄","RETESTE":"♻️",
-        "RESISTÊNCIA_CURTA":"🧱","RESISTÊNCIA_LONGA":"🏗️",
-        "SUPORTE_200":"🟨","ROMPIMENTO_200":"🟩"
+        "INÍCIO_ALTA":"🌅","REVERSÃO_OBS":"⚠️","TENDÊNCIA_REAL":"💎",
+        "PUMP":"🚀","BREAKOUT":"💥","TENDÊNCIA":"📈","REVERSÃO":"🔄",
+        "RETESTE":"♻️","RESISTÊNCIA_CURTA":"🧱","RESISTÊNCIA_LONGA":"🏗️",
+        "SUPORTE_200":"🟨","ROMPIMENTO_200":"🟩",
+        "QUEDA_EXAGERADA":"🧊","REVERSÃO_FORTE":"🧲",
+        "PERDA_FORÇA":"⚠️","SAÍDA_TÉCNICA":"🔻","SAÍDA_CONFIRMADA":"❌"
     }.get(kind,"📌")
 
 def pick_priority_kind(signals):
-    # Prioridade: início/rápidos > confirmação > contexto
     prio = {
-        "INÍCIO_ALTA":0,"PUMP":1,"BREAKOUT":2,"REVERSÃO":3,
-        "REVERSÃO_OBS":4,"RETESTE":5,"ROMPIMENTO_200":6,
-        "RESISTÊNCIA_CURTA":7,"RESISTÊNCIA_LONGA":8,"TENDÊNCIA":9,"SUPORTE_200":10
+        # entradas e contexto rápido
+        "INÍCIO_ALTA":0,"TENDÊNCIA_REAL":1,"PUMP":2,"BREAKOUT":3,"REVERSÃO":4,"REVERSÃO_FORTE":5,
+        "REVERSÃO_OBS":6,"RETESTE":7,"ROMPIMENTO_200":8,
+        # contexto
+        "RESISTÊNCIA_CURTA":9,"RESISTÊNCIA_LONGA":10,"SUPORTE_200":11,"QUEDA_EXAGERADA":12,
+        # saídas
+        "PERDA_FORÇA":13,"SAÍDA_TÉCNICA":14,"SAÍDA_CONFIRMADA":15,
+        "TENDÊNCIA":16
     }
     return sorted(signals, key=lambda x: prio.get(x[0], 99))[0][0] if signals else "SINAL"
 
 # --------------- Worker por símbolo ---------------
-async def candle_worker(session, symbol: str, monitor: Monitor):
+async def candle_worker(session, symbol: str, monitor: Monitor, drop_map):
     try:
         open_, high, low, close, volume = await get_klines(session, symbol, interval=INTERVAL, limit=200)
-        ema9, ma20, ma50, ma200, rsi14, vol_ma, hh20, res20, res50 = compute_indicators(open_, high, low, close, volume)
-        signals = check_signals(open_, close, high, low, volume, ema9, ma20, ma50, ma200, rsi14, vol_ma, hh20, res20, res50)
+        ema9, ma20, ma50, ma200, rsi14, vol_ma, hh20, res20, res50, dif, dea, hist, adx_vals, obv_vals = compute_indicators(open_, high, low, close, volume)
+
+        # pct 24h do símbolo (se disponível)
+        drop24 = drop_map.get(symbol)
+        signals = check_signals(symbol, open_, close, high, low, volume,
+                                ema9, ma20, ma50, ma200, rsi14, vol_ma, hh20, res20, res50,
+                                dif, dea, hist, adx_vals, obv_vals,
+                                drop24h_pct=drop24)
+
         if signals and monitor.allowed(symbol):
             last_price = close[-1]
             ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
@@ -296,15 +406,35 @@ async def main():
     async with aiohttp.ClientSession() as session:
         tickers = await get_24h(session)
         watchlist = shortlist_from_24h(tickers, SHORTLIST_N)
+
+        # mapa de variação 24h para módulo de reversão pós-queda
+        drop_map = {}
+        for t in tickers:
+            s = t.get("symbol","")
+            if s in watchlist:
+                try:
+                    drop_map[s] = float(t.get("priceChangePercent","0") or 0.0)
+                except:
+                    drop_map[s] = None
+
         ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
         await send_alert(session, f"<b>💻 Modo FULL ativo</b> — monitorando {len(watchlist)} pares SPOT | {ts}")
         print(f"💻 Modo FULL ativo — analisando {len(watchlist)} pares.")
+
         while True:
-            await asyncio.gather(*[candle_worker(session, s, monitor) for s in watchlist])
-            await asyncio.sleep(600)  # 10 min entre ciclos (alinhado ao 15m)
+            await asyncio.gather(*[candle_worker(session, s, monitor, drop_map) for s in watchlist])
+            await asyncio.sleep(600)  # alinhado ao 15m
             try:
                 tickers = await get_24h(session)
                 watchlist = shortlist_from_24h(tickers, SHORTLIST_N)
+                drop_map = {}
+                for t in tickers:
+                    s = t.get("symbol","")
+                    if s in watchlist:
+                        try:
+                            drop_map[s] = float(t.get("priceChangePercent","0") or 0.0)
+                        except:
+                            drop_map[s] = None
             except Exception as e:
                 print("Erro ao atualizar shortlist:", e)
 
@@ -322,5 +452,5 @@ if __name__ == "__main__":
     app = Flask(__name__)
     @app.route("/")
     def home():
-        return "✅ Binance Alerts Bot (15m + MA200 + Início de Alta) ativo!"
+        return "✅ Binance Alerts Bot — v7 (Institucional Cripto: tendência real + reversão + saídas) ativo!"
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
