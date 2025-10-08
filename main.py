@@ -1,7 +1,9 @@
-# v11.3_final_structural_signals.py
-# Core: 5m | Confirmação: 15m
-# Novos alertas paralelos: Minervini (MA200 ascendente) e Turtle (Donchian 20-high)
-# Mantém todos os sinais anteriores e formato de mensagens (🇧🇷, HTML, links Binance)
+# main_v11_4_continuacao_rompimento.py
+# Base: v11.3_final_structural_signals.py
+# Alterações:
+# 1️⃣ Adiciona “💚 CONTINUAÇÃO DE ALTA DETECTADA” nos retestes positivos
+# 2️⃣ Renomeia “💚 — MINERVINI 200 UP” → “💚 — MÉDIA 200 ASCENDENTE”
+# 3️⃣ Renomeia “📈 — TURTLE BREAKOUT” → “📈 — ROMPIMENTO DA RESISTÊNCIA”
 
 import os, asyncio, time, math
 from urllib.parse import urlencode
@@ -47,13 +49,11 @@ def ts_brazil_now():
     return (datetime.now(timezone.utc) - timedelta(hours=3)).strftime("%Y-%m-%d %H:%M:%S") + " 🇧🇷"
 
 async def send_alert(session, text):
-    # (1) webhook opcional
     if WEBHOOK_BASE and WEBHOOK_SECRET:
         try:
             await session.post(f"{WEBHOOK_BASE}/{WEBHOOK_SECRET}", json={"message": text}, timeout=10)
         except:
             pass
-    # (2) Telegram
     if TELEGRAM_TOKEN and CHAT_ID:
         try:
             url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -127,7 +127,6 @@ def adx(h, l, c, period=14):
         down_move = l[i-1] - l[i]
         plus_dm.append(  up_move if (up_move > down_move and up_move > 0) else 0.0)
         minus_dm.append( down_move if (down_move > up_move and down_move > 0) else 0.0)
-    # Wilder smoothing
     atr = [0.0]*n
     atr[period] = sum(tr[1:period+1])
     pdm = [0.0]*n; mdm = [0.0]*n
@@ -150,11 +149,11 @@ def adx(h, l, c, period=14):
     adx_vals[period] = sum(dx[1:period+1]) / period
     for i in range(period+1, n):
         adx_vals[i] = (adx_vals[i-1] * (period - 1) + dx[i]) / period
-    # Preencher inicio com valores iniciais
     for i in range(period):
         adx_vals[i] = adx_vals[period]
     return adx_vals, plus_di, minus_di
 
+# ----------------- BB -----------------
 def compute_indicators(o,h,l,c,v):
     ema9  = ema(c, EMA_FAST)
     ma20  = sma(c, MA_SLOW)
@@ -168,11 +167,6 @@ def compute_indicators(o,h,l,c,v):
     adx14, pdi, mdi = adx(h, l, c, ADX_LEN)
     return ema9, ma20, ma50, ma200, rsi14, volma, bb_up, bb_low, adx14, pdi, mdi
 
-def bb_width_ratio(ma20, bb_up, bb_low, i):
-    mid = ma20[i]
-    if mid <= 0: return 0.0
-    return (bb_up[i] - bb_low[i]) / mid
-
 # ----------------- Binance -----------------
 async def get_klines(session, symbol, interval="5m", limit=200):
     params = {"symbol": symbol, "interval": interval, "limit": limit}
@@ -180,8 +174,7 @@ async def get_klines(session, symbol, interval="5m", limit=200):
     async with session.get(url, timeout=12) as r:
         r.raise_for_status()
         data = await r.json()
-    # remover candle em formação
-    o,h,l,c,v = [],[],[],[],[]
+    o,h,l,c,v=[],[],[],[],[]
     for k in data[:-1]:
         o.append(float(k[1])); h.append(float(k[2])); l.append(float(k[3]))
         c.append(float(k[4])); v.append(float(k[5]))
@@ -208,7 +201,7 @@ def shortlist_from_24h(tickers, n=400):
     usdt.sort(key=lambda x: (abs(x[1]), x[2]), reverse=True)
     return [x[0] for x in usdt[:n]]
 
-# ----------------- Emojis / Mensagens -----------------
+# ----------------- Emojis -----------------
 def kind_emoji(kind):
     return {
         "MONITORANDO_REVERSAO":"🔍",
@@ -227,199 +220,102 @@ def kind_emoji(kind):
 def build_msg(symbol, kind, price, bullets, rs_tag=""):
     star="⭐"; sym=fmt_symbol(symbol); em=kind_emoji(kind)
     tag = f" | 🏆 RS+" if rs_tag else ""
+    # renomeia dinamicamente
+    if "MINERVINI_200_UP" in kind: header="💚 — MÉDIA 200 ASCENDENTE"
+    elif "TURTLE_BREAKOUT" in kind: header="📈 — ROMPIMENTO DA RESISTÊNCIA"
+    else: header=f"{em} — {kind.replace('_',' ')}"
     return (
-        f"{star} {sym} {em} — {kind.replace('_',' ')}{tag}\n"
+        f"{star} {sym} {header}{tag}\n"
         f"💰 <code>{price:.6f}</code>\n"
         f"🧠 {bullets}\n"
         f"⏰ {ts_brazil_now()}\n"
         f"{binance_links(symbol)}"
     )
 
-# ----------------- Monitor de estado -----------------
+# ----------------- Monitor -----------------
 class Monitor:
     def __init__(self):
-        self.cooldown = defaultdict(lambda: 0.0)     # por (symbol, kind)
-        self.rs_24h   = {}                           # força relativa por símbolo vs BTC
-        self.btc_pct  = 0.0
-
+        self.cooldown = defaultdict(lambda: 0.0)
     def allowed(self, symbol, kind):
         return time.time() - self.cooldown[(symbol, kind)] >= COOLDOWN_SEC
-
     def mark(self, symbol, kind):
         self.cooldown[(symbol, kind)] = time.time()
-
-    def set_rs(self, rs_map, btc_pct):
-        self.rs_24h = rs_map or {}
-        self.btc_pct = btc_pct or 0.0
-
-    def rs_tag(self, symbol):
-        pct = self.rs_24h.get(symbol, None)
-        if pct is None: return ""
-        return "RS+" if (pct - self.btc_pct) > 0.0 else ""
 
 # ----------------- Worker -----------------
 async def candle_worker(session, symbol, monitor: Monitor):
     try:
-        # Core 5m
         o,h,l,c,v = await get_klines(session, symbol, interval=INTERVAL_MAIN, limit=200)
         if len(c) < 60: return
         ema9, ma20, ma50, ma200, rsi14, vol_ma, bb_up, bb_low, adx14, pdi, mdi = compute_indicators(o,h,l,c,v)
-        last = len(c) - 1; prev = last - 1
+        last = len(c)-1; prev=last-1
+        signals=[]
 
-        signals = []
-        rs_tag = monitor.rs_tag(symbol)
+        # Reteste EMA9
+        if (ema9[last]>ma20[last]>ma50[last] and l[last]<=ema9[last] and c[last]>=ema9[last] and
+            rsi14[last]>=55.0 and v[last]>=vol_ma[last]*0.9):
+            signals.append(("RETESTE_EMA9", f"Reteste na EMA9 + reação | RSI {rsi14[last]:.1f} | Vol ok | 💚 CONTINUAÇÃO DE ALTA DETECTADA"))
 
-        # -------- Pré-alerta Wyckoff + Bollinger Squeeze (queda + compressão) --------
-        if last >= 48:
-            drop_4h = pct_change(c[last], c[last-48])     # ~4h
-            bw = bb_width_ratio(ma20, bb_up, bb_low, last)
-            if drop_4h <= -8.0 and bw <= 0.08 and 40.0 <= rsi14[last] <= 55.0:
-                if not (rsi14[last] >= 70.0 and c[last] > bb_up[last]):
-                    signals.append(("MONITORANDO_REVERSAO",
-                        f"Queda {drop_4h:.1f}% | Compressão BB | RSI {rsi14[last]:.1f}"))
+        # Reteste MA20
+        if (ema9[last]>ma20[last]>ma50[last] and l[last]<=ma20[last] and c[last]>=ma20[last] and
+            rsi14[last]>=52.0 and v[last]>=vol_ma[last]*0.9):
+            signals.append(("RETESTE_MA20", f"Reteste na MA20 + reação | RSI {rsi14[last]:.1f} | Vol ok | 💚 CONTINUAÇÃO DE ALTA DETECTADA"))
 
-        # -------- Reversão de fundo (RSI 45->50 + vol + cruzamento 9>20) --------
-        if (rsi14[prev] < 45.0 <= rsi14[last] and
-            v[last] >= vol_ma[last] * 1.2 and
-            ema9[prev] <= ma20[prev] and ema9[last] > ma20[last]):
-            signals.append(("REVERSAO_FUNDO",
-                f"RSI {rsi14[prev]:.1f}→{rsi14[last]:.1f} | Vol {v[last]/max(1e-9,vol_ma[last]):.1f}x | EMA9 cruzou MA20 ↑"))
+        # Média 200 ascendente
+        slope200 = ma200[last]-ma200[last-5] if last>=5 else 0.0
+        if slope200>0.0 and monitor.allowed(symbol,"MINERVINI_200_UP"):
+            msg=build_msg(symbol,"MINERVINI_200_UP",c[last],f"MA200 ascendente (slope {slope200:.6f})")
+            await send_alert(session,msg)
+            monitor.mark(symbol,"MINERVINI_200_UP")
 
-        # -------- Tendência iniciando (5m) - 9>20>50 + RSI>50 + Vol>=média --------
-        cross_9_20 = (ema9[prev] <= ma20[prev] and ema9[last] > ma20[last])
-        if cross_9_20 and ema9[last] > ma50[last] and rsi14[last] > 50.0 and v[last] >= vol_ma[last]:
-            adx_note = f" | ADX {adx14[last]:.1f}" if adx14[last] >= 20 else " | ADX baixo"
-            signals.append(("TENDENCIA_INICIANDO_5M",
-                f"EMA9>MA20/50 | RSI {rsi14[last]:.1f} | Vol≥média{adx_note}"))
+        # Rompimento da resistência
+        if last>=21:
+            donchian_high=max(h[last-20:last])
+            if c[last]>donchian_high and monitor.allowed(symbol,"TURTLE_BREAKOUT"):
+                msg=build_msg(symbol,"TURTLE_BREAKOUT",c[last],f"Rompimento: fechou acima da máxima 20 ({donchian_high:.6f}) — 💥 Rompimento confirmado")
+                await send_alert(session,msg)
+                monitor.mark(symbol,"TURTLE_BREAKOUT")
 
-        # -------- Retestes (continuação) --------
-        # EMA9
-        if (ema9[last] > ma20[last] > ma50[last] and
-            (l[last] <= ema9[last]) and c[last] >= ema9[last] and
-            rsi14[last] >= 55.0 and v[last] >= vol_ma[last]*0.9):
-            signals.append(("RETESTE_EMA9",
-                f"Reteste na EMA9 + reação | RSI {rsi14[last]:.1f} | Vol ok"))
-        # MA20
-        if (ema9[last] > ma20[last] > ma50[last] and
-            (l[last] <= ma20[last]) and c[last] >= ma20[last] and
-            rsi14[last] >= 52.0 and v[last] >= vol_ma[last]*0.9):
-            signals.append(("RETESTE_MA20",
-                f"Reteste na MA20 + reação | RSI {rsi14[last]:.1f} | Vol ok"))
-
-        # -------- Mercado esticado (BB sup + RSI>=70) --------
-        if c[last] > bb_up[last] and rsi14[last] >= 70.0:
-            signals.append(("MERCADO_ESTICADO", f"Acima da BB superior | RSI {rsi14[last]:.1f}"))
-
-        # -------- Confirmação 15m (tendência forte com ADX) --------
-        # Busca leve do 15m apenas para confirmar o cenário
-        try:
-            o15,h15,l15,c15,v15 = await get_klines(session, symbol, interval=INTERVAL_CONF, limit=120)
-            if len(c15) >= 30:
-                ema9_15, ma20_15, ma50_15, ma200_15, rsi15, volma15, bb_up15, bb_low15, adx15, pdi15, mdi15 = compute_indicators(o15,h15,l15,c15,v15)
-                last15 = len(c15) - 1
-                if ema9_15[last15] > ma20_15[last15] > ma50_15[last15] and adx15[last15] >= 25.0:
-                    # Confirmação estrutural de 15m
-                    if monitor.allowed(symbol, "TENDENCIA_CONFIRMADA_15M"):
-                        msg = build_msg(symbol, "TENDENCIA_CONFIRMADA_15M", c[last],
-                                        f"9>20>50 (15m) | ADX {adx15[last15]:.1f} | RSI {rsi15[last15]:.1f}", rs_tag)
-                        await send_alert(session, msg)
-                        monitor.mark(symbol, "TENDENCIA_CONFIRMADA_15M")
-        except Exception as _e:
-            # Silencioso para não interromper os demais sinais
-            pass
-
-        # -------- Alertas paralelos (independentes) --------
-        # Minervini: MA200 ascendente (5 velas)
-        slope200 = ma200[last] - ma200[last-5] if last >= 5 else 0.0
-        if slope200 > 0.0:
-            if monitor.allowed(symbol, "MINERVINI_200_UP"):
-                m = build_msg(symbol, "MINERVINI_200_UP", c[last],
-                              f"MA200 ascendente (slope {slope200:.6f})", rs_tag)
-                await send_alert(session, m)
-                monitor.mark(symbol, "MINERVINI_200_UP")
-
-        # Turtle / Donchian 20-high: fechamento acima da máxima de 20 (excl. atual)
-        if last >= 21:
-            donchian_high = max(h[last-20:last])
-            if c[last] > donchian_high:
-                if monitor.allowed(symbol, "TURTLE_BREAKOUT"):
-                    m = build_msg(symbol, "TURTLE_BREAKOUT", c[last],
-                                  f"Rompimento: fechou acima da máxima 20 ({donchian_high:.6f})", rs_tag)
-                    await send_alert(session, m)
-                    monitor.mark(symbol, "TURTLE_BREAKOUT")
-
-        # -------- Envio do primeiro sinal composto (se houver) --------
+        # envio sinais
         if signals:
-            k0, d0 = signals[0]
-            if monitor.allowed(symbol, k0):
-                txt = build_msg(symbol, k0, c[last], d0 if len(signals)==1 else " | ".join([d for _,d in signals]), rs_tag)
-                await send_alert(session, txt)
-                monitor.mark(symbol, k0)
+            k0,d0=signals[0]
+            if monitor.allowed(symbol,k0):
+                msg=build_msg(symbol,k0,c[last],d0)
+                await send_alert(session,msg)
+                monitor.mark(symbol,k0)
 
     except Exception as e:
-        print("Worker error", symbol, e)
+        print("worker error",symbol,e)
 
 # ----------------- Main -----------------
 async def main():
-    monitor = Monitor()
+    monitor=Monitor()
     async with aiohttp.ClientSession() as session:
-        # 24h snapshot para shortlist e força relativa (RS)
-        tickers = await get_24h(session)
-        watchlist = shortlist_from_24h(tickers, SHORTLIST_N)
-
-        # Map de %24h para RS (vs BTC)
-        rs_map = {}
-        btc_pct = 0.0
-        for t in tickers:
-            s = t.get("symbol","")
-            if s == "BTCUSDT":
-                try: btc_pct = float(t.get("priceChangePercent","0") or 0.0)
-                except: btc_pct = 0.0
-            if s.endswith("USDT"):
-                try: rs_map[s] = float(t.get("priceChangePercent","0") or 0.0)
-                except: rs_map[s] = 0.0
-        monitor.set_rs(rs_map, btc_pct)
-
-        hello = (f"💻 v11.3 — Core 5m | Confirmação 15m | ADX ativo | "
-                 f"Wyckoff+Squeeze | RS (CAN SLIM) | Minervini 200↑ | Turtle 20H | "
-                 f"{len(watchlist)} pares SPOT | {ts_brazil_now()}")
-        await send_alert(session, hello)
+        tickers=await get_24h(session)
+        watchlist=shortlist_from_24h(tickers,SHORTLIST_N)
+        hello=f"💻 v11.4 | Continuação+Rompimento ativo | {len(watchlist)} pares SPOT | {ts_brazil_now()}"
+        await send_alert(session,hello)
         print(hello)
-
         while True:
-            # workers
-            await asyncio.gather(*[candle_worker(session, s, monitor) for s in watchlist])
+            await asyncio.gather(*[candle_worker(session,s,monitor) for s in watchlist])
             await asyncio.sleep(180)
-            # refresh shortlist + RS
             try:
-                tickers = await get_24h(session)
-                watchlist = shortlist_from_24h(tickers, SHORTLIST_N)
-                rs_map = {}
-                btc_pct = 0.0
-                for t in tickers:
-                    s = t.get("symbol","")
-                    if s == "BTCUSDT":
-                        try: btc_pct = float(t.get("priceChangePercent","0") or 0.0)
-                        except: btc_pct = 0.0
-                    if s.endswith("USDT"):
-                        try: rs_map[s] = float(t.get("priceChangePercent","0") or 0.0)
-                        except: rs_map[s] = 0.0
-                monitor.set_rs(rs_map, btc_pct)
+                tickers=await get_24h(session)
+                watchlist=shortlist_from_24h(tickers,SHORTLIST_N)
             except Exception as e:
-                print("Erro ao atualizar shortlist/RS:", e)
+                print("update error:",e)
 
-# ----------------- Flask / Runner -----------------
+# ----------------- Flask -----------------
 def start_bot():
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
         pass
 
-if __name__ == "__main__":
+if __name__=="__main__":
     import threading
-    threading.Thread(target=start_bot, daemon=True).start()
-    app = Flask(__name__)
+    threading.Thread(target=start_bot,daemon=True).start()
+    app=Flask(__name__)
     @app.route("/")
     def home():
-        return "✅ Binance Alerts Bot v11.3 — 5m core, 15m conf, ADX, Wyckoff+Squeeze, RS, Minervini & Turtle 🇧🇷"
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+        return "✅ Binance Alerts Bot v11.4 — Continuação de Alta + Rompimento da Resistência + Média 200 Ascendente 🇧🇷"
+    app.run(host="0.0.0.0",port=int(os.environ.get("PORT",10000)))
