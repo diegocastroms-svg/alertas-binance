@@ -1,14 +1,14 @@
 import os, asyncio, time, math
 from urllib.parse import urlencode
 from collections import defaultdict, deque
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 import aiohttp
 from flask import Flask
 
 # ----------------- Config -----------------
 BINANCE_HTTP = "https://api.binance.com"   # .com para evitar erro 451
-INTERVAL = "5m"                             # timeframe principal (rápido)
+INTERVAL = "5m"                             # timeframe principal
 CONFIRM_INTERVAL = "15m"                    # timeframe de confirmação
 SHORTLIST_N = 40                            # até 40 pares
 COOLDOWN_SEC = 15 * 60                      # 1 alerta por símbolo a cada 15 min
@@ -19,12 +19,12 @@ MIN_QV  = 300_000.0                         # filtro 24h inicial (quote volume)
 EMA_FAST = 9
 MA_SLOW  = 20
 MA_MED   = 50
-MA_LONG  = 200                               # MA200 (filtro global)
+MA_LONG  = 200
 RSI_LEN  = 14
 VOL_MA   = 9
 HH_WIN   = 20
 
-# MACD (clássico; pode ajustar p/ (8,21,5) se quiser mais sensível)
+# MACD
 MACD_FAST   = 12
 MACD_SLOW   = 26
 MACD_SIGNAL = 9
@@ -41,7 +41,7 @@ CHAT_ID = os.getenv("CHAT_ID", "").strip()
 WEBHOOK_BASE = os.getenv("WEBHOOK_BASE", "").rstrip("/")
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "")
 
-# --------------- Utils / Alert ---------------
+# ----------------- Utils -----------------
 def fmt_symbol(symbol: str) -> str:
     return symbol[:-4] + "/USDT" if symbol.endswith("USDT") else symbol
 
@@ -51,6 +51,10 @@ def binance_links(symbol: str) -> str:
     b = f"https://www.binance.com/en/trade?type=spot&symbol={base}_USDT"
     return f'🔗 <a href="{a}">Abrir (A)</a> | <a href="{b}">Abrir (B)</a>'
 
+def ts_brazil_now() -> str:
+    # UTC-3 com 🇧🇷 (sem texto “Brasília”)
+    return (datetime.now(timezone.utc) - timedelta(hours=3)).strftime("%Y-%m-%d %H:%M:%S") + " 🇧🇷"
+
 async def send_alert(session: aiohttp.ClientSession, text: str):
     # (1) webhook opcional
     if WEBHOOK_BASE and WEBHOOK_SECRET:
@@ -59,7 +63,7 @@ async def send_alert(session: aiohttp.ClientSession, text: str):
                 await r.text()
         except Exception as e:
             print("Webhook error:", e)
-    # (2) Telegram direto (HTML maiúsculo)
+    # (2) Telegram direto (HTML)
     if TELEGRAM_TOKEN and CHAT_ID:
         try:
             url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -69,7 +73,7 @@ async def send_alert(session: aiohttp.ClientSession, text: str):
         except Exception as e:
             print("Telegram error:", e)
 
-# --------------- Indicadores (sem pandas) ---------------
+# ----------------- Indicadores (sem pandas) -----------------
 def sma(seq, n):
     out, q, s = [], deque(), 0.0
     for x in seq:
@@ -146,7 +150,6 @@ def adx(high, low, close, period=ADX_LEN):
         pdm[i] = up   if (up > down and up > 0) else 0.0
         ndm[i] = down if (down > up and down > 0) else 0.0
         tr[i]  = max(high[i]-low[i], abs(high[i]-close[i-1]), abs(low[i]-close[i-1]))
-
     atr  = [0.0]*n
     pdi  = [0.0]*n
     ndi  = [0.0]*n
@@ -154,7 +157,6 @@ def adx(high, low, close, period=ADX_LEN):
     atr[period] = sum(tr[1:period+1])
     spdm = sum(pdm[1:period+1])
     sndm = sum(ndm[1:period+1])
-
     for i in range(period+1, n):
         atr[i]  = atr[i-1] - (atr[i-1] / period) + tr[i]
         spdm    = spdm - (spdm / period) + pdm[i]
@@ -162,7 +164,6 @@ def adx(high, low, close, period=ADX_LEN):
         pdi[i]  = 100.0 * (spdm / (atr[i] + 1e-12))
         ndi[i]  = 100.0 * (sndm / (atr[i] + 1e-12))
         dx[i]   = 100.0 * abs(pdi[i] - ndi[i]) / (pdi[i] + ndi[i] + 1e-12)
-
     adx_vals = ema(dx, period)
     return adx_vals
 
@@ -191,12 +192,65 @@ def compute_indicators(open_, high, low, close, volume):
     dif, dea, hist = macd(close)
     adx_vals = adx(high, low, close, ADX_LEN)
     obv_vals = obv(close, volume)
-    return ema9, ma20, ma50, ma200, rsi14, vol_ma, vol_sd, hh20, res20, res50, dif, dea, hist, adx_vals, obv_vals
+    # Bollinger Bands (20, 2)
+    bb_std  = rolling_std(close, 20)
+    bb_mid  = ma20
+    bb_up   = [bb_mid[i] + 2*bb_std[i] for i in range(len(close))]
+    bb_low  = [bb_mid[i] - 2*bb_std[i] for i in range(len(close))]
+    return (ema9, ma20, ma50, ma200, rsi14, vol_ma, vol_sd, hh20, res20, res50,
+            dif, dea, hist, adx_vals, obv_vals, bb_mid, bb_up, bb_low)
 
-# --------------- Regras (v9 PRO FAST) ---------------
+# ----------------- Mensagens / Emojis -----------------
+def kind_emoji(kind: str) -> str:
+    return {
+        "TENDÊNCIA_INICIANDO":"🌅","TENDÊNCIA_REAL":"💎","TENDÊNCIA_CONFIRMADA":"💎",
+        "REVERSÃO":"🔄","REVERSÃO_FORTE":"🧲","REVERSÃO_BB_ALTA":"🧲",
+        "EXAUSTAO_BB_ALTA":"⚠️","EXAUSTAO_BB_BAIXA":"⚠️",
+        "CONTINUAÇÃO_ALTA":"🔁",
+        "PUMP":"🚀","BREAKOUT":"💥","TENDÊNCIA":"📈",
+        "RESISTÊNCIA_CURTA":"🧱","RESISTÊNCIA_LONGA":"🏗️",
+        "SUPORTE_200":"🟨","ROMPIMENTO_200":"🟩",
+        "QUEDA_EXAGERADA":"🧊",
+        "PERDA_FORÇA":"⚠️","SAÍDA_TÉCNICA":"🔻","SAÍDA_CONFIRMADA":"❌",
+        "MERCADO_ESTICADO":"⛔️"
+    }.get(kind, "📌")
+
+def arrow_for_kind(kind: str) -> str:
+    ups = {"TENDÊNCIA_INICIANDO","TENDÊNCIA_REAL","TENDÊNCIA_CONFIRMADA",
+           "BREAKOUT","PUMP","CONTINUAÇÃO_ALTA","ROMPIMENTO_200","REVERSÃO_BB_ALTA"}
+    downs = {"SAÍDA_TÉCNICA","SAÍDA_CONFIRMADA","PERDA_FORÇA","EXAUSTAO_BB_ALTA","EXAUSTAO_BB_BAIXA","MERCADO_ESTICADO"}
+    if kind in ups: return "⬆️"
+    if kind in downs: return "⬇️"
+    return "➜"
+
+def build_msg(symbol: str, kind: str, price: float, bullets: str) -> str:
+    star = "⭐"
+    sym_pretty = fmt_symbol(symbol)
+    arrow = arrow_for_kind(kind)
+    title = f"{star} {sym_pretty} {arrow} — {kind.replace('_',' ')}"
+    ts = ts_brazil_now()
+    return (
+        f"{title}\n"
+        f"💰 <code>{price:.6f}</code>\n"
+        f"🧠 {bullets}\n"
+        f"⏰ {ts}\n"
+        f"{binance_links(symbol)}"
+    )
+
+def pick_priority_kind(signals):
+    prio = {
+        "TENDÊNCIA_INICIANDO":0,"TENDÊNCIA_REAL":1,"TENDÊNCIA_CONFIRMADA":1,"PUMP":2,"BREAKOUT":3,
+        "REVERSÃO_BB_ALTA":4,"REVERSÃO_FORTE":5,"REVERSÃO":6,"CONTINUAÇÃO_ALTA":7,
+        "ROMPIMENTO_200":8,"RESISTÊNCIA_CURTA":9,"RESISTÊNCIA_LONGA":10,"SUPORTE_200":11,"QUEDA_EXAGERADA":12,
+        "MERCADO_ESTICADO":13,"PERDA_FORÇA":14,"EXAUSTAO_BB_ALTA":15,"EXAUSTAO_BB_BAIXA":15,
+        "SAÍDA_TÉCNICA":16,"SAÍDA_CONFIRMADA":17,"TENDÊNCIA":18
+    }
+    return sorted(signals, key=lambda x: prio.get(x[0], 99))[0][0] if signals else "SINAL"
+
+# ----------------- Regras -----------------
 def check_signals(symbol, open_, close, high, low, volume,
                   ema9, ma20, ma50, ma200, rsi14, vol_ma, vol_sd, hh20, res20, res50,
-                  dif, dea, hist, adx_vals, obv_vals,
+                  dif, dea, hist, adx_vals, obv_vals, bb_mid, bb_up, bb_low,
                   # 15m confirmação
                   ema9_15=None, ma20_15=None,
                   drop24h_pct=None):
@@ -217,17 +271,17 @@ def check_signals(symbol, open_, close, high, low, volume,
     obv_up          = (len(obv_vals)>5 and obv_vals[last] > obv_vals[max(0,last-5)])
     near200         = (abs(close[last] - ma200[last]) / (ma200[last] + 1e-12) < 0.005) or (low[last] <= ma200[last] <= high[last])
 
-    # Filtros de qualidade (rápidos)
-    no_top_div = not (close[last] > close[last-2] and rsi14[last] < rsi14[last-2])  # evita divergência de topo
-    candle_verde = close[last] > open_[last]                                        # exige candle verde
-    vol_inteligente = volume[last] >= (vol_ma[last] + vol_sd[last])                 # spike real (média + 1 desvio)
+    # Filtros de qualidade
+    no_top_div   = not (close[last] > close[last-2] and rsi14[last] < rsi14[last-2])
+    candle_verde = close[last] > open_[last]
+    vol_inteligente = volume[last] >= (vol_ma[last] + vol_sd[last])
 
-    # Confirmação 15m (se disponível)
+    # Confirmação 15m
     conf15_ok = None
     if ema9_15 is not None and ma20_15 is not None and len(ema9_15) and len(ma20_15):
         conf15_ok = (ema9_15[-1] > ma20_15[-1])
 
-    # ---------- Módulo Reversão pós-queda (24h) ----------
+    # ---------- Reversão pós-queda (24h) ----------
     if drop24h_pct is not None:
         if drop24h_pct <= DROP_PCT_TRIGGER:
             out.append(("QUEDA_EXAGERADA", f"Queda {drop24h_pct:.1f}% nas 24h — monitorando rebote"))
@@ -237,28 +291,47 @@ def check_signals(symbol, open_, close, high, low, volume,
             and candle_verde):
             out.append(("REVERSÃO_FORTE", f"RSI {rsi14[prev]:.1f}→{rsi14[last]:.1f} | Vol>1.3×média | Candle de reversão"))
 
-    # ---------- 🌅 Tendência de alta INICIANDO (alerta imediato no cruzamento 5m) ----------
+    # ---------- Bollinger: Reversão / Continuação / Esticado ----------
+    # Reversão de alta por BB: saiu da banda inferior e fechou acima da média/EMA9
+    if (close[prev] < bb_low[prev] and close[last] > bb_mid[last]
+        and ema9[last] > ma20[last] and rsi14[last] >= 50):
+        out.append(("REVERSÃO_BB_ALTA", f"Saída da BB inferior + fechamento acima da média | RSI {rsi14[last]:.1f}"))
+
+    # Continuação da alta (substitui o antigo RETESTE): toque na média com reação dentro da BB
+    touched_ma20 = any(low[i] <= ma20[i] for i in range(max(0, last-2), last+1))
+    touched_ema9 = any(low[i] <= ema9[i] for i in range(max(0, last-2), last+1))
+    if (price_above_200
+        and (touched_ma20 or touched_ema9)
+        and close[last] > ema9[last]
+        and rsi14[last] > 55
+        and volume[last] >= vol_ma[last] * 1.00
+        and close[last] > bb_low[last] and close[last] < bb_up[last]*0.98):  # evita topo
+        out.append(("CONTINUAÇÃO_ALTA", f"Toque na média + reação | RSI {rsi14[last]:.1f} | Vol>=média | BB dentro"))
+
+    # Mercado esticado (evitar comprar topo): fora da BB superior + RSI alto + ADX forte
+    if (close[last] >= bb_up[last] and rsi14[last] >= 70 and adx_ok):
+        out.append(("MERCADO_ESTICADO", f"Acima da BB superior | RSI {rsi14[last]:.1f} | ADX {adx_val:.1f} — possível correção"))
+
+    # ---------- 🌅 Tendência de alta INICIANDO (alerta imediato 5m) ----------
     if cross_9_20_up and price_above_200 and rsi14[last] >= 50 and candle_verde and no_top_div:
         notas = []
         if conf15_ok is False:
-            notas.append("🕓 Aguardando confirmação no 15m — início antecipado.")
+            notas.append("Aguardando confirmação no 15m — início antecipado.")
         if not adx_ok:
-            notas.append("🕓 Aguardando confirmação do ADX — tendência em formação.")
-        nota_txt = ("\n" + "\n".join(notas)) if notas else ""
-        out.append(("TENDÊNCIA_INICIANDO", f"Tendência de alta iniciando (5m) | EMA9>MA20 | RSI {rsi14[last]:.1f}{nota_txt}"))
+            notas.append("Aguardando confirmação do ADX — tendência em formação.")
+        nota_txt = (" | " + " / ".join(notas)) if notas else ""
+        out.append(("TENDÊNCIA_INICIANDO", f"EMA9>MA20 | RSI {rsi14[last]:.1f}{nota_txt}"))
 
-    # ---------- 💎 Tendência CONFIRMADA (confluência 5m + 15m OU ADX) ----------
+    # ---------- 💎 Tendência CONFIRMADA (5m + 15m OU ADX) ----------
     medias_alinhadas_5m = (ema9[last] > ma20[last] > ma50[last] > ma200[last])
     rsi_ok = 55 <= rsi14[last] <= 70
     vol_ok = volume[last] >= vol_ma[last] * 1.1
     confirmado = (conf15_ok is True) or adx_ok
-
-    if price_above_200 and medias_alinhadas_5m and confirmado and adx_rising \
-       and macd_up and obv_up and rsi_ok and vol_ok:
+    if price_above_200 and medias_alinhadas_5m and confirmado and adx_rising and macd_up and obv_up and rsi_ok and (vol_ok or vol_inteligente):
         label_conf = "15m" if (conf15_ok is True and not adx_ok) else ("ADX" if (adx_ok and not conf15_ok) else "15m + ADX")
         out.append(("TENDÊNCIA_REAL", f"Confirmação: {label_conf} | Médias 5m alinhadas | ADX {adx_val:.1f}↑ | MACD | OBV↑ | RSI {rsi14[last]:.1f}"))
 
-    # ---------- Clássicos (com filtro MA200 para alta) ----------
+    # ---------- Clássicos ----------
     if (price_above_200
         and volume[last] > (vol_ma[last] * 2.0)
         and rsi14[last] > 60
@@ -287,28 +360,18 @@ def check_signals(symbol, open_, close, high, low, volume,
         and volume[last] >= vol_ma[last] * 1.10):
         out.append(("REVERSÃO", f"RSI {prev_rsi:.1f}→{rsi14[last]:.1f} | EMA9 cruzou MA20 | Vol>média | >MA200"))
 
-    touched_ma20 = any(low[i] <= ma20[i] for i in range(max(0, last-2), last+1))
-    touched_ema9 = any(low[i] <= ema9[i] for i in range(max(0, last-2), last+1))
-    if (price_above_200
-        and ma20[last] > ma50[last]
-        and (touched_ma20 or touched_ema9)
-        and close[last] > ema9[last]
-        and rsi14[last] > 55
-        and volume[last] >= vol_ma[last] * 1.00):
-        out.append(("RETESTE", f"Retomada após toque na média | RSI {rsi14[last]:.1f} | Vol>=média | >MA200"))
-
-    # ---------- Resistências & MA200 ----------
+    # Resistências & MA200
     if close[last] >= res20[last]:
-        out.append(("RESISTÊNCIA_CURTA", f"Fechou acima da resistência 20 ({res20[last]:.4f})"))
+        out.append(("RESISTÊNCIA_CURTA", f"Fechamento acima da resistência 20 ({res20[last]:.4f})"))
     if close[last] >= res50[last]:
-        out.append(("RESISTÊNCIA_LONGA", f"Fechou acima da resistência 50 ({res50[last]:.4f})"))
+        out.append(("RESISTÊNCIA_LONGA", f"Fechamento acima da resistência 50 ({res50[last]:.4f})"))
 
     if near200:
         out.append(("SUPORTE_200", f"Preço encostando na MA200 ({ma200[last]:.4f})"))
     if close[prev] < ma200[prev] and close[last] > ma200[last] and volume[last] > vol_ma[last] * 1.1:
         out.append(("ROMPIMENTO_200", "Cruzou MA200 ↑ | Vol>média"))
 
-    # ---------- Saídas (alertas de venda / fraqueza) ----------
+    # Saídas / fraqueza
     if rsi14[prev] > 55 and rsi14[last] < 50 and ema9[last] >= ma20[last]:
         out.append(("PERDA_FORÇA", f"RSI {rsi14[prev]:.1f}→{rsi14[last]:.1f} — momentum caindo"))
     if cross_9_20_dn:
@@ -318,26 +381,21 @@ def check_signals(symbol, open_, close, high, low, volume,
 
     return out
 
-# --------------- Binance ---------------
+# ----------------- Binance -----------------
 async def get_klines(session, symbol: str, interval="5m", limit=200):
     params = {"symbol": symbol, "interval": interval, "limit": limit}
     url = f"{BINANCE_HTTP}/api/v3/klines?{urlencode(params)}"
     async with session.get(url, timeout=12) as r:
         r.raise_for_status()
         data = await r.json()
-
-    # 🔒 Evita usar vela ainda aberta (k[6] = close time ms)
+    # 🔒 Evitar usar vela aberta (k[6] close time ms)
     now_ms = int(time.time() * 1000)
     if data and now_ms < int(data[-1][6]):
         data = data[:-1]
-
     open_, high, low, close, volume = [], [], [], [], []
     for k in data:
-        open_.append(float(k[1]))
-        high.append(float(k[2]))
-        low.append(float(k[3]))
-        close.append(float(k[4]))
-        volume.append(float(k[5]))
+        open_.append(float(k[1])); high.append(float(k[2])); low.append(float(k[3]))
+        close.append(float(k[4])); volume.append(float(k[5]))
     return open_, high, low, close, volume
 
 async def get_24h(session):
@@ -361,7 +419,7 @@ def shortlist_from_24h(tickers, n=400):
     usdt.sort(key=lambda x: (abs(x[1]), x[2]), reverse=True)
     return [x[0] for x in usdt[:n]]
 
-# --------------- Anti-spam ---------------
+# ----------------- Anti-spam -----------------
 class Monitor:
     def __init__(self):
         self.cooldown = defaultdict(lambda: 0.0)
@@ -370,32 +428,15 @@ class Monitor:
     def mark(self, symbol: str):
         self.cooldown[symbol] = time.time()
 
-def kind_emoji(kind: str) -> str:
-    return {
-        "TENDÊNCIA_INICIANDO":"🌅","TENDÊNCIA_REAL":"💎",
-        "PUMP":"🚀","BREAKOUT":"💥","TENDÊNCIA":"📈","REVERSÃO":"🔄",
-        "RETESTE":"♻️","RESISTÊNCIA_CURTA":"🧱","RESISTÊNCIA_LONGA":"🏗️",
-        "SUPORTE_200":"🟨","ROMPIMENTO_200":"🟩",
-        "QUEDA_EXAGERADA":"🧊","REVERSÃO_FORTE":"🧲",
-        "PERDA_FORÇA":"⚠️","SAÍDA_TÉCNICA":"🔻","SAÍDA_CONFIRMADA":"❌"
-    }.get(kind,"📌")
-
-def pick_priority_kind(signals):
-    prio = {
-        "TENDÊNCIA_INICIANDO":0,"TENDÊNCIA_REAL":1,"PUMP":2,"BREAKOUT":3,"REVERSÃO":4,"REVERSÃO_FORTE":5,
-        "RETESTE":7,"ROMPIMENTO_200":8,"RESISTÊNCIA_CURTA":9,"RESISTÊNCIA_LONGA":10,"SUPORTE_200":11,"QUEDA_EXAGERADA":12,
-        "PERDA_FORÇA":13,"SAÍDA_TÉCNICA":14,"SAÍDA_CONFIRMADA":15,"TENDÊNCIA":16
-    }
-    return sorted(signals, key=lambda x: prio.get(x[0], 99))[0][0] if signals else "SINAL"
-
-# --------------- Worker por símbolo ---------------
+# ----------------- Worker -----------------
 async def candle_worker(session, symbol: str, monitor: Monitor, drop_map):
     try:
         # 5m (principal)
         open_, high, low, close, volume = await get_klines(session, symbol, interval=INTERVAL, limit=200)
-        ema9, ma20, ma50, ma200, rsi14, vol_ma, vol_sd, hh20, res20, res50, dif, dea, hist, adx_vals, obv_vals = compute_indicators(open_, high, low, close, volume)
+        (ema9, ma20, ma50, ma200, rsi14, vol_ma, vol_sd, hh20, res20, res50,
+         dif, dea, hist, adx_vals, obv_vals, bb_mid, bb_up, bb_low) = compute_indicators(open_, high, low, close, volume)
 
-        # 15m (confirmação: apenas EMA9 e MA20)
+        # 15m (confirmação)
         open15, high15, low15, close15, vol15 = await get_klines(session, symbol, interval=CONFIRM_INTERVAL, limit=200)
         ema9_15 = ema(close15, EMA_FAST) if close15 else []
         ma20_15 = sma(close15, MA_SLOW) if close15 else []
@@ -403,37 +444,27 @@ async def candle_worker(session, symbol: str, monitor: Monitor, drop_map):
         drop24 = drop_map.get(symbol)
         signals = check_signals(symbol, open_, close, high, low, volume,
                                 ema9, ma20, ma50, ma200, rsi14, vol_ma, vol_sd, hh20, res20, res50,
-                                dif, dea, hist, adx_vals, obv_vals,
-                                ema9_15=ema9_15, ma20_15=ma20_15,
-                                drop24h_pct=drop24)
+                                dif, dea, hist, adx_vals, obv_vals, bb_mid, bb_up, bb_low,
+                                ema9_15=ema9_15, ma20_15=ma20_15, drop24h_pct=drop24)
 
         if signals and monitor.allowed(symbol):
             last_price = close[-1]
-            ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
             first_kind = pick_priority_kind(signals)
-            emoji = kind_emoji(first_kind)
-            sym_pretty = fmt_symbol(symbol)
-            bullets = "\n".join([f"• {kind_emoji(k)} <b>{k}</b>: {desc}" for k, desc in signals])
-            txt = (
-                f"{emoji} <b>{sym_pretty} — {first_kind.replace('_',' ')} DETECTADO!</b>\n"
-                f"💰 Preço: <code>{last_price:.6f}</code>\n"
-                f"🧠 Sinal técnico:\n{bullets}\n\n"
-                f"⏰ {ts}\n"
-                f"{binance_links(symbol)}"
-            )
+            bullets = " | ".join([f"{kind_emoji(k)} {k}: {desc}" for k, desc in signals])
+            txt = build_msg(symbol, first_kind, last_price, bullets)
             await send_alert(session, txt)
             monitor.mark(symbol)
     except Exception as e:
         print("candle_worker error", symbol, e)
 
-# --------------- Loop principal ---------------
+# ----------------- Main loop -----------------
 async def main():
     monitor = Monitor()
     async with aiohttp.ClientSession() as session:
         tickers = await get_24h(session)
         watchlist = shortlist_from_24h(tickers, SHORTLIST_N)
 
-        # mapa de variação 24h para módulo de reversão pós-queda
+        # variação 24h para módulo de reversão pós-queda
         drop_map = {}
         for t in tickers:
             s = t.get("symbol","")
@@ -443,13 +474,12 @@ async def main():
                 except:
                     drop_map[s] = None
 
-        ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-        await send_alert(session, f"<b>💻 Modo FAST ativo</b> — monitorando {len(watchlist)} pares SPOT (5m + 15m) | {ts}")
-        print(f"💻 Modo FAST ativo — analisando {len(watchlist)} pares (5m + 15m).")
+        await send_alert(session, f"<b>💻 v10.1 PRO Bollinger PLUS</b> — {len(watchlist)} pares (5m + 15m/ADX + BB + 🇧🇷) | {ts_brazil_now()}")
+        print(f"💻 v10.1 PRO Bollinger PLUS — analisando {len(watchlist)} pares.")
 
         while True:
             await asyncio.gather(*[candle_worker(session, s, monitor, drop_map) for s in watchlist])
-            await asyncio.sleep(120)  # checagem a cada ~2 min (evita rate limit; vela 5m fechada é respeitada)
+            await asyncio.sleep(120)  # checagem a cada ~2 min (respeita vela fechada)
             try:
                 tickers = await get_24h(session)
                 watchlist = shortlist_from_24h(tickers, SHORTLIST_N)
@@ -464,7 +494,7 @@ async def main():
             except Exception as e:
                 print("Erro ao atualizar shortlist:", e)
 
-# --------------- Execução paralela Flask + bot ---------------
+# ----------------- Execução paralela Flask + bot -----------------
 def start_bot():
     try:
         asyncio.run(main())
@@ -478,5 +508,5 @@ if __name__ == "__main__":
     app = Flask(__name__)
     @app.route("/")
     def home():
-        return "✅ Binance Alerts Bot — v9 PRO FAST (5m + 15m, alerta antecipado + confirmação 15m/ADX) ativo!"
+        return "✅ Binance Alerts Bot — v10.1 PRO Bollinger PLUS (5m + 15m/ADX + BB + 🇧🇷) ativo!"
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
