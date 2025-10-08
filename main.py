@@ -8,7 +8,7 @@ from flask import Flask
 # ----------------- Config -----------------
 BINANCE_HTTP = "https://api.binance.com"
 INTERVAL = "5m"
-SHORTLIST_N = 40
+SHORTLIST_N = 65                    # ↑ de 40 para 65 pares
 COOLDOWN_SEC = 15 * 60
 MIN_PCT = 1.0
 MIN_QV  = 300_000.0
@@ -19,6 +19,7 @@ MA_MED   = 50
 MA_LONG  = 200
 RSI_LEN  = 14
 VOL_MA   = 9
+BB_LEN   = 20
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 CHAT_ID = os.getenv("CHAT_ID", "").strip()
@@ -97,7 +98,7 @@ def rsi_wilder(closes,period=14):
 def compute_indicators(o,h,l,c,v):
     ema9=ema(c,EMA_FAST);ma20=sma(c,MA_SLOW);ma50=sma(c,MA_MED);ma200=sma(c,MA_LONG)
     rsi14=rsi_wilder(c,RSI_LEN);vol_ma=sma(v,VOL_MA)
-    bb_std=rolling_std(c,20);bb_up=[ma20[i]+2*bb_std[i] for i in range(len(bb_std))]
+    bb_std=rolling_std(c,BB_LEN);bb_up=[ma20[i]+2*bb_std[i] for i in range(len(bb_std))]
     bb_low=[ma20[i]-2*bb_std[i] for i in range(len(bb_std))]
     return ema9,ma20,ma50,ma200,rsi14,vol_ma,bb_up,bb_low
 
@@ -122,7 +123,7 @@ def shortlist_from_24h(tickers,n=400):
     for t in tickers:
         s=t.get("symbol","")
         if not s.endswith("USDT"):continue
-        # SPOT only / sem futuros, perpétuos e tokens alavancados
+        # SPOT only / sem futuros, perpétuos, alavancados e fiat/stables secundárias
         blocked=("UP","DOWN","BULL","BEAR","PERP","USD_","_PERP","_BUSD","_FDUSD","_TUSD","_EUR","_TRY","_BRL","_USDC","_DAI","_BTC")
         if any(x in s for x in blocked):continue
         pct=float(t.get("priceChangePercent","0") or 0.0)
@@ -139,7 +140,8 @@ def kind_emoji(kind):
         "MERCADO_ESTICADO":"⚠️",
         "PERDENDO_FORÇA":"🟠",
         "SAÍDA":"🚪",
-        "REVERSÃO":"↕️"  # mantido do 10.4.2 (reversão precoce)
+        "PULLBACK":"♻️",          # (reversão real de baixa -> alta)
+        "REVERSÃO_LOCAL":"↕️"      # (reteste/toque na média e retomada)
     }.get(kind,"📌")
 
 def build_msg(symbol, kind, price, bullets):
@@ -155,11 +157,8 @@ def build_msg(symbol, kind, price, bullets):
 # ----------------- Monitor: cooldown + estado de tendência -----------------
 class Monitor:
     def __init__(self):
-        # cooldown por (símbolo, tipo)
-        self.cooldown = defaultdict(lambda: 0.0)
-        # estados por símbolo
-        # ex: {"BTCUSDT": {"stage":"iniciando/confirmada/topo/perdendo", "bar": idx}}
-        self.trend = {}
+        self.cooldown = defaultdict(lambda: 0.0)  # por (símbolo, tipo)
+        self.trend = {}  # estado por símbolo
 
     def allowed(self, symbol, kind):
         return time.time() - self.cooldown[(symbol, kind)] >= COOLDOWN_SEC
@@ -186,8 +185,7 @@ def is_top_stretched(c, bb_up, rsi14, i):
     return (c[i] > bb_up[i] and rsi14[i] >= 70)
 
 def is_weakening(ema9, ma20, rsi14, v, vol_ma, i):
-    # fraqueza: RSI caindo, volume abaixo da média, distância 9-20 diminuindo
-    if i < 2: return False
+    if i < 1: return False
     dist_now  = ema9[i] - ma20[i]
     dist_prev = ema9[i-1] - ma20[i-1]
     return (rsi14[i] < rsi14[i-1] and
@@ -195,7 +193,6 @@ def is_weakening(ema9, ma20, rsi14, v, vol_ma, i):
             dist_now < dist_prev)
 
 def still_weak(ema9, ma20, rsi14, i):
-    # persistência de fraqueza: RSI < 50 OU ema9 começando a ceder sobre ma20
     return (rsi14[i] < 50) or (ema9[i] < ma20[i])
 
 # ----------------- Worker -----------------
@@ -208,23 +205,32 @@ async def candle_worker(session,symbol,monitor):
 
         signals=[]
 
-        # --- Sinais base do 10.4.2 (mantidos) ---
-        cross_up = (ema9[last-1] <= ma20[last-1] and ema9[last] > ma20[last])
+        # --- TENDÊNCIA INICIANDO (tolerância 1 candle) ---
+        cross_now = ema9[last-1] <= ma20[last-1] and ema9[last] > ma20[last]
+        crossed_last = ema9[last] > ma20[last] and ema9[last-1] <= ma20[last-1]
         price_above_200 = c[last] > ma200[last]
+        if (cross_now or crossed_last) and price_above_200 and rsi14[last] > 50 and v[last] >= vol_ma[last]:
+            signals.append(("TENDÊNCIA_INICIANDO", f"EMA9 cruzou MA20 ↑ | RSI {rsi14[last]:.1f} | Vol≥média"))
 
-        if cross_up and price_above_200 and rsi14[last] > 50:
-            signals.append(("TENDÊNCIA_INICIANDO", f"EMA9 cruzou MA20 ↑ | RSI {rsi14[last]:.1f}"))
+        # --- PULLBACK (reversão real de baixa -> alta) ---
+        # vindo de baixa (ema9<ma20), cruza pra cima + RSI 45→50 + volume 1.2x + candle anterior abaixo da BB baixa
+        if (ema9[prev] < ma20[prev] and ema9[last] > ma20[last] and
+            rsi14[prev] < 45 <= rsi14[last] and v[last] > vol_ma[last]*1.2 and
+            c[prev] < bb_low[prev]):
+            signals.append(("PULLBACK", f"EMA9 cruzou MA20 ↑ | RSI {rsi14[prev]:.1f}→{rsi14[last]:.1f} | Vol {v[last]/max(1e-9,vol_ma[last]):.1f}x | Vindo de BB inf"))
 
-        # Reversão precoce (mantida): RSI 45→50 + Vol > 1.2x + saída da banda inferior
-        if (c[prev] < (ma20[prev] - 2*rolling_std(c,20)[prev]) and 
-            rsi14[prev] < 45 <= rsi14[last] and v[last] > vol_ma[last]*1.2):
-            signals.append(("REVERSÃO", f"RSI {rsi14[prev]:.1f}→{rsi14[last]:.1f} | Vol {v[last]/max(1e-9,vol_ma[last]):.1f}x média | Saindo do fundo"))
+        # --- REVERSÃO_LOCAL (reteste na média e retomada na alta) ---
+        if (ema9[last] > ma20[last] > ma50[last] and
+            (l[last] <= ema9[last] or l[last] <= ma20[last]) and
+            c[last] > ema9[last] and
+            rsi14[last] > 55 and v[last] >= vol_ma[last]):
+            signals.append(("REVERSÃO_LOCAL", f"Reteste na média + retomada | RSI {rsi14[last]:.1f} | Vol≥média"))
 
-        # Topo / mercado esticado
+        # --- MERCADO ESTICADO (topo provável) ---
         if is_top_stretched(c, bb_up, rsi14, last):
             signals.append(("MERCADO_ESTICADO", f"Acima da BB sup | RSI {rsi14[last]:.1f} — possível topo"))
 
-        # --------- Gerenciamento de ESTÁGIOS (sequência pedida) ---------
+        # --------- Gerenciamento de ESTÁGIOS (sequência confirmada → topo → fraqueza → saída) ---------
         state = monitor.get_stage(symbol)
 
         # 1) Ao detectar INICIANDO, grava estágio "iniciando"
@@ -241,7 +247,6 @@ async def candle_worker(session,symbol,monitor):
                                     f"Médias alinhadas | RSI {rsi14[last]:.1f} | Vol {v[last]/max(1e-9,vol_ma[last]):.1f}x")
                     await send_alert(session, msg)
                     monitor.mark(symbol, "TENDÊNCIA_CONFIRMADA")
-                # atualiza estágio para "confirmada"
                 monitor.set_stage(symbol, "confirmada", last)
 
         # 3) Ao detectar topo (MERCADO_ESTICADO) → estágio "topo"
@@ -270,11 +275,9 @@ async def candle_worker(session,symbol,monitor):
                                     f"Fraqueza persistente | RSI {rsi14[last]:.1f} {'<50' if rsi14[last]<50 else ''} | {'EMA9<MA20' if ema9[last]<ma20[last] else 'pressão vendedora'}")
                     await send_alert(session, msg)
                     monitor.mark(symbol, "SAÍDA")
-                # encerra o ciclo para o símbolo
                 monitor.clear_stage(symbol)
 
-        # --------- Envio dos sinais "base" (com cooldown por tipo) ---------
-        # Envia apenas o PRIMEIRO sinal base (prioridade visual) se permitido
+        # --------- Envio do 1º sinal do ciclo (com cooldown por tipo) ---------
         if signals:
             k0, d0 = signals[0]
             if monitor.allowed(symbol, k0):
@@ -291,8 +294,8 @@ async def main():
     async with aiohttp.ClientSession() as session:
         tickers=await get_24h(session)
         watchlist=shortlist_from_24h(tickers,SHORTLIST_N)
-        await send_alert(session,f"💻 v10.9 — SPOT ONLY + Ciclo de Tendência (início→confirmação→topo→fraqueza→saída) | {len(watchlist)} pares | {ts_brazil_now()}")
-        print(f"💻 v10.9 — analisando {len(watchlist)} pares SPOT.")
+        await send_alert(session,f"💻 v10.10 — SPOT ONLY | {len(watchlist)} pares | Ciclo completo (início→confirmação→topo→fraqueza→saída) | {ts_brazil_now()}")
+        print(f"💻 v10.10 — analisando {len(watchlist)} pares SPOT.")
         while True:
             await asyncio.gather(*[candle_worker(session,s,monitor) for s in watchlist])
             await asyncio.sleep(180)
@@ -312,5 +315,5 @@ if __name__=="__main__":
     threading.Thread(target=start_bot,daemon=True).start()
     app=Flask(__name__)
     @app.route("/")
-    def home():return "✅ Binance Alerts Bot v10.9 — Ciclo de Tendência ativo 🇧🇷"
+    def home():return "✅ Binance Alerts Bot v10.10 — Ciclo de Tendência ativo 🇧🇷"
     app.run(host="0.0.0.0",port=int(os.environ.get("PORT",10000)))
