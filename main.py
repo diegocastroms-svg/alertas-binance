@@ -214,3 +214,26 @@ async def candle_worker(session, symbol, monitor: Monitor):
 
     except Exception as e:
         print("worker error", symbol, e)
+
+# ----------------- Flask -----------------
+from flask import Flask
+
+app = Flask(__name__)
+
+@app.route("/")
+def home():
+    return "✅ Binance Alerts Bot v15 — Ativo e monitorando (5m/15m/1h/4h) 🇧🇷"
+
+def start_bot():
+    # roda o loop assíncrono do bot em uma thread separada
+    import asyncio
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(main())
+
+if __name__ == "__main__":
+    # inicia o bot em background e mantém o Flask vivo no processo principal
+    import threading, os
+    threading.Thread(target=start_bot, daemon=True).start()
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
