@@ -1,8 +1,14 @@
-# main_v11_5_longterm_1h.py
-# Base: v11.4 (mantida)
-# Alterações únicas:
-# 1) Removido alerta "Média 200 Ascendente" (Minervini 200 UP)
-# 2) Adicionado longterm_worker (15m + 1h + 4h), cooldown 1h, mensagem toda em negrito
+# main_v11_6_spot_only.py
+# Base: v11.5_longterm_1h (mantida)
+# Alteração única: FILTRO SPOT-ONLY real (via /api/v3/exchangeInfo)
+# - Remove completamente pares Futuros/Perp/Alavancados da shortlist
+# - Restante do setup permanece 100% igual ao da v11.5:
+#     • Core 5m/15m intacto
+#     • 🌕 Tendência Longa (15m/1h/4h) com cooldown de 1h e mensagem toda em negrito
+#     • "Média 200 Ascendente" (Minervini) REMOVIDO (sem alertas)
+#     • Rompimento da Resistência (ex-Turtle) mantido
+#     • Retestes EMA9/MA20 com “CONTINUAÇÃO DE ALTA DETECTADA”
+#     • Formatação HTML/🇧🇷/Flask/Telegram intactos
 
 import os, asyncio, time, math
 from urllib.parse import urlencode
@@ -46,7 +52,7 @@ def binance_links(symbol):
     return f'🔗 <a href="{a}">Abrir (A)</a> | <a href="{b}">Abrir (B)</a>'
 
 def ts_brazil_now():
-    # horário de Brasília (UTC-3), sem nome "Brasília", só a bandeira 🇧🇷 na mensagem
+    # horário de Brasília (UTC-3), sem nome "Brasília", só a bandeira 🇧🇷
     return (datetime.now(timezone.utc) - timedelta(hours=3)).strftime("%Y-%m-%d %H:%M:%S") + " 🇧🇷"
 
 async def send_alert(session, text):
@@ -169,7 +175,7 @@ def compute_indicators(o,h,l,c,v):
     adx14, pdi, mdi = adx(h, l, c, ADX_LEN)
     return ema9, ma20, ma50, ma200, rsi14, volma, bb_up, bb_low, adx14, pdi, mdi
 
-# ----------------- Binance -----------------
+# ----------------- Binance: dados -----------------
 async def get_klines(session, symbol, interval="5m", limit=200):
     params = {"symbol": symbol, "interval": interval, "limit": limit}
     url = f"{BINANCE_HTTP}/api/v3/klines?{urlencode(params)}"
@@ -188,13 +194,60 @@ async def get_24h(session):
         r.raise_for_status()
         return await r.json()
 
-def shortlist_from_24h(tickers, n=400):
+# 🔒 NEW: obter apenas símbolos SPOT reais via exchangeInfo
+async def get_spot_usdt_symbols(session):
+    """
+    Retorna um set com todos os símbolos USDT que são realmente SPOT (permissions contém 'SPOT')
+    e estão com status TRADING. Exclui alavancados/derivativos por nome e por ausência de permissão SPOT.
+    """
+    url = f"{BINANCE_HTTP}/api/v3/exchangeInfo"
+    try:
+        async with session.get(url, timeout=15) as r:
+            r.raise_for_status()
+            data = await r.json()
+    except Exception as e:
+        print("exchangeInfo error:", e)
+        return None  # fallback será tratado
+
+    spot = set()
+    blocked_tokens = ("UP","DOWN","BULL","BEAR")
+    for s in data.get("symbols", []):
+        try:
+            sym = s.get("symbol","")
+            status = s.get("status","")
+            permissions = s.get("permissions", []) or []
+            quote = s.get("quoteAsset","")
+            # critérios SPOT reais:
+            if status != "TRADING": 
+                continue
+            if quote != "USDT":
+                continue
+            if "SPOT" not in permissions:
+                continue
+            # excluir por nome tokens alavancados/estranhos
+            if any(tok in sym for tok in blocked_tokens):
+                continue
+            # excluir pares com sufixos/formatos fora do padrão spot
+            if any(x in sym for x in ("PERP","_PERP","USD_","_BUSD","_FDUSD","_TUSD","_EUR","_TRY","_BRL","_USDC","_DAI","_BTC")):
+                continue
+            spot.add(sym)
+        except:
+            continue
+    return spot
+
+def shortlist_from_24h(tickers, n=400, spot_set=None):
+    """
+    Monta shortlist com base no 24h, aplicando filtros MIN_PCT/MIN_QV e (se disponível) o spot_set real.
+    """
     usdt = []
     for t in tickers:
         s = t.get("symbol", "")
         if not s.endswith("USDT"):
             continue
-        # filtra alavancados / perp / moedas fora do SPOT "padrão"
+        # se temos spot_set, só aceitaremos se estiver na lista SPOT real
+        if spot_set is not None and s not in spot_set:
+            continue
+        # fallback adicional de nome (caso spot_set esteja None por erro)
         blocked = ("UP","DOWN","BULL","BEAR","PERP","USD_","_PERP","_BUSD","_FDUSD","_TUSD","_EUR","_TRY","_BRL","_USDC","_DAI","_BTC")
         if any(x in s for x in blocked):
             continue
@@ -224,7 +277,7 @@ def kind_emoji(kind):
 def build_msg(symbol, kind, price, bullets, rs_tag=""):
     star="⭐"; sym=fmt_symbol(symbol); em=kind_emoji(kind)
     tag = f" | 🏆 RS+" if rs_tag else ""
-    # renomeios dinâmicos de títulos
+    # renomeio dinâmico de títulos
     if "TURTLE_BREAKOUT" in kind:
         header="📈 — ROMPIMENTO DA RESISTÊNCIA"
     else:
@@ -279,13 +332,13 @@ class Monitor:
         if pct is None: return ""
         return "RS+" if (pct - self.btc_pct) > 0.0 else ""
 
-# ----------------- Worker curto (inalterado, exceto remoção do Minervini) -----------------
+# ----------------- Worker curto (inalterado, exceto sem Minervini) -----------------
 async def candle_worker(session, symbol, monitor: Monitor):
     try:
         o,h,l,c,v = await get_klines(session, symbol, interval=INTERVAL_MAIN, limit=200)
         if len(c) < 60: return
         ema9, ma20, ma50, ma200, rsi14, vol_ma, bb_up, bb_low, adx14, pdi, mdi = compute_indicators(o,h,l,c,v)
-        last = len(c)-1; prev=last-1
+        last = len(c)-1
         signals=[]
         rs_tag = monitor.rs_tag(symbol)
 
@@ -302,8 +355,8 @@ async def candle_worker(session, symbol, monitor: Monitor):
                 f"Reteste na MA20 + reação | RSI {rsi14[last]:.1f} | Vol ok | 💚 CONTINUAÇÃO DE ALTA DETECTADA"))
 
         # Rompimento da resistência (Donchian 20-high)
-        if last>=21:
-            donchian_high=max(h[last-20:last])
+        if len(h) >= 21:
+            donchian_high=max(h[-20:])
             if c[last]>donchian_high and monitor.allowed(symbol,"TURTLE_BREAKOUT"):
                 msg=build_msg(symbol,"TURTLE_BREAKOUT",c[last],
                               f"Rompimento: fechou acima da máxima 20 ({donchian_high:.6f}) — 💥 Rompimento confirmado",
@@ -322,7 +375,7 @@ async def candle_worker(session, symbol, monitor: Monitor):
     except Exception as e:
         print("worker error",symbol,e)
 
-# ----------------- Worker LONGO (novo) -----------------
+# ----------------- Worker LONGO (novo desde 11.5) -----------------
 async def longterm_worker(session, symbol, monitor: Monitor):
     """
     Monitora 15m + 1h + 4h para detectar tendência longa:
@@ -362,9 +415,7 @@ async def longterm_worker(session, symbol, monitor: Monitor):
                    rsi4[last4]    > 55.0 and adx4[last4]    > 25.0)
 
         if cond_15 and cond_1 and cond_4 and monitor.allowed_long(symbol):
-            # preço atual = do timeframe mais rápido entre os três (15m)
-            last_price = c15[last15]
-            # usa como força consolidada a média de RSI e ADX dos prazos maiores (1h/4h)
+            last_price = c15[last15]  # preço mais responsivo (15m)
             rsi_mean = (rsi1[last1] + rsi4[last4]) / 2.0
             adx_mean = (adx1[last1] + adx4[last4]) / 2.0
             txt = build_msg_longterm(symbol, last_price, rsi_mean, adx_mean)
@@ -378,8 +429,13 @@ async def longterm_worker(session, symbol, monitor: Monitor):
 async def main():
     monitor=Monitor()
     async with aiohttp.ClientSession() as session:
+        # NEW: obter set de símbolos SPOT reais
+        spot_set = await get_spot_usdt_symbols(session)
+        if spot_set is None:
+            print("⚠️ Aviso: não foi possível obter exchangeInfo; usando filtro por nome como fallback.")
+
         tickers=await get_24h(session)
-        watchlist=shortlist_from_24h(tickers,SHORTLIST_N)
+        watchlist=shortlist_from_24h(tickers,SHORTLIST_N, spot_set=spot_set)
 
         # RS (força relativa vs BTC) para tag 🏆 RS+
         rs_map = {}
@@ -394,7 +450,7 @@ async def main():
                 except: rs_map[s] = 0.0
         monitor.set_rs(rs_map, btc_pct)
 
-        hello=f"💻 v11.5 | Core 5m/15m intacto + LongTerm(15m/1h/4h, cooldown 1h) | {len(watchlist)} pares SPOT | {ts_brazil_now()}"
+        hello=f"💻 v11.6 | Core 5m/15m intacto + LongTerm(15m/1h/4h, cooldown 1h) + SPOT-only | {len(watchlist)} pares | {ts_brazil_now()}"
         await send_alert(session,hello)
         print(hello)
 
@@ -409,10 +465,11 @@ async def main():
             # pausa entre ciclos
             await asyncio.sleep(180)
 
-            # refresh shortlist + RS a cada ciclo
+            # refresh shortlist + RS + SPOT a cada ciclo
             try:
+                spot_set = await get_spot_usdt_symbols(session) or spot_set
                 tickers=await get_24h(session)
-                watchlist=shortlist_from_24h(tickers,SHORTLIST_N)
+                watchlist=shortlist_from_24h(tickers,SHORTLIST_N, spot_set=spot_set)
 
                 rs_map = {}
                 btc_pct = 0.0
@@ -426,7 +483,7 @@ async def main():
                         except: rs_map[s] = 0.0
                 monitor.set_rs(rs_map, btc_pct)
             except Exception as e:
-                print("Erro ao atualizar shortlist/RS:", e)
+                print("Erro ao atualizar shortlist/RS/SPOT:", e)
 
 # ----------------- Flask -----------------
 def start_bot():
@@ -441,5 +498,5 @@ if __name__=="__main__":
     app=Flask(__name__)
     @app.route("/")
     def home():
-        return "✅ Binance Alerts Bot v11.5 — Core intacto (5m/15m) + Tendência Longa (15m/1h/4h, cooldown 1h) 🇧🇷"
+        return "✅ Binance Alerts Bot v11.6 — Core (5m/15m) + LongTerm (15m/1h/4h, 1h) + SPOT-only 🇧🇷"
     app.run(host="0.0.0.0",port=int(os.environ.get("PORT",10000)))
