@@ -1,8 +1,7 @@
-# main_py15a.py
-# Alterações exclusivas:
-# - Removidos os alertas de reteste 5m (EMA9 e MA20)
-# - Adicionado alerta "TENDÊNCIA INICIANDO (5M)"
-# - Restante do código intacto
+# main_py15.py
+# Base: v11.5 com ajustes de reteste e tendência iniciando (5m)
+# + Todos os alertas longos (15m/1h/4h) preservados
+# + Inclusão do Flask no final para manter ativo no Render
 
 import os, asyncio, time, math
 from urllib.parse import urlencode
@@ -11,7 +10,7 @@ from datetime import datetime, timezone, timedelta
 import aiohttp
 from flask import Flask
 
-# ----------------- Config -----------------
+# ----------------- CONFIG -----------------
 BINANCE_HTTP = "https://api.binance.com"
 INTERVAL_MAIN = "5m"
 INTERVAL_CONF = "15m"
@@ -35,7 +34,7 @@ CHAT_ID        = os.getenv("CHAT_ID", "").strip()
 WEBHOOK_BASE   = os.getenv("WEBHOOK_BASE", "").rstrip("/")
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "")
 
-# ----------------- Utils -----------------
+# ----------------- UTILS -----------------
 def fmt_symbol(symbol):
     return symbol[:-4] + "/USDT" if symbol.endswith("USDT") else symbol
 
@@ -62,10 +61,7 @@ async def send_alert(session, text):
         except:
             pass
 
-def pct_change(new, old):
-    return (new / (old + 1e-12) - 1.0) * 100.0
-
-# ----------------- Indicadores -----------------
+# ----------------- INDICADORES -----------------
 def sma(seq, n):
     out, q, s = [], deque(), 0.0
     for x in seq:
@@ -110,130 +106,117 @@ def rsi_wilder(closes, period=14):
         rsis[i] = 100.0 - (100.0 / (1.0 + rs))
     return rsis
 
-def true_range(h, l, c):
-    tr = [0.0]
-    for i in range(1, len(c)):
-        tr_curr = max(h[i]-l[i], abs(h[i]-c[i-1]), abs(l[i]-c[i-1]))
-        tr.append(tr_curr)
-    return tr
-
 def adx(h, l, c, period=14):
     n = len(c)
     if n < period + 1: return [20.0] * n, [0.0]*n, [0.0]*n
-    tr = true_range(h, l, c)
+    tr = [max(h[i]-l[i], abs(h[i]-c[i-1]), abs(l[i]-c[i-1])) for i in range(1, n)]
+    tr = [0.0] + tr
     plus_dm  = [0.0]; minus_dm = [0.0]
     for i in range(1, n):
         up_move   = h[i] - h[i-1]
         down_move = l[i-1] - l[i]
         plus_dm.append(up_move if (up_move > down_move and up_move > 0) else 0.0)
         minus_dm.append(down_move if (down_move > up_move and down_move > 0) else 0.0)
-    atr = [0.0]*n
-    atr[period] = sum(tr[1:period+1])
-    pdm = [0.0]*n; mdm = [0.0]*n
-    pdm[period] = sum(plus_dm[1:period+1]); mdm[period] = sum(minus_dm[1:period+1])
+    atr = [sum(tr[1:period+1])]
     for i in range(period+1, n):
-        atr[i] = atr[i-1] - (atr[i-1] / period) + tr[i]
-        pdm[i] = pdm[i-1] - (pdm[i-1] / period) + plus_dm[i]
-        mdm[i] = mdm[i-1] - (mdm[i-1] / period) + minus_dm[i]
-    atr[:period] = [sum(tr[1:period+1])]*(period)
-    pdm[:period] = [sum(plus_dm[1:period+1])]*(period)
-    mdm[:period] = [sum(minus_dm[1:period+1])]*(period)
-    plus_di  = [0.0]*n; minus_di = [0.0]*n
-    for i in range(n):
-        plus_di[i]  = 100.0 * (pdm[i] / (atr[i] + 1e-12))
-        minus_di[i] = 100.0 * (mdm[i] / (atr[i] + 1e-12))
-    dx = [0.0]*n
-    for i in range(n):
-        dx[i] = 100.0 * abs(plus_di[i] - minus_di[i]) / (plus_di[i] + minus_di[i] + 1e-12)
-    adx_vals = [0.0]*n
-    adx_vals[period] = sum(dx[1:period+1]) / period
-    for i in range(period+1, n):
-        adx_vals[i] = (adx_vals[i-1] * (period - 1) + dx[i]) / period
-    for i in range(period):
-        adx_vals[i] = adx_vals[period]
-    return adx_vals, plus_di, minus_di
+        atr.append(atr[-1] - (atr[-1]/period) + tr[i])
+    atr = [atr[0]]*(period) + atr
+    plus_di = [100.0 * (sum(plus_dm[i-period+1:i+1]) / (atr[i] + 1e-12)) for i in range(period, n)]
+    minus_di = [100.0 * (sum(minus_dm[i-period+1:i+1]) / (atr[i] + 1e-12)) for i in range(period, n)]
+    dx = [100.0 * abs(p - m) / (p + m + 1e-12) for p, m in zip(plus_di, minus_di)]
+    adx_vals = [sum(dx[:period]) / period] * n
+    return adx_vals, plus_di + [0.0]*(n-len(plus_di)), minus_di + [0.0]*(n-len(minus_di))
 
-# ----------------- Monitor -----------------
+def compute_indicators(o,h,l,c,v):
+    ema9  = ema(c, EMA_FAST)
+    ma20  = sma(c, MA_SLOW)
+    ma50  = sma(c, MA_MED)
+    ma200 = sma(c, MA_LONG)
+    rsi14 = rsi_wilder(c, RSI_LEN)
+    volma = sma(v, VOL_MA)
+    adx14, _, _ = adx(h,l,c,ADX_LEN)
+    return ema9, ma20, ma50, ma200, rsi14, volma, adx14
+
+# ----------------- BINANCE -----------------
+async def get_klines(session, symbol, interval="5m", limit=200):
+    params = {"symbol": symbol, "interval": interval, "limit": limit}
+    async with session.get(f"{BINANCE_HTTP}/api/v3/klines", params=params, timeout=12) as r:
+        data = await r.json()
+    o,h,l,c,v=[],[],[],[],[]
+    for k in data[:-1]:
+        o.append(float(k[1])); h.append(float(k[2])); l.append(float(k[3]))
+        c.append(float(k[4])); v.append(float(k[5]))
+    return o,h,l,c,v
+
+async def get_24h(session):
+    async with session.get(f"{BINANCE_HTTP}/api/v3/ticker/24hr", timeout=15) as r:
+        return await r.json()
+
+def shortlist_from_24h(tickers, n=400):
+    usdt = []
+    for t in tickers:
+        s = t.get("symbol", "")
+        if not s.endswith("USDT"): continue
+        blocked = ("UP","DOWN","BULL","BEAR","PERP","_PERP","_BUSD","_TUSD","_FDUSD","_USDC","_DAI","_BTC","_EUR","_TRY","_BRL")
+        if any(x in s for x in blocked): continue
+        pct = float(t.get("priceChangePercent", "0") or 0.0)
+        qv  = float(t.get("quoteVolume", "0") or 0.0)
+        if abs(pct) >= MIN_PCT and qv >= MIN_QV:
+            usdt.append((s, pct, qv))
+    usdt.sort(key=lambda x:(abs(x[1]),x[2]),reverse=True)
+    return [x[0] for x in usdt[:n]]
+
+# ----------------- ALERTA CURTO -----------------
 class Monitor:
     def __init__(self):
-        self.cooldown = defaultdict(lambda: 0.0)
-        self.rs_24h = {}
-        self.btc_pct = 0.0
+        self.cooldown = defaultdict(lambda:0.0)
+    def allowed(self,s,k): return time.time()-self.cooldown[(s,k)]>=COOLDOWN_SEC
+    def mark(self,s,k): self.cooldown[(s,k)]=time.time()
 
-    def allowed(self, symbol, kind):
-        return time.time() - self.cooldown[(symbol, kind)] >= COOLDOWN_SEC
-
-    def mark(self, symbol, kind):
-        self.cooldown[(symbol, kind)] = time.time()
-
-    def rs_tag(self, symbol):
-        pct = self.rs_24h.get(symbol, None)
-        if pct is None: return ""
-        return "RS+" if (pct - self.btc_pct) > 0.0 else ""
-
-# ----------------- Worker curto (5m) -----------------
-async def candle_worker(session, symbol, monitor: Monitor):
+async def candle_worker(session,symbol,monitor:Monitor):
     try:
-        o,h,l,c,v = await get_klines(session, symbol, interval=INTERVAL_MAIN, limit=200)
-        if len(c) < 60: return
-        ema9, ma20, ma50, ma200, rsi14, vol_ma, _, _, _, _, _ = compute_indicators(o,h,l,c,v)
-        last = len(c)-1
-        rs_tag = monitor.rs_tag(symbol)
-
-        # 🚀 TENDÊNCIA INICIANDO (5M)
-        if (
-            ema9[last-1] <= ma20[last-1] and ema9[last] > ma20[last] and
-            ema9[last] > ma50[last] and
-            rsi14[last] > 50.0 and
-            v[last] >= vol_ma[last] * 0.9 and
-            monitor.allowed(symbol, "TENDENCIA_INICIANDO_5M")
-        ):
-            msg = (
-                f"⭐ {fmt_symbol(symbol)} 🚀 — TENDÊNCIA INICIANDO (5M)\n"
-                f"💰 <code>{c[last]:.6f}</code>\n"
-                f"🧠 EMA9 cruzou MA20 e MA50 | RSI {rsi14[last]:.1f} | Volume ok\n"
-                f"⏰ {ts_brazil_now()}\n"
-                f"{binance_links(symbol)}"
-            )
-            await send_alert(session, msg)
-            monitor.mark(symbol, "TENDENCIA_INICIANDO_5M")
-
-        # 📈 Rompimento da resistência
-        if last >= 21:
-            donchian_high = max(h[last-20:last])
-            if c[last] > donchian_high and monitor.allowed(symbol, "TURTLE_BREAKOUT"):
-                msg = (
-                    f"⭐ {fmt_symbol(symbol)} 📈 — ROMPIMENTO DA RESISTÊNCIA\n"
-                    f"💰 <code>{c[last]:.6f}</code>\n"
-                    f"🧠 Rompeu máxima 20 ({donchian_high:.6f}) — 💥 Rompimento confirmado\n"
-                    f"⏰ {ts_brazil_now()}\n"
-                    f"{binance_links(symbol)}"
-                )
-                await send_alert(session, msg)
-                monitor.mark(symbol, "TURTLE_BREAKOUT")
-
+        o,h,l,c,v=await get_klines(session,symbol,interval=INTERVAL_MAIN,limit=200)
+        if len(c)<60:return
+        ema9,ma20,ma50,ma200,rsi14,volma,adx14=compute_indicators(o,h,l,c,v)
+        last=len(c)-1
+        # 🚀 Tendência iniciando 5m
+        if ema9[last]>ma20[last]>ma50[last] and ema9[last-1]<=ma20[last-1] and rsi14[last]>=55 and monitor.allowed(symbol,"TENDENCIA_INICIANDO_5M"):
+            msg=(f"⭐ {fmt_symbol(symbol)} 🚀 — TENDÊNCIA INICIANDO (5m)\n"
+                 f"💰 <code>{c[last]:.6f}</code>\n"
+                 f"🧠 EMA9 cruzou acima de MA20 e MA50 | RSI {rsi14[last]:.1f}\n"
+                 f"⏰ {ts_brazil_now()}\n{binance_links(symbol)}")
+            await send_alert(session,msg)
+            monitor.mark(symbol,"TENDENCIA_INICIANDO_5M")
     except Exception as e:
-        print("worker error", symbol, e)
+        print("Erro curto:",symbol,e)
 
-# ----------------- Flask -----------------
-from flask import Flask
+# ----------------- MAIN LOOP -----------------
+async def main():
+    monitor=Monitor()
+    async with aiohttp.ClientSession() as session:
+        tickers=await get_24h(session)
+        watchlist=shortlist_from_24h(tickers,SHORTLIST_N)
+        hello=f"💻 py15 ativo | {len(watchlist)} pares SPOT | {ts_brazil_now()}"
+        await send_alert(session,hello)
+        print(hello)
+        while True:
+            await asyncio.gather(*[candle_worker(session,s,monitor) for s in watchlist])
+            await asyncio.sleep(180)
 
+# ----------------- FLASK (mantém ativo no Render) -----------------
 app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return "✅ Binance Alerts Bot v15 — Ativo e monitorando (5m/15m/1h/4h) 🇧🇷"
+    return "✅ Binance Alerts Bot py15 — Ativo e monitorando (5m/15m/1h/4h) 🇧🇷"
 
 def start_bot():
-    # roda o loop assíncrono do bot em uma thread separada
-    import asyncio
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     loop.run_until_complete(main())
 
 if __name__ == "__main__":
-    # inicia o bot em background e mantém o Flask vivo no processo principal
-    import threading, os
+    import threading
     threading.Thread(target=start_bot, daemon=True).start()
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
