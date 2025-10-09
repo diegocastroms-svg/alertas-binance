@@ -1,8 +1,8 @@
 # ============================================================
-#  Binance SPOT Monitor — v11.9 (greenlong_fixed)
-#  Base: v11.8 stable + 🟢 long alerts + horário 🇧🇷 + links HTML
+#  Binance SPOT Monitor — v12 (fullformat)
+#  Base: v11.9 greenlong_fixed + formatação completa curto prazo
 #  ------------------------------------------------------------
-#  Autor: Diego & Aurora (2025-10-09)
+#  Autor: Diego & Aurora — 2025-10-09
 # ============================================================
 
 import os, asyncio, time
@@ -144,7 +144,7 @@ class Monitor:
     def mark(self, symbol: str):
         self.cooldown[symbol] = time.time()
 
-# ---------------- ALERTAS ----------------
+# ---------------- ALERTAS CURTOS (FULL FORMAT) ----------------
 async def candle_worker(session, symbol, monitor):
     try:
         o,h,l,c,v = await get_klines(session, symbol, interval=INTERVAL, limit=200)
@@ -153,16 +153,37 @@ async def candle_worker(session, symbol, monitor):
         ts = ts_brazil_now()
         sym_pretty = fmt_symbol(symbol)
         last_price = c[-1]
-        # Exemplo de alerta curto
+
+        # Exemplo: tendência curta com formato completo
         if ema9[last] > ma20[last] > ma50[last] and rsi14[last] > 55:
-            text = f"⭐ <b>{sym_pretty} — TENDÊNCIA CURTA</b>\n💰 {last_price:.6f}\n🧠 RSI {rsi14[last]:.1f}\n⏰ {ts}\n{binance_links(symbol)}"
+            desc = f"RSI {rsi14[last]:.1f} | Vol ok | 💚 CONTINUAÇÃO DE ALTA DETECTADA"
+            text = (
+                f"⭐ {sym_pretty} 📈 — TENDÊNCIA CURTA | 🏆 RS+💰 {last_price:.6f}\n"
+                f"🧠 {desc}\n"
+                f"⏰ {ts}\n"
+                f"{binance_links(symbol)}"
+            )
             if monitor.allowed(symbol):
                 await send_alert(session, text)
                 monitor.mark(symbol)
+
+        # Reteste EMA9
+        if abs(ema9[last] - c[last]) / ema9[last] < 0.01 and rsi14[last] > 50:
+            desc = f"Reteste na EMA9 + reação | RSI {rsi14[last]:.1f} | Vol ok | 💚 CONTINUAÇÃO DE ALTA DETECTADA"
+            text = (
+                f"⭐ {sym_pretty} ♻️ — RETESTE EMA9 | 🏆 RS+💰 {last_price:.6f}\n"
+                f"🧠 {desc}\n"
+                f"⏰ {ts}\n"
+                f"{binance_links(symbol)}"
+            )
+            if monitor.allowed(symbol):
+                await send_alert(session, text)
+                monitor.mark(symbol)
+
     except Exception as e:
         print("candle_worker error:", symbol, e)
 
-# ---------------- LONG ALERTS ----------------
+# ---------------- LONG ALERTS (🟢) ----------------
 async def long_extensions_worker(session, symbol, monitor):
     try:
         o1,h1,l1,c1,v1 = await get_klines(session, symbol, interval="1h", limit=200)
@@ -193,7 +214,7 @@ async def main():
         tickers = await get_24h(session)
         watchlist = shortlist_from_24h(tickers, SHORTLIST_N)
         ts = ts_brazil_now()
-        await send_alert(session, f"💻 v11.9 (greenlong_fixed) — {len(watchlist)} pares SPOT — {ts}")
+        await send_alert(session, f"💻 v12 (fullformat) — {len(watchlist)} pares SPOT — {ts}")
         while True:
             tasks = []
             for s in watchlist:
@@ -213,7 +234,7 @@ app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return "✅ Binance Alerts Bot (v11.9 greenlong_fixed) ativo!"
+    return "✅ Binance Alerts Bot (v12 fullformat) ativo!"
 
 if __name__ == "__main__":
     import threading
