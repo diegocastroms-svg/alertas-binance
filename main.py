@@ -3,6 +3,7 @@
 # Alterações únicas:
 # 1) Removido alerta "Média 200 Ascendente" (Minervini 200 UP)
 # 2) Adicionado longterm_worker (15m + 1h + 4h), cooldown 1h, mensagem toda em negrito
+# 3) Reforçado filtro SPOT na função shortlist_from_24h (exclui futures, perp e tokens fora da Binance Spot)
 
 import os, asyncio, time, math
 from urllib.parse import urlencode
@@ -13,11 +14,11 @@ from flask import Flask
 
 # ----------------- Config -----------------
 BINANCE_HTTP = "https://api.binance.com"
-INTERVAL_MAIN = "5m"         # Core curto (inalterado)
-INTERVAL_CONF = "15m"        # Confirmação curta (inalterado)
+INTERVAL_MAIN = "5m"
+INTERVAL_CONF = "15m"
 SHORTLIST_N   = 65
-COOLDOWN_SEC  = 15 * 60      # cooldown geral por tipo (curto prazo)
-COOLDOWN_LONGTERM = 60 * 60  # 1h por ativo para o alerta de tendência longa
+COOLDOWN_SEC  = 15 * 60
+COOLDOWN_LONGTERM = 60 * 60
 MIN_PCT       = 1.0
 MIN_QV        = 300_000.0
 
@@ -46,17 +47,14 @@ def binance_links(symbol):
     return f'🔗 <a href="{a}">Abrir (A)</a> | <a href="{b}">Abrir (B)</a>'
 
 def ts_brazil_now():
-    # horário de Brasília (UTC-3), sem nome "Brasília", só a bandeira 🇧🇷 na mensagem
     return (datetime.now(timezone.utc) - timedelta(hours=3)).strftime("%Y-%m-%d %H:%M:%S") + " 🇧🇷"
 
 async def send_alert(session, text):
-    # (1) webhook opcional
     if WEBHOOK_BASE and WEBHOOK_SECRET:
         try:
             await session.post(f"{WEBHOOK_BASE}/{WEBHOOK_SECRET}", json={"message": text}, timeout=10)
         except:
             pass
-    # (2) Telegram
     if TELEGRAM_TOKEN and CHAT_ID:
         try:
             url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -128,8 +126,8 @@ def adx(h, l, c, period=14):
     for i in range(1, n):
         up_move   = h[i] - h[i-1]
         down_move = l[i-1] - l[i]
-        plus_dm.append(  up_move if (up_move > down_move and up_move > 0) else 0.0)
-        minus_dm.append( down_move if (down_move > up_move and down_move > 0) else 0.0)
+        plus_dm.append(up_move if (up_move > down_move and up_move > 0) else 0.0)
+        minus_dm.append(down_move if (down_move > up_move and down_move > 0) else 0.0)
     atr = [0.0]*n
     atr[period] = sum(tr[1:period+1])
     pdm = [0.0]*n; mdm = [0.0]*n
@@ -176,7 +174,6 @@ async def get_klines(session, symbol, interval="5m", limit=200):
     async with session.get(url, timeout=12) as r:
         r.raise_for_status()
         data = await r.json()
-    # Remove o último candle em formação
     o,h,l,c,v=[],[],[],[],[]
     for k in data[:-1]:
         o.append(float(k[1])); h.append(float(k[2])); l.append(float(k[3]))
@@ -188,14 +185,18 @@ async def get_24h(session):
         r.raise_for_status()
         return await r.json()
 
+# ✅ Filtro SPOT reforçado (única modificação nesta versão)
 def shortlist_from_24h(tickers, n=400):
     usdt = []
     for t in tickers:
         s = t.get("symbol", "")
         if not s.endswith("USDT"):
             continue
-        # filtra alavancados / perp / moedas fora do SPOT "padrão"
-        blocked = ("UP","DOWN","BULL","BEAR","PERP","USD_","_PERP","_BUSD","_FDUSD","_TUSD","_EUR","_TRY","_BRL","_USDC","_DAI","_BTC")
+        blocked = (
+            "UP","DOWN","BULL","BEAR","PERP","_PERP","USD_","_USD",
+            "_BUSD","_FDUSD","_TUSD","_USDC","_DAI","_BTC",
+            "_EUR","_TRY","_BRL","_ETH","_BNB","_SOL"
+        )
         if any(x in s for x in blocked):
             continue
         pct = float(t.get("priceChangePercent", "0") or 0.0)
@@ -224,7 +225,6 @@ def kind_emoji(kind):
 def build_msg(symbol, kind, price, bullets, rs_tag=""):
     star="⭐"; sym=fmt_symbol(symbol); em=kind_emoji(kind)
     tag = f" | 🏆 RS+" if rs_tag else ""
-    # renomeios dinâmicos de títulos
     if "TURTLE_BREAKOUT" in kind:
         header="📈 — ROMPIMENTO DA RESISTÊNCIA"
     else:
@@ -238,7 +238,6 @@ def build_msg(symbol, kind, price, bullets, rs_tag=""):
     )
 
 def build_msg_longterm(symbol, price, rsi_val, adx_val):
-    # Mensagem inteira em negrito, conforme pedido
     sym = fmt_symbol(symbol)
     return (
         f"🌕 <b>{sym} — TENDÊNCIA LONGA DETECTADA</b>\n"
@@ -253,8 +252,8 @@ def build_msg_longterm(symbol, price, rsi_val, adx_val):
 # ----------------- Monitor -----------------
 class Monitor:
     def __init__(self):
-        self.cooldown = defaultdict(lambda: 0.0)         # curto prazo
-        self.cooldown_long = defaultdict(lambda: 0.0)     # longo prazo (1h por ativo)
+        self.cooldown = defaultdict(lambda: 0.0)
+        self.cooldown_long = defaultdict(lambda: 0.0)
         self.rs_24h = {}
         self.btc_pct = 0.0
 
@@ -279,29 +278,26 @@ class Monitor:
         if pct is None: return ""
         return "RS+" if (pct - self.btc_pct) > 0.0 else ""
 
-# ----------------- Worker curto (inalterado, exceto remoção do Minervini) -----------------
+# ----------------- Worker curto -----------------
 async def candle_worker(session, symbol, monitor: Monitor):
     try:
         o,h,l,c,v = await get_klines(session, symbol, interval=INTERVAL_MAIN, limit=200)
         if len(c) < 60: return
         ema9, ma20, ma50, ma200, rsi14, vol_ma, bb_up, bb_low, adx14, pdi, mdi = compute_indicators(o,h,l,c,v)
-        last = len(c)-1; prev=last-1
+        last = len(c)-1
         signals=[]
         rs_tag = monitor.rs_tag(symbol)
 
-        # Reteste EMA9 (com continuação de alta)
         if (ema9[last]>ma20[last]>ma50[last] and l[last]<=ema9[last] and c[last]>=ema9[last] and
             rsi14[last]>=55.0 and v[last]>=vol_ma[last]*0.9):
             signals.append(("RETESTE_EMA9",
                 f"Reteste na EMA9 + reação | RSI {rsi14[last]:.1f} | Vol ok | 💚 CONTINUAÇÃO DE ALTA DETECTADA"))
 
-        # Reteste MA20 (com continuação de alta)
         if (ema9[last]>ma20[last]>ma50[last] and l[last]<=ma20[last] and c[last]>=ma20[last] and
             rsi14[last]>=52.0 and v[last]>=vol_ma[last]*0.9):
             signals.append(("RETESTE_MA20",
                 f"Reteste na MA20 + reação | RSI {rsi14[last]:.1f} | Vol ok | 💚 CONTINUAÇÃO DE ALTA DETECTADA"))
 
-        # Rompimento da resistência (Donchian 20-high)
         if last>=21:
             donchian_high=max(h[last-20:last])
             if c[last]>donchian_high and monitor.allowed(symbol,"TURTLE_BREAKOUT"):
@@ -311,7 +307,6 @@ async def candle_worker(session, symbol, monitor: Monitor):
                 await send_alert(session,msg)
                 monitor.mark(symbol,"TURTLE_BREAKOUT")
 
-        # Envio do primeiro sinal composto (se houver)
         if signals:
             k0,d0=signals[0]
             if monitor.allowed(symbol,k0):
@@ -322,38 +317,27 @@ async def candle_worker(session, symbol, monitor: Monitor):
     except Exception as e:
         print("worker error",symbol,e)
 
-# ----------------- Worker LONGO (novo) -----------------
+# ----------------- Worker LONGO -----------------
 async def longterm_worker(session, symbol, monitor: Monitor):
-    """
-    Monitora 15m + 1h + 4h para detectar tendência longa:
-    - EMA9 > MA20 > MA50 > MA200 nos três tempos
-    - RSI > 55
-    - ADX > 25
-    Cooldown: 1h por ativo
-    """
     try:
-        # 15m
         o15,h15,l15,c15,v15 = await get_klines(session, symbol, interval="15m", limit=120)
         if len(c15) < 60: return
         i15 = compute_indicators(o15,h15,l15,c15,v15)
         ema9_15, ma20_15, ma50_15, ma200_15, rsi15, volma15, bbup15, bblow15, adx15, pdi15, mdi15 = i15
         last15 = len(c15)-1
 
-        # 1h
         o1,h1,l1,c1,v1 = await get_klines(session, symbol, interval="1h", limit=120)
         if len(c1) < 60: return
         i1 = compute_indicators(o1,h1,l1,c1,v1)
         ema9_1, ma20_1, ma50_1, ma200_1, rsi1, volma1, bbup1, bblow1, adx1, pdi1, mdi1 = i1
         last1 = len(c1)-1
 
-        # 4h
         o4,h4,l4,c4,v4 = await get_klines(session, symbol, interval="4h", limit=120)
         if len(c4) < 60: return
         i4 = compute_indicators(o4,h4,l4,c4,v4)
         ema9_4, ma20_4, ma50_4, ma200_4, rsi4, volma4, bbup4, bblow4, adx4, pdi4, mdi4 = i4
         last4 = len(c4)-1
 
-        # Condições de estrutura (nos 3 tempos)
         cond_15 = (ema9_15[last15] > ma20_15[last15] > ma50_15[last15] > ma200_15[last15] and
                    rsi15[last15] > 55.0 and adx15[last15] > 25.0)
         cond_1  = (ema9_1[last1]   > ma20_1[last1]   > ma50_1[last1]   > ma200_1[last1]   and
@@ -362,9 +346,7 @@ async def longterm_worker(session, symbol, monitor: Monitor):
                    rsi4[last4]    > 55.0 and adx4[last4]    > 25.0)
 
         if cond_15 and cond_1 and cond_4 and monitor.allowed_long(symbol):
-            # preço atual = do timeframe mais rápido entre os três (15m)
             last_price = c15[last15]
-            # usa como força consolidada a média de RSI e ADX dos prazos maiores (1h/4h)
             rsi_mean = (rsi1[last1] + rsi4[last4]) / 2.0
             adx_mean = (adx1[last1] + adx4[last4]) / 2.0
             txt = build_msg_longterm(symbol, last_price, rsi_mean, adx_mean)
@@ -381,7 +363,6 @@ async def main():
         tickers=await get_24h(session)
         watchlist=shortlist_from_24h(tickers,SHORTLIST_N)
 
-        # RS (força relativa vs BTC) para tag 🏆 RS+
         rs_map = {}
         btc_pct = 0.0
         for t in tickers:
@@ -399,21 +380,17 @@ async def main():
         print(hello)
 
         while True:
-            # Workers em paralelo: curto + longo
             tasks = []
             for s in watchlist:
                 tasks.append(candle_worker(session, s, monitor))
                 tasks.append(longterm_worker(session, s, monitor))
             await asyncio.gather(*tasks)
 
-            # pausa entre ciclos
             await asyncio.sleep(180)
 
-            # refresh shortlist + RS a cada ciclo
             try:
                 tickers=await get_24h(session)
                 watchlist=shortlist_from_24h(tickers,SHORTLIST_N)
-
                 rs_map = {}
                 btc_pct = 0.0
                 for t in tickers:
