@@ -128,19 +128,37 @@ def shortlist_from_24h(tickers, n=400):
     usdt.sort(key=lambda x:(abs(x[1]),x[2]),reverse=True)
     return [x[0] for x in usdt[:n]]
 
+
 # ----------------- Monitor e alertas -----------------
 class Monitor:
     def __init__(self):
-        self.cooldown_short=defaultdict(lambda:0.0)
-        self.cooldown_long=defaultdict(lambda:0.0)
-        self.rs_24h={}; self.btc_pct=0.0
-    def allowed(self,s,k): return time.time()-self.cooldown_short[(s,k)]>=COOLDOWN_SEC
-    def mark(self,s,k): self.cooldown_short[(s,k)]=time.time()
-    def allowed_long(self,s): return time.time()-self.cooldown_long[s]>=COOLDOWN_LONG
-    def mark_long(self,s): self.cooldown_long[s]=time.time()
-    def set_rs(self,rs,btc): self.rs_24h=rs; self.btc_pct=btc
-    def rs_tag(self,s): p=self.rs_24h.get(s); 
-        return "" if p is None else ("RS+" if (p-self.btc_pct)>0 else "")
+        self.cooldown_short = defaultdict(lambda: 0.0)   # curto prazo (5m/15m)
+        self.cooldown_long  = defaultdict(lambda: 0.0)   # longo prazo (1h/4h)
+        self.rs_24h = {}
+        self.btc_pct = 0.0
+
+    def allowed(self, symbol, kind):
+        return time.time() - self.cooldown_short[(symbol, kind)] >= COOLDOWN_SEC
+
+    def mark(self, symbol, kind):
+        self.cooldown_short[(symbol, kind)] = time.time()
+
+    def allowed_long(self, symbol):
+        # usa o cooldown correto definido no topo
+        return time.time() - self.cooldown_long[symbol] >= COOLDOWN_LONGTERM
+
+    def mark_long(self, symbol):
+        self.cooldown_long[symbol] = time.time()
+
+    def set_rs(self, rs_map, btc_pct):
+        self.rs_24h = rs_map or {}
+        self.btc_pct = btc_pct or 0.0
+
+    def rs_tag(self, symbol):
+        p = self.rs_24h.get(symbol)
+        if p is None:
+            return ""
+        return "RS+" if (p - self.btc_pct) > 0.0 else ""
 
 # ----------------- Worker curto (5m/15m) -----------------
 async def candle_worker(session,symbol,monitor:Monitor):
@@ -235,3 +253,4 @@ if __name__=="__main__":
     def home():
         return "✅ Binance Alerts Bot — py15_revisado_final 🇧🇷"
     app.run(host="0.0.0.0",port=int(os.environ.get("PORT",10000)))
+
