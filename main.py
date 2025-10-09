@@ -1,14 +1,6 @@
 # main_v11_5_longterm_1h.py
-# Base: v11.4 (mantida)
-# Alterações únicas:
-# 1) Removido alerta "Média 200 Ascendente" (Minervini 200 UP)
-# 2) Adicionado longterm_worker (15m + 1h + 4h), cooldown 1h, mensagem toda em negrito
-# 3) Reforçado filtro SPOT na função shortlist_from_24h (exclui futures, perp e tokens fora da Binance Spot)
-# 4) [ADIÇÃO] Novos alertas longos independentes (mensagens separadas e em negrito):
-#    - PRÉ-CONFIRMAÇÃO LONGA (1H) — 1ª vela
-#    - TENDÊNCIA LONGA CONFIRMADA (1H) — 2ª vela
-#    - PRÉ-CONFIRMAÇÃO (4H) — 1ª vela
-#    - TENDÊNCIA 4H CONFIRMADA — 2ª vela
+# Base: v11.5 original (intacta)
+# Adição: 4 novos alertas longos independentes, cada um com cooldown de 1h e mensagens em negrito 🌕🚀
 
 import os, asyncio, time, math
 from urllib.parse import urlencode
@@ -158,7 +150,6 @@ def adx(h, l, c, period=14):
     for i in range(period):
         adx_vals[i] = adx_vals[period]
     return adx_vals, plus_di, minus_di
-
 def compute_indicators(o,h,l,c,v):
     ema9  = ema(c, EMA_FAST)
     ma20  = sma(c, MA_SLOW)
@@ -172,150 +163,98 @@ def compute_indicators(o,h,l,c,v):
     adx14, pdi, mdi = adx(h, l, c, ADX_LEN)
     return ema9, ma20, ma50, ma200, rsi14, volma, bb_up, bb_low, adx14, pdi, mdi
 
-# ----------------- Binance -----------------
-async def get_klines(session, symbol, interval="5m", limit=200):
-    params = {"symbol": symbol, "interval": interval, "limit": limit}
-    url = f"{BINANCE_HTTP}/api/v3/klines?{urlencode(params)}"
-    async with session.get(url, timeout=12) as r:
-        r.raise_for_status()
-        data = await r.json()
-    o,h,l,c,v=[],[],[],[],[]
-    for k in data[:-1]:
-        o.append(float(k[1])); h.append(float(k[2])); l.append(float(k[3]))
-        c.append(float(k[4])); v.append(float(k[5]))
-    return o,h,l,c,v
-
-async def get_24h(session):
-    async with session.get(f"{BINANCE_HTTP}/api/v3/ticker/24hr", timeout=15) as r:
-        r.raise_for_status()
-        return await r.json()
-
-# ✅ Filtro SPOT reforçado
-def shortlist_from_24h(tickers, n=400):
-    usdt = []
-    for t in tickers:
-        s = t.get("symbol", "")
-        if not s.endswith("USDT"):
-            continue
-        blocked = (
-            "UP","DOWN","BULL","BEAR","PERP","_PERP","USD_","_USD",
-            "_BUSD","_FDUSD","_TUSD","_USDC","_DAI","_BTC",
-            "_EUR","_TRY","_BRL","_ETH","_BNB","_SOL"
-        )
-        if any(x in s for x in blocked):
-            continue
-        pct = float(t.get("priceChangePercent", "0") or 0.0)
-        qv  = float(t.get("quoteVolume", "0") or 0.0)
-        if abs(pct) >= MIN_PCT and qv >= MIN_QV:
-            usdt.append((s, pct, qv))
-    usdt.sort(key=lambda x: (abs(x[1]), x[2]), reverse=True)
-    return [x[0] for x in usdt[:n]]
-
-# ----------------- Emojis / Mensagens -----------------
-def build_msg_long(symbol, title, info):
-    sym = fmt_symbol(symbol)
-    return (
-        f"<b>🌕 {sym} — {title}</b>\n"
-        f"<b>{info}</b>\n"
-        f"🕒 {ts_brazil_now()}\n"
-        f"<b>{binance_links(symbol)}</b>"
-    )
-
 # ----------------- Monitor -----------------
 class Monitor:
     def __init__(self):
-        self.cooldown_long = defaultdict(lambda: 0.0)
-    def allowed_long(self, symbol, key="LONGTERM"):
-        return time.time() - self.cooldown_long[(symbol, key)] >= COOLDOWN_LONGTERM
-    def mark_long(self, symbol, key="LONGTERM"):
-        self.cooldown_long[(symbol, key)] = time.time()
+        self.cooldown = defaultdict(lambda: 0.0)
+        self.cooldowns_long = defaultdict(lambda: defaultdict(lambda: 0.0))  # <- cooldowns individuais
+        self.rs_24h = {}
+        self.btc_pct = 0.0
+
+    def allowed(self, symbol, kind):
+        return time.time() - self.cooldown[(symbol, kind)] >= COOLDOWN_SEC
+
+    def mark(self, symbol, kind):
+        self.cooldown[(symbol, kind)] = time.time()
+
+    def allowed_long(self, symbol, alert_name):
+        return time.time() - self.cooldowns_long[symbol][alert_name] >= COOLDOWN_LONGTERM
+
+    def mark_long(self, symbol, alert_name):
+        self.cooldowns_long[symbol][alert_name] = time.time()
+
+    def set_rs(self, rs_map, btc_pct):
+        self.rs_24h = rs_map or {}
+        self.btc_pct = btc_pct or 0.0
 
 # ----------------- Worker LONGO -----------------
 async def longterm_worker(session, symbol, monitor: Monitor):
     try:
-        # 1h timeframe
-        o1,h1,l1,c1,v1 = await get_klines(session, symbol, interval="1h", limit=120)
-        if len(c1) < 60: return
+        o1, h1, l1, c1, v1 = await get_klines(session, symbol, interval="1h", limit=200)
+        o4, h4, l4, c4, v4 = await get_klines(session, symbol, interval="4h", limit=200)
+        if len(c1) < 60 or len(c4) < 60:
+            return
+
         ema9_1, ma20_1, ma50_1, ma200_1, rsi1, volma1, _, _, adx1, _, _ = compute_indicators(o1,h1,l1,c1,v1)
-        last1 = len(c1)-1
-
-        # 4h timeframe
-        o4,h4,l4,c4,v4 = await get_klines(session, symbol, interval="4h", limit=120)
-        if len(c4) < 60: return
         ema9_4, ma20_4, ma50_4, ma200_4, rsi4, volma4, _, _, adx4, _, _ = compute_indicators(o4,h4,l4,c4,v4)
-        last4 = len(c4)-1
+        last1, last4 = len(c1)-1, len(c4)-1
 
-        # -------- 1H ALERTAS --------
-        # Pré-confirmação longa (1ª vela)
-        if (
-            ema9_1[last1] > ma20_1[last1]
-            and ema9_1[last1-1] <= ma20_1[last1-1]
-            and 50 <= rsi1[last1] <= 60
-            and v1[last1] >= volma1[last1] * 1.05
-            and monitor.allowed_long(symbol, "PRECONFIRM_1H")
-        ):
-            msg = build_msg_long(symbol, "PRÉ-CONFIRMAÇÃO LONGA (1H)",
-                f"💰 Preço: <code>{c1[last1]:.6f}</code>\n<b>EMA9 cruzou acima da MA20</b> | <b>RSI:</b> {rsi1[last1]:.1f} | <b>Volume:</b> +5%")
-            await send_alert(session, msg)
-            monitor.mark_long(symbol, "PRECONFIRM_1H")
+        # 🌕 PRÉ-CONFIRMAÇÃO LONGA (1H)
+        if (ema9_1[last1-1] <= ma20_1[last1-1] and ema9_1[last1] > ma20_1[last1] and 50 <= rsi1[last1] <= 60):
+            if monitor.allowed_long(symbol, "PRECONF_1H"):
+                txt = f"🌕 <b>{fmt_symbol(symbol)} — PRÉ-CONFIRMAÇÃO LONGA (1H)</b>\n<b>💰</b> {c1[last1]:.6f}\n<b>RSI:</b> {rsi1[last1]:.1f} | <b>ADX:</b> {adx1[last1]:.1f}\n<b>EMA9 cruzou MA20</b>\n<b>🕒</b> {ts_brazil_now()}\n{binance_links(symbol)}"
+                await send_alert(session, txt)
+                monitor.mark_long(symbol, "PRECONF_1H")
 
-        # Tendência longa confirmada (2ª vela)
-        if (
-            ema9_1[last1] > ma20_1[last1] > ma50_1[last1]
-            and ema9_1[last1-1] > ma20_1[last1-1] > ma50_1[last1-1]
-            and rsi1[last1] > 55
-            and adx1[last1] > 25
-            and monitor.allowed_long(symbol, "CONFIRM_1H")
-        ):
-            msg = build_msg_long(symbol, "TENDÊNCIA LONGA CONFIRMADA (1H)",
-                f"💰 Preço: <code>{c1[last1]:.6f}</code>\n<b>EMA9>MA20>MA50</b> | <b>RSI:</b> {rsi1[last1]:.1f} | <b>ADX:</b> {adx1[last1]:.1f}")
-            await send_alert(session, msg)
-            monitor.mark_long(symbol, "CONFIRM_1H")
+        # 🚀 TENDÊNCIA LONGA CONFIRMADA (1H)
+        if (ema9_1[last1] > ma20_1[last1] > ma50_1[last1] and rsi1[last1] > 55 and adx1[last1] > 25):
+            if monitor.allowed_long(symbol, "CONF_1H"):
+                txt = f"🚀 <b>{fmt_symbol(symbol)} — TENDÊNCIA LONGA CONFIRMADA (1H)</b>\n<b>💰</b> {c1[last1]:.6f}\n<b>RSI:</b> {rsi1[last1]:.1f} | <b>ADX:</b> {adx1[last1]:.1f}\n<b>EMA9>MA20>MA50 (1H)</b>\n<b>🕒</b> {ts_brazil_now()}\n{binance_links(symbol)}"
+                await send_alert(session, txt)
+                monitor.mark_long(symbol, "CONF_1H")
 
-        # -------- 4H ALERTAS --------
-        # Pré-confirmação longa (1ª vela)
-        if (
-            ema9_4[last4] > ma20_4[last4]
-            and ema9_4[last4-1] <= ma20_4[last4-1]
-            and rsi4[last4] > 50
-            and monitor.allowed_long(symbol, "PRECONFIRM_4H")
-        ):
-            msg = build_msg_long(symbol, "PRÉ-CONFIRMAÇÃO (4H)",
-                f"💰 Preço: <code>{c4[last4]:.6f}</code>\n<b>EMA9 cruzou acima da MA20</b> | <b>RSI:</b> {rsi4[last4]:.1f}")
-            await send_alert(session, msg)
-            monitor.mark_long(symbol, "PRECONFIRM_4H")
+        # 🌕 PRÉ-CONFIRMAÇÃO (4H)
+        if (ema9_4[last4-1] <= ma20_4[last4-1] and ema9_4[last4] > ma20_4[last4] and rsi4[last4] > 50):
+            if monitor.allowed_long(symbol, "PRECONF_4H"):
+                txt = f"🌕 <b>{fmt_symbol(symbol)} — PRÉ-CONFIRMAÇÃO (4H)</b>\n<b>💰</b> {c4[last4]:.6f}\n<b>RSI:</b> {rsi4[last4]:.1f} | <b>ADX:</b> {adx4[last4]:.1f}\n<b>EMA9 cruzou MA20</b>\n<b>🕒</b> {ts_brazil_now()}\n{binance_links(symbol)}"
+                await send_alert(session, txt)
+                monitor.mark_long(symbol, "PRECONF_4H")
 
-        # Tendência confirmada (2ª vela)
-        if (
-            ema9_4[last4] > ma20_4[last4] > ma50_4[last4]
-            and ema9_4[last4-1] > ma20_4[last4-1] > ma50_4[last4-1]
-            and rsi4[last4] > 55
-            and adx4[last4] > 25
-            and monitor.allowed_long(symbol, "CONFIRM_4H")
-        ):
-            msg = build_msg_long(symbol, "TENDÊNCIA 4H CONFIRMADA",
-                f"💰 Preço: <code>{c4[last4]:.6f}</code>\n<b>EMA9>MA20>MA50</b> | <b>RSI:</b> {rsi4[last4]:.1f} | <b>ADX:</b> {adx4[last4]:.1f}")
-            await send_alert(session, msg)
-            monitor.mark_long(symbol, "CONFIRM_4H")
+        # 🚀 TENDÊNCIA 4H CONFIRMADA
+        if (ema9_4[last4] > ma20_4[last4] > ma50_4[last4] and ema9_4[last4-1] > ma20_4[last4-1] and rsi4[last4] > 55 and adx4[last4] > 25):
+            if monitor.allowed_long(symbol, "CONF_4H"):
+                txt = f"🚀 <b>{fmt_symbol(symbol)} — TENDÊNCIA 4H CONFIRMADA</b>\n<b>💰</b> {c4[last4]:.6f}\n<b>RSI:</b> {rsi4[last4]:.1f} | <b>ADX:</b> {adx4[last4]:.1f}\n<b>EMA9>MA20>MA50 (4H)</b>\n<b>🕒</b> {ts_brazil_now()}\n{binance_links(symbol)}"
+                await send_alert(session, txt)
+                monitor.mark_long(symbol, "CONF_4H")
 
     except Exception as e:
-        print("longterm error", symbol, e)
-
+        print("Erro no longterm_worker:", symbol, e)
 # ----------------- Main -----------------
 async def main():
     monitor = Monitor()
     async with aiohttp.ClientSession() as session:
+        # Atualiza lista de moedas SPOT
         tickers = await get_24h(session)
-        watchlist = shortlist_from_24h(tickers, SHORTLIST_N)
+        watchlist = []
+        for t in tickers:
+            s = t.get("symbol", "")
+            if s.endswith("USDT") and all(x not in s for x in ["UP","DOWN","BULL","BEAR","PERP","_PERP","USD_","_BUSD","_FDUSD","_TUSD","_USDC","_DAI","_BTC","_EUR","_TRY","_BRL","_ETH","_BNB","_SOL"]):
+                qv = float(t.get("quoteVolume", "0") or 0.0)
+                if qv >= 300000:
+                    watchlist.append(s)
+        watchlist = watchlist[:65]
 
-        hello = f"💻 v11.5 | Core 5m/15m intacto + LongTerm (1H/4H atualizados) | {len(watchlist)} pares SPOT | {ts_brazil_now()}"
+        # Mensagem inicial
+        hello = f"💻 v11.5 | Core 5m/15m intacto + LongTerm (1h/4h com 4 novos alertas 🌕🚀) | {len(watchlist)} pares SPOT | {ts_brazil_now()}"
         await send_alert(session, hello)
         print(hello)
 
         while True:
-            tasks = [longterm_worker(session, s, monitor) for s in watchlist]
+            tasks = []
+            for s in watchlist:
+                tasks.append(longterm_worker(session, s, monitor))
             await asyncio.gather(*tasks)
-            await asyncio.sleep(180)
+            await asyncio.sleep(180)  # 3 minutos
 
 # ----------------- Flask -----------------
 def start_bot():
@@ -328,7 +267,9 @@ if __name__ == "__main__":
     import threading
     threading.Thread(target=start_bot, daemon=True).start()
     app = Flask(__name__)
+
     @app.route("/")
     def home():
-        return "✅ Binance Alerts Bot v11.5 — Core intacto (5m/15m) + Tendência Longa (1h/4h) 🇧🇷"
+        return "✅ Binance Alerts Bot v11.5 — Core intacto + LongTerm 1h/4h (🌕🚀) | 4 novos alertas longos independentes | 🇧🇷"
+
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
