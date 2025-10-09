@@ -4,7 +4,11 @@
 # 1) Removido alerta "Média 200 Ascendente" (Minervini 200 UP)
 # 2) Adicionado longterm_worker (15m + 1h + 4h), cooldown 1h, mensagem toda em negrito
 # 3) Reforçado filtro SPOT na função shortlist_from_24h (exclui futures, perp e tokens fora da Binance Spot)
-# 4) [ADIÇÃO] Novos alertas longos independentes: Pré-confirm. 1H, Confirmada 1H, Pré 4H, Confirmada 4H, Entrada Segura (15m/1h)
+# 4) [ADIÇÃO] Novos alertas longos independentes (mensagens separadas e em negrito):
+#    - PRÉ-CONFIRMAÇÃO LONGA (1H) — 1ª vela
+#    - TENDÊNCIA LONGA CONFIRMADA (1H) — 2ª vela
+#    - PRÉ-CONFIRMAÇÃO (4H) — 1ª vela
+#    - TENDÊNCIA 4H CONFIRMADA — 2ª vela
 
 import os, asyncio, time, math
 from urllib.parse import urlencode
@@ -186,7 +190,7 @@ async def get_24h(session):
         r.raise_for_status()
         return await r.json()
 
-# ✅ Filtro SPOT reforçado (já existente)
+# ✅ Filtro SPOT reforçado
 def shortlist_from_24h(tickers, n=400):
     usdt = []
     for t in tickers:
@@ -208,342 +212,110 @@ def shortlist_from_24h(tickers, n=400):
     return [x[0] for x in usdt[:n]]
 
 # ----------------- Emojis / Mensagens -----------------
-def kind_emoji(kind):
-    return {
-        "MONITORANDO_REVERSAO":"🔍",
-        "TENDENCIA_INICIANDO_5M":"⬆️",
-        "TENDENCIA_CONFIRMADA_15M":"💎",
-        "REVERSAO_FUNDO":"🔄",
-        "RETESTE_EMA9":"♻️",
-        "RETESTE_MA20":"♻️",
-        "PERDENDO_FORCA":"🟠",
-        "SAIDA":"🚪",
-        "MERCADO_ESTICADO":"⚠️",
-        "TURTLE_BREAKOUT":"📈",
-        "LONGTERM_TREND":"🌕",
-        # [ADIÇÃO] rótulos textuais para novos longos (usarão build_msg_long_generic)
-        "LONG_PRECONF_1H":"🌕",
-        "LONG_CONF_1H":"🚀",
-        "LONG_PRECONF_4H":"🌕",
-        "LONG_CONF_4H":"🚀",
-        "ENTRY_SAFE_RETEST":"💚",
-    }.get(kind,"📌")
-
-def build_msg(symbol, kind, price, bullets, rs_tag=""):
-    star="⭐"; sym=fmt_symbol(symbol); em=kind_emoji(kind)
-    tag = f" | 🏆 RS+" if rs_tag else ""
-    if "TURTLE_BREAKOUT" in kind:
-        header="📈 — ROMPIMENTO DA RESISTÊNCIA"
-    else:
-        header=f"{em} — {kind.replace('_',' ')}"
-    return (
-        f"{star} {sym} {header}{tag}\n"
-        f"💰 <code>{price:.6f}</code>\n"
-        f"🧠 {bullets}\n"
-        f"⏰ {ts_brazil_now()}\n"
-        f"{binance_links(symbol)}"
-    )
-
-def build_msg_longterm(symbol, price, rsi_val, adx_val):
+def build_msg_long(symbol, title, info):
     sym = fmt_symbol(symbol)
     return (
-        f"🌕 <b>{sym} — TENDÊNCIA LONGA DETECTADA</b>\n"
-        f"<b>💰 Preço:</b> <code>{price:.6f}</code>\n"
-        f"<b>📈 Estrutura:</b> EMA9>MA20>MA50>MA200 (15m / 1h / 4h)\n"
-        f"<b>⚙️ Força:</b> RSI {rsi_val:.1f} | ADX {adx_val:.1f}\n"
-        f"<b>🕒 {ts_brazil_now()}</b>\n"
-        f"<b>{binance_links(symbol)}</b>\n"
-        f"<b>ALTA SUSTENTADA — MOVIMENTO DE VÁRIOS DIAS POSSÍVEL.</b>"
-    )
-
-# [ADIÇÃO] Construtor genérico para os novos alertas longos (mesmo visual do longo principal)
-def build_msg_long_generic(symbol, title, price, info_lines):
-    """
-    title: texto do título (ex.: 'PRÉ-CONFIRMAÇÃO LONGA (1H)')
-    info_lines: lista de strings complementares (ex.: ['RSI 56.2 | ADX 22.1', 'EMA9 cruzou MA20', ...])
-    """
-    sym = fmt_symbol(symbol)
-    body = "\n".join(f"<b>{line}</b>" for line in info_lines if line)
-    return (
-        f"{kind_emoji('LONG_PRECONF_1H')} <b>{sym} — {title}</b>\n"
-        f"<b>💰 Preço:</b> <code>{price:.6f}</code>\n"
-        f"{body}\n"
-        f"<b>🕒 {ts_brazil_now()}</b>\n"
+        f"<b>🌕 {sym} — {title}</b>\n"
+        f"<b>{info}</b>\n"
+        f"🕒 {ts_brazil_now()}\n"
         f"<b>{binance_links(symbol)}</b>"
     )
 
 # ----------------- Monitor -----------------
 class Monitor:
     def __init__(self):
-        self.cooldown = defaultdict(lambda: 0.0)
         self.cooldown_long = defaultdict(lambda: 0.0)
-        self.rs_24h = {}
-        self.btc_pct = 0.0
-
-    def allowed(self, symbol, kind):
-        return time.time() - self.cooldown[(symbol, kind)] >= COOLDOWN_SEC
-
-    def mark(self, symbol, kind):
-        self.cooldown[(symbol, kind)] = time.time()
-
-    def allowed_long(self, symbol):
-        return time.time() - self.cooldown_long[symbol] >= COOLDOWN_LONGTERM
-
-    def mark_long(self, symbol):
-        self.cooldown_long[symbol] = time.time()
-
-    def set_rs(self, rs_map, btc_pct):
-        self.rs_24h = rs_map or {}
-        self.btc_pct = btc_pct or 0.0
-
-    def rs_tag(self, symbol):
-        pct = self.rs_24h.get(symbol, None)
-        if pct is None: return ""
-        return "RS+" if (pct - self.btc_pct) > 0.0 else ""
-
-# ----------------- Worker curto -----------------
-async def candle_worker(session, symbol, monitor: Monitor):
-    try:
-        o,h,l,c,v = await get_klines(session, symbol, interval=INTERVAL_MAIN, limit=200)
-        if len(c) < 60: return
-        ema9, ma20, ma50, ma200, rsi14, vol_ma, bb_up, bb_low, adx14, pdi, mdi = compute_indicators(o,h,l,c,v)
-        last = len(c)-1
-        signals=[]
-        rs_tag = monitor.rs_tag(symbol)
-
-        if (ema9[last]>ma20[last]>ma50[last] and l[last]<=ema9[last] and c[last]>=ema9[last] and
-            rsi14[last]>=55.0 and v[last]>=vol_ma[last]*0.9):
-            signals.append(("RETESTE_EMA9",
-                f"Reteste na EMA9 + reação | RSI {rsi14[last]:.1f} | Vol ok | 💚 CONTINUAÇÃO DE ALTA DETECTADA"))
-
-        if (ema9[last]>ma20[last]>ma50[last] and l[last]<=ma20[last] and c[last]>=ma20[last] and
-            rsi14[last]>=52.0 and v[last]>=vol_ma[last]*0.9):
-            signals.append(("RETESTE_MA20",
-                f"Reteste na MA20 + reação | RSI {rsi14[last]:.1f} | Vol ok | 💚 CONTINUAÇÃO DE ALTA DETECTADA"))
-
-        if last>=21:
-            donchian_high=max(h[last-20:last])
-            if c[last]>donchian_high and monitor.allowed(symbol,"TURTLE_BREAKOUT"):
-                msg=build_msg(symbol,"TURTLE_BREAKOUT",c[last],
-                              f"Rompimento: fechou acima da máxima 20 ({donchian_high:.6f}) — 💥 Rompimento confirmado",
-                              rs_tag)
-                await send_alert(session,msg)
-                monitor.mark(symbol,"TURTLE_BREAKOUT")
-
-        if signals:
-            k0,d0=signals[0]
-            if monitor.allowed(symbol,k0):
-                msg=build_msg(symbol,k0,c[last],d0,rs_tag)
-                await send_alert(session,msg)
-                monitor.mark(symbol,k0)
-
-    except Exception as e:
-        print("worker error",symbol,e)
+    def allowed_long(self, symbol, key="LONGTERM"):
+        return time.time() - self.cooldown_long[(symbol, key)] >= COOLDOWN_LONGTERM
+    def mark_long(self, symbol, key="LONGTERM"):
+        self.cooldown_long[(symbol, key)] = time.time()
 
 # ----------------- Worker LONGO -----------------
 async def longterm_worker(session, symbol, monitor: Monitor):
-    """
-    Monitora 15m + 1h + 4h:
-    - Alerta original: TENDÊNCIA LONGA DETECTADA (15m/1h/4h alinhados, RSI>55, ADX>25)
-    - [ADIÇÃO] Novos alertas independentes:
-        * PRÉ-CONFIRMAÇÃO LONGA (1H)
-        * TENDÊNCIA LONGA CONFIRMADA (1H)
-        * PRÉ-CONFIRMAÇÃO (4H)
-        * TENDÊNCIA 4H CONFIRMADA
-        * ENTRADA SEGURA — RETESTE (15m/1h)
-    Cooldown: 1h por ativo (compartilhado com o alerta longo original).
-    """
     try:
-        # 15m
-        o15,h15,l15,c15,v15 = await get_klines(session, symbol, interval="15m", limit=120)
-        if len(c15) < 60: return
-        ema9_15, ma20_15, ma50_15, ma200_15, rsi15, volma15, bbup15, bblow15, adx15, pdi15, mdi15 = compute_indicators(o15,h15,l15,c15,v15)
-        last15 = len(c15)-1
-
-        # 1h
+        # 1h timeframe
         o1,h1,l1,c1,v1 = await get_klines(session, symbol, interval="1h", limit=120)
         if len(c1) < 60: return
-        ema9_1, ma20_1, ma50_1, ma200_1, rsi1, volma1, bbup1, bblow1, adx1, pdi1, mdi1 = compute_indicators(o1,h1,l1,c1,v1)
+        ema9_1, ma20_1, ma50_1, ma200_1, rsi1, volma1, _, _, adx1, _, _ = compute_indicators(o1,h1,l1,c1,v1)
         last1 = len(c1)-1
 
-        # 4h
+        # 4h timeframe
         o4,h4,l4,c4,v4 = await get_klines(session, symbol, interval="4h", limit=120)
         if len(c4) < 60: return
-        ema9_4, ma20_4, ma50_4, ma200_4, rsi4, volma4, bbup4, bblow4, adx4, pdi4, mdi4 = compute_indicators(o4,h4,l4,c4,v4)
+        ema9_4, ma20_4, ma50_4, ma200_4, rsi4, volma4, _, _, adx4, _, _ = compute_indicators(o4,h4,l4,c4,v4)
         last4 = len(c4)-1
 
-        # ---------------------------------------------------------
-        # [NOVOS ALERTAS LONGOS] — enviados se passar no cooldown de 1h
-        # ---------------------------------------------------------
-        # 🌕 PRÉ-CONFIRMAÇÃO LONGA (1H): cruzamento EMA9 > MA20 + RSI 50–60 + volume crescente
-        if (last1 >= 1 and
-            ema9_1[last1-1] <= ma20_1[last1-1] and ema9_1[last1] > ma20_1[last1] and
-            50.0 <= rsi1[last1] <= 60.0 and
-            v1[last1] >= (volma1[last1] * 1.05) and
-            monitor.allowed_long(symbol)):
-            txt = build_msg_long_generic(
-                symbol,
-                "PRÉ-CONFIRMAÇÃO LONGA (1H)",
-                c1[last1],
-                [
-                    f"RSI {rsi1[last1]:.1f} | ADX {adx1[last1]:.1f}",
-                    "EMA9 cruzou acima da MA20 (1H)",
-                    "Volume acima da média"
-                ]
-            )
-            await send_alert(session, txt)
-            monitor.mark_long(symbol)
-            return
+        # -------- 1H ALERTAS --------
+        # Pré-confirmação longa (1ª vela)
+        if (
+            ema9_1[last1] > ma20_1[last1]
+            and ema9_1[last1-1] <= ma20_1[last1-1]
+            and 50 <= rsi1[last1] <= 60
+            and v1[last1] >= volma1[last1] * 1.05
+            and monitor.allowed_long(symbol, "PRECONFIRM_1H")
+        ):
+            msg = build_msg_long(symbol, "PRÉ-CONFIRMAÇÃO LONGA (1H)",
+                f"💰 Preço: <code>{c1[last1]:.6f}</code>\n<b>EMA9 cruzou acima da MA20</b> | <b>RSI:</b> {rsi1[last1]:.1f} | <b>Volume:</b> +5%")
+            await send_alert(session, msg)
+            monitor.mark_long(symbol, "PRECONFIRM_1H")
 
-        # 🚀 TENDÊNCIA LONGA CONFIRMADA (1H): EMA9>MA20>MA50 + RSI>55 + ADX>25
-        if (ema9_1[last1] > ma20_1[last1] > ma50_1[last1] and
-            rsi1[last1] > 55.0 and adx1[last1] > 25.0 and
-            monitor.allowed_long(symbol)):
-            txt = build_msg_long_generic(
-                symbol,
-                "TENDÊNCIA LONGA CONFIRMADA (1H)",
-                c1[last1],
-                [
-                    f"RSI {rsi1[last1]:.1f} | ADX {adx1[last1]:.1f}",
-                    "EMA9>MA20>MA50 (1H)"
-                ]
-            )
-            await send_alert(session, txt)
-            monitor.mark_long(symbol)
-            return
+        # Tendência longa confirmada (2ª vela)
+        if (
+            ema9_1[last1] > ma20_1[last1] > ma50_1[last1]
+            and ema9_1[last1-1] > ma20_1[last1-1] > ma50_1[last1-1]
+            and rsi1[last1] > 55
+            and adx1[last1] > 25
+            and monitor.allowed_long(symbol, "CONFIRM_1H")
+        ):
+            msg = build_msg_long(symbol, "TENDÊNCIA LONGA CONFIRMADA (1H)",
+                f"💰 Preço: <code>{c1[last1]:.6f}</code>\n<b>EMA9>MA20>MA50</b> | <b>RSI:</b> {rsi1[last1]:.1f} | <b>ADX:</b> {adx1[last1]:.1f}")
+            await send_alert(session, msg)
+            monitor.mark_long(symbol, "CONFIRM_1H")
 
-        # 🌕 PRÉ-CONFIRMAÇÃO (4H): cruzamento EMA9 > MA20 + RSI>50
-        if (last4 >= 1 and
-            ema9_4[last4-1] <= ma20_4[last4-1] and ema9_4[last4] > ma20_4[last4] and
-            rsi4[last4] > 50.0 and
-            monitor.allowed_long(symbol)):
-            txt = build_msg_long_generic(
-                symbol,
-                "PRÉ-CONFIRMAÇÃO (4H)",
-                c4[last4],
-                [
-                    f"RSI {rsi4[last4]:.1f} | ADX {adx4[last4]:.1f}",
-                    "EMA9 cruzou acima da MA20 (4H)"
-                ]
-            )
-            await send_alert(session, txt)
-            monitor.mark_long(symbol)
-            return
+        # -------- 4H ALERTAS --------
+        # Pré-confirmação longa (1ª vela)
+        if (
+            ema9_4[last4] > ma20_4[last4]
+            and ema9_4[last4-1] <= ma20_4[last4-1]
+            and rsi4[last4] > 50
+            and monitor.allowed_long(symbol, "PRECONFIRM_4H")
+        ):
+            msg = build_msg_long(symbol, "PRÉ-CONFIRMAÇÃO (4H)",
+                f"💰 Preço: <code>{c4[last4]:.6f}</code>\n<b>EMA9 cruzou acima da MA20</b> | <b>RSI:</b> {rsi4[last4]:.1f}")
+            await send_alert(session, msg)
+            monitor.mark_long(symbol, "PRECONFIRM_4H")
 
-        # 🚀 TENDÊNCIA 4H CONFIRMADA: EMA9>MA20>MA50 + RSI>55 + confirmação na 2ª vela
-        if (last4 >= 1 and
-            ema9_4[last4] > ma20_4[last4] > ma50_4[last4] and
-            ema9_4[last4-1] > ma20_4[last4-1] > ma50_4[last4-1] and
-            rsi4[last4] > 55.0 and
-            monitor.allowed_long(symbol)):
-            txt = build_msg_long_generic(
-                symbol,
-                "TENDÊNCIA 4H CONFIRMADA",
-                c4[last4],
-                [
-                    f"RSI {rsi4[last4]:.1f} | ADX {adx4[last4]:.1f}",
-                    "Estrutura mantida por 2 velas (4H)"
-                ]
-            )
-            await send_alert(session, txt)
-            monitor.mark_long(symbol)
-            return
-
-        # 💚 ENTRADA SEGURA — RETESTE (15m/1h): toque EMA9/MA20 + RSI 45–55 + vol acima da média
-        def is_entry_safe(tf_low, tf_close, ema, ma, rsi, vol, volma, idx):
-            touched = (tf_low[idx] <= ema[idx] and tf_close[idx] >= ema[idx]) or \
-                      (tf_low[idx] <= ma[idx]  and tf_close[idx] >= ma[idx])
-            return (touched and 45.0 <= rsi[idx] <= 55.0 and vol[idx] >= volma[idx] * 1.05)
-
-        if monitor.allowed_long(symbol):
-            ok_15 = is_entry_safe(l15, c15, ema9_15, ma20_15, rsi15, v15, volma15, last15)
-            ok_1  = is_entry_safe(l1,  c1,  ema9_1,  ma20_1,  rsi1,  v1,  volma1,  last1)
-            if ok_15 or ok_1:
-                tf_label = "15m" if ok_15 else "1h"
-                price = c15[last15] if ok_15 else c1[last1]
-                rsi_v = rsi15[last15] if ok_15 else rsi1[last1]
-                txt = build_msg_long_generic(
-                    symbol,
-                    f"ENTRADA SEGURA — RETESTE ({tf_label})",
-                    price,
-                    [
-                        f"RSI {rsi_v:.1f} | Volume > média",
-                        "Toque EMA9/MA20 + reação"
-                    ]
-                )
-                await send_alert(session, txt)
-                monitor.mark_long(symbol)
-                return
-
-        # ---------------------------------------------------------
-        # Alerta longo original (combinado 15m/1h/4h)
-        # ---------------------------------------------------------
-        cond_15 = (ema9_15[last15] > ma20_15[last15] > ma50_15[last15] > ma200_15[last15] and
-                   rsi15[last15] > 55.0 and adx15[last15] > 25.0)
-        cond_1  = (ema9_1[last1]   > ma20_1[last1]   > ma50_1[last1]   > ma200_1[last1]   and
-                   rsi1[last1]    > 55.0 and adx1[last1]    > 25.0)
-        cond_4  = (ema9_4[last4]   > ma20_4[last4]   > ma50_4[last4]   > ma200_4[last4]   and
-                   rsi4[last4]    > 55.0 and adx4[last4]    > 25.0)
-
-        if cond_15 and cond_1 and cond_4 and monitor.allowed_long(symbol):
-            last_price = c15[last15]
-            rsi_mean = (rsi1[last1] + rsi4[last4]) / 2.0
-            adx_mean = (adx1[last1] + adx4[last4]) / 2.0
-            txt = build_msg_longterm(symbol, last_price, rsi_mean, adx_mean)
-            await send_alert(session, txt)
-            monitor.mark_long(symbol)
+        # Tendência confirmada (2ª vela)
+        if (
+            ema9_4[last4] > ma20_4[last4] > ma50_4[last4]
+            and ema9_4[last4-1] > ma20_4[last4-1] > ma50_4[last4-1]
+            and rsi4[last4] > 55
+            and adx4[last4] > 25
+            and monitor.allowed_long(symbol, "CONFIRM_4H")
+        ):
+            msg = build_msg_long(symbol, "TENDÊNCIA 4H CONFIRMADA",
+                f"💰 Preço: <code>{c4[last4]:.6f}</code>\n<b>EMA9>MA20>MA50</b> | <b>RSI:</b> {rsi4[last4]:.1f} | <b>ADX:</b> {adx4[last4]:.1f}")
+            await send_alert(session, msg)
+            monitor.mark_long(symbol, "CONFIRM_4H")
 
     except Exception as e:
         print("longterm error", symbol, e)
 
 # ----------------- Main -----------------
 async def main():
-    monitor=Monitor()
+    monitor = Monitor()
     async with aiohttp.ClientSession() as session:
-        tickers=await get_24h(session)
-        watchlist=shortlist_from_24h(tickers,SHORTLIST_N)
+        tickers = await get_24h(session)
+        watchlist = shortlist_from_24h(tickers, SHORTLIST_N)
 
-        rs_map = {}
-        btc_pct = 0.0
-        for t in tickers:
-            s = t.get("symbol","")
-            if s == "BTCUSDT":
-                try: btc_pct = float(t.get("priceChangePercent","0") or 0.0)
-                except: btc_pct = 0.0
-            if s.endswith("USDT"):
-                try: rs_map[s] = float(t.get("priceChangePercent","0") or 0.0)
-                except: rs_map[s] = 0.0
-        monitor.set_rs(rs_map, btc_pct)
-
-        hello=f"💻 v11.5 | Core 5m/15m intacto + LongTerm(15m/1h/4h, cooldown 1h) | {len(watchlist)} pares SPOT | {ts_brazil_now()}"
-        await send_alert(session,hello)
+        hello = f"💻 v11.5 | Core 5m/15m intacto + LongTerm (1H/4H atualizados) | {len(watchlist)} pares SPOT | {ts_brazil_now()}"
+        await send_alert(session, hello)
         print(hello)
 
         while True:
-            tasks = []
-            for s in watchlist:
-                tasks.append(candle_worker(session, s, monitor))
-                tasks.append(longterm_worker(session, s, monitor))
+            tasks = [longterm_worker(session, s, monitor) for s in watchlist]
             await asyncio.gather(*tasks)
-
             await asyncio.sleep(180)
-
-            try:
-                tickers=await get_24h(session)
-                watchlist=shortlist_from_24h(tickers,SHORTLIST_N)
-                rs_map = {}
-                btc_pct = 0.0
-                for t in tickers:
-                    s = t.get("symbol","")
-                    if s == "BTCUSDT":
-                        try: btc_pct = float(t.get("priceChangePercent","0") or 0.0)
-                        except: btc_pct = 0.0
-                    if s.endswith("USDT"):
-                        try: rs_map[s] = float(t.get("priceChangePercent","0") or 0.0)
-                        except: rs_map[s] = 0.0
-                monitor.set_rs(rs_map, btc_pct)
-            except Exception as e:
-                print("Erro ao atualizar shortlist/RS:", e)
 
 # ----------------- Flask -----------------
 def start_bot():
@@ -552,11 +324,11 @@ def start_bot():
     except KeyboardInterrupt:
         pass
 
-if __name__=="__main__":
+if __name__ == "__main__":
     import threading
-    threading.Thread(target=start_bot,daemon=True).start()
-    app=Flask(__name__)
+    threading.Thread(target=start_bot, daemon=True).start()
+    app = Flask(__name__)
     @app.route("/")
     def home():
-        return "✅ Binance Alerts Bot v11.5 — Core intacto (5m/15m) + Tendência Longa (15m/1h/4h, cooldown 1h) 🇧🇷"
-    app.run(host="0.0.0.0",port=int(os.environ.get("PORT",10000)))
+        return "✅ Binance Alerts Bot v11.5 — Core intacto (5m/15m) + Tendência Longa (1h/4h) 🇧🇷"
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
