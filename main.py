@@ -1,6 +1,6 @@
-# main_py15m_final.py
-# ✅ Versão completa e funcional com 5m + 15m + 1h + 4h
-# Corrigido e revisado linha a linha — Aurora 2025-10-09
+# main_py15m_stable.py
+# ✅ Versão estável — 5m, 15m, 1h, 4h independentes
+# Correção: cooldowns separados por timeframe para evitar bloqueios
 
 import os, asyncio, time, math
 from urllib.parse import urlencode
@@ -22,7 +22,7 @@ CHAT_ID = os.getenv("CHAT_ID", "").strip()
 WEBHOOK_BASE = os.getenv("WEBHOOK_BASE", "").rstrip("/")
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "")
 
-# ----------------- Utilidades -----------------
+# ----------------- Utils -----------------
 def fmt_symbol(s): return s[:-4] + "/USDT" if s.endswith("USDT") else s
 def binance_links(s):
     b=s.upper().replace("USDT","")
@@ -90,53 +90,39 @@ def shortlist_from_24h(ticks,n=400):
     out.sort(key=lambda x:(abs(x[1]),x[2]),reverse=True)
     return [x[0] for x in out[:n]]
 
-# ----------------- Monitor -----------------
+# ----------------- Monitor com cooldown separado -----------------
 class Monitor:
     def __init__(s):
-        s.cd_short=defaultdict(lambda:0.0);s.cd_long=defaultdict(lambda:0.0)
-    def allowed(s,a,k):return time.time()-s.cd_short[(a,k)]>=COOLDOWN_SEC
-    def mark(s,a,k):s.cd_short[(a,k)]=time.time()
-    def allowed_long(s,a):return time.time()-s.cd_long[a]>=COOLDOWN_LONGTERM
-    def mark_long(s,a):s.cd_long[a]=time.time()
+        s.cd=defaultdict(lambda:0.0)
+    def allowed(s,a,k,tf):return time.time()-s.cd[(a,k,tf)]>=COOLDOWN_SEC
+    def mark(s,a,k,tf):s.cd[(a,k,tf)]=time.time()
 
 # ----------------- Worker 5m -----------------
-async def candle_worker(sess,sym,m):
+async def worker_5m(sess,sym,m):
     try:
         o,h,l,c,v=await get_klines(sess,sym,"5m",200)
         if len(c)<60:return
         e9,m20,m50,m200,rsi,vm=compute_indicators(o,h,l,c,v);i=len(c)-1;j=i-1
-        # tendência iniciando
-        if e9[j]<=min(m20[j],m50[j]) and e9[i]>m20[i] and e9[i]>m50[i] and m.allowed(sym,"INI5"):
-            await send_alert(sess,f"⭐ {fmt_symbol(sym)} ⬆️ — TENDÊNCIA INICIANDO (5m)\n💰 <code>{c[i]:.6f}</code>\n🧠 EMA9 cruzou MA20/MA50\n⏰ {ts_brazil_now()}\n{binance_links(sym)}");m.mark(sym,"INI5")
-        # pré-confirmada
-        if e9[i]>m20[i]>m50[i]>m200[i] and m.allowed(sym,"PRE5"):
-            await send_alert(sess,f"🌕 {fmt_symbol(sym)} — PRÉ-CONFIRMADA (5m)\n💰 <code>{c[i]:.6f}</code>\n🧠 Médias cruzaram MA200\n⏰ {ts_brazil_now()}\n{binance_links(sym)}");m.mark(sym,"PRE5")
+        if e9[j]<=min(m20[j],m50[j]) and e9[i]>m20[i] and e9[i]>m50[i] and m.allowed(sym,"INI5","5m"):
+            await send_alert(sess,f"⭐ {fmt_symbol(sym)} ⬆️ — TENDÊNCIA INICIANDO (5m)\n💰 <code>{c[i]:.6f}</code>\n🧠 EMA9 cruzou MA20/MA50\n⏰ {ts_brazil_now()}\n{binance_links(sym)}");m.mark(sym,"INI5","5m")
+        if e9[i]>m20[i]>m50[i]>m200[i] and m.allowed(sym,"PRE5","5m"):
+            await send_alert(sess,f"🌕 {fmt_symbol(sym)} — PRÉ-CONFIRMADA (5m)\n💰 <code>{c[i]:.6f}</code>\n🧠 Médias cruzaram MA200\n⏰ {ts_brazil_now()}\n{binance_links(sym)}");m.mark(sym,"PRE5","5m")
     except Exception as e:print("5m",sym,e)
 
 # ----------------- Worker 15m -----------------
-async def midterm_worker(sess,sym,m):
+async def worker_15m(sess,sym,m):
     try:
         o,h,l,c,v=await get_klines(sess,sym,"15m",200)
         if len(c)<60:return
         e9,m20,m50,m200,rsi,vm=compute_indicators(o,h,l,c,v);i=len(c)-1;j=i-1
-        # pré 15m
-        if e9[j]<=m200[j] and e9[i]>m200[i] and rsi[i]>=50 and m.allowed(sym,"PRE15"):
-            await send_alert(sess,f"🌕 {fmt_symbol(sym)} — PRÉ-CONFIRMADA (15m)\n💰 <code>{c[i]:.6f}</code>\n🧠 EMA9 cruzou MA200\n⏰ {ts_brazil_now()}\n{binance_links(sym)}");m.mark(sym,"PRE15")
-        # confirmada
-        if e9[i]>m20[i]>m50[i]>m200[i] and rsi[i]>55 and m.allowed(sym,"CONF15"):
-            await send_alert(sess,f"💎 {fmt_symbol(sym)} — TENDÊNCIA CONFIRMADA (15m)\n💰 <code>{c[i]:.6f}</code>\n🧠 Médias alinhadas + RSI {rsi[i]:.1f}\n⏰ {ts_brazil_now()}\n{binance_links(sym)}");m.mark(sym,"CONF15")
-        # retestes
-        if l[i]<=e9[i] and c[i]>=e9[i] and rsi[i]>=52 and v[i]>=vm[i]*0.9 and m.allowed(sym,"RET9_15"):
-            await send_alert(sess,f"♻️ {fmt_symbol(sym)} — RETESTE EMA9 (15m)\n💰 <code>{c[i]:.6f}</code>\n🧠 Reação + RSI {rsi[i]:.1f}\n⏰ {ts_brazil_now()}\n{binance_links(sym)}");m.mark(sym,"RET9_15")
-        if l[i]<=m20[i] and c[i]>=m20[i] and rsi[i]>=50 and v[i]>=vm[i]*0.9 and m.allowed(sym,"RET20_15"):
-            await send_alert(sess,f"♻️ {fmt_symbol(sym)} — RETESTE MA20 (15m)\n💰 <code>{c[i]:.6f}</code>\n🧠 Reação + RSI {rsi[i]:.1f}\n⏰ {ts_brazil_now()}\n{binance_links(sym)}");m.mark(sym,"RET20_15")
-        # rompimento
-        if i>=21 and c[i]>max(h[i-20:i]) and m.allowed(sym,"ROMP15"):
-            await send_alert(sess,f"📈 {fmt_symbol(sym)} — ROMPIMENTO (15m)\n💰 <code>{c[i]:.6f}</code>\n🧠 Fechou acima da máxima 20\n⏰ {ts_brazil_now()}\n{binance_links(sym)}");m.mark(sym,"ROMP15")
+        if e9[j]<=m200[j] and e9[i]>m200[i] and rsi[i]>=50 and m.allowed(sym,"PRE15","15m"):
+            await send_alert(sess,f"🌕 {fmt_symbol(sym)} — PRÉ-CONFIRMADA (15m)\n💰 <code>{c[i]:.6f}</code>\n🧠 EMA9 cruzou MA200\n⏰ {ts_brazil_now()}\n{binance_links(sym)}");m.mark(sym,"PRE15","15m")
+        if e9[i]>m20[i]>m50[i]>m200[i] and rsi[i]>55 and m.allowed(sym,"CONF15","15m"):
+            await send_alert(sess,f"💎 {fmt_symbol(sym)} — TENDÊNCIA CONFIRMADA (15m)\n💰 <code>{c[i]:.6f}</code>\n🧠 Médias alinhadas + RSI {rsi[i]:.1f}\n⏰ {ts_brazil_now()}\n{binance_links(sym)}");m.mark(sym,"CONF15","15m")
     except Exception as e:print("15m",sym,e)
 
 # ----------------- Worker Longo -----------------
-async def longterm_worker(sess,sym,m):
+async def worker_long(sess,sym,m):
     try:
         o1,h1,l1,c1,v1=await get_klines(sess,sym,"1h",200)
         o4,h4,l4,c4,v4=await get_klines(sess,sym,"4h",200)
@@ -144,18 +130,14 @@ async def longterm_worker(sess,sym,m):
         e91,m201,m501,m2001,rsi1,vm1=compute_indicators(o1,h1,l1,c1,v1)
         e94,m204,m504,m2004,rsi4,vm4=compute_indicators(o4,h4,l4,c4,v4)
         i1=len(c1)-1;i4=len(c4)-1
-        # pré 1h
-        if e91[i1-1]<=m201[i1-1] and e91[i1]>m201[i1] and 50<=rsi1[i1]<=60 and v1[i1]>=vm1[i1]*1.05 and m.allowed_long(sym):
-            await send_alert(sess,f"🌕 <b>{fmt_symbol(sym)} — PRÉ-CONFIRMAÇÃO LONGA (1H)</b>\n<b>💰</b> <code>{c1[i1]:.6f}</code>\n<b>RSI {rsi1[i1]:.1f}</b>\n<b>🕒 {ts_brazil_now()}</b>\n{binance_links(sym)}");m.mark_long(sym)
-        # confirmada 1h
-        if e91[i1]>m201[i1]>m501[i1]>m2001[i1] and rsi1[i1]>55 and m.allowed_long(sym):
-            await send_alert(sess,f"🚀 <b>{fmt_symbol(sym)} — TENDÊNCIA LONGA CONFIRMADA (1H)</b>\n<b>💰</b> <code>{c1[i1]:.6f}</code>\n<b>RSI {rsi1[i1]:.1f}</b>\n<b>🕒 {ts_brazil_now()}</b>\n{binance_links(sym)}");m.mark_long(sym)
-        # pré 4h
-        if e94[i4-1]<=m204[i4-1] and e94[i4]>m204[i4] and rsi4[i4]>50 and m.allowed_long(sym):
-            await send_alert(sess,f"🌕 <b>{fmt_symbol(sym)} — PRÉ-CONFIRMAÇÃO LONGA (4H)</b>\n<b>💰</b> <code>{c4[i4]:.6f}</code>\n<b>RSI {rsi4[i4]:.1f}</b>\n<b>🕒 {ts_brazil_now()}</b>\n{binance_links(sym)}");m.mark_long(sym)
-        # confirmada 4h
-        if e94[i4]>m204[i4]>m504[i4]>m2004[i4] and rsi4[i4]>55 and m.allowed_long(sym):
-            await send_alert(sess,f"🚀 <b>{fmt_symbol(sym)} — TENDÊNCIA LONGA CONFIRMADA (4H)</b>\n<b>💰</b> <code>{c4[i4]:.6f}</code>\n<b>RSI {rsi4[i4]:.1f}</b>\n<b>🕒 {ts_brazil_now()}</b>\n{binance_links(sym)}");m.mark_long(sym)
+        if e91[i1-1]<=m201[i1-1] and e91[i1]>m201[i1] and 50<=rsi1[i1]<=60 and m.allowed(sym,"PRE1H","1h"):
+            await send_alert(sess,f"🌕 <b>{fmt_symbol(sym)} — PRÉ-CONFIRMAÇÃO LONGA (1H)</b>\n💰 <code>{c1[i1]:.6f}</code>\n🧠 EMA9 cruzou MA20 + RSI {rsi1[i1]:.1f}\n⏰ {ts_brazil_now()}\n{binance_links(sym)}");m.mark(sym,"PRE1H","1h")
+        if e91[i1]>m201[i1]>m501[i1]>m2001[i1] and rsi1[i1]>55 and m.allowed(sym,"CONF1H","1h"):
+            await send_alert(sess,f"🚀 <b>{fmt_symbol(sym)} — TENDÊNCIA LONGA CONFIRMADA (1H)</b>\n💰 <code>{c1[i1]:.6f}</code>\n🧠 Médias alinhadas + RSI {rsi1[i1]:.1f}\n⏰ {ts_brazil_now()}\n{binance_links(sym)}");m.mark(sym,"CONF1H","1h")
+        if e94[i4-1]<=m204[i4-1] and e94[i4]>m204[i4] and rsi4[i4]>50 and m.allowed(sym,"PRE4H","4h"):
+            await send_alert(sess,f"🌕 <b>{fmt_symbol(sym)} — PRÉ-CONFIRMAÇÃO LONGA (4H)</b>\n💰 <code>{c4[i4]:.6f}</code>\n🧠 EMA9 cruzou MA20 + RSI {rsi4[i4]:.1f}\n⏰ {ts_brazil_now()}\n{binance_links(sym)}");m.mark(sym,"PRE4H","4h")
+        if e94[i4]>m204[i4]>m504[i4]>m2004[i4] and rsi4[i4]>55 and m.allowed(sym,"CONF4H","4h"):
+            await send_alert(sess,f"🚀 <b>{fmt_symbol(sym)} — TENDÊNCIA LONGA CONFIRMADA (4H)</b>\n💰 <code>{c4[i4]:.6f}</code>\n🧠 Médias alinhadas + RSI {rsi4[i4]:.1f}\n⏰ {ts_brazil_now()}\n{binance_links(sym)}");m.mark(sym,"CONF4H","4h")
     except Exception as e:print("long",sym,e)
 
 # ----------------- Main -----------------
@@ -163,11 +145,11 @@ async def main():
     m=Monitor()
     async with aiohttp.ClientSession() as s:
         t=await get_24h(s);w=shortlist_from_24h(t,SHORTLIST_N)
-        hello=f"💻 py15m_final | {len(w)} pares SPOT | {ts_brazil_now()}";await send_alert(s,hello);print(hello)
+        hello=f"💻 py15m_stable | {len(w)} pares SPOT | {ts_brazil_now()}";await send_alert(s,hello);print(hello)
         while True:
             tasks=[]
             for x in w:
-                tasks+=[candle_worker(s,x,m),midterm_worker(s,x,m),longterm_worker(s,x,m)]
+                tasks+=[worker_5m(s,x,m),worker_15m(s,x,m),worker_long(s,x,m)]
             await asyncio.gather(*tasks)
             await asyncio.sleep(180)
 
@@ -180,5 +162,5 @@ if __name__=="__main__":
     threading.Thread(target=start_bot,daemon=True).start()
     app=Flask(__name__)
     @app.route("/")
-    def home():return "✅ Binance Alerts Bot py15m_final 🇧🇷"
+    def home():return "✅ Binance Alerts Bot py15m_stable 🇧🇷"
     app.run(host="0.0.0.0",port=int(os.environ.get("PORT",10000)))
