@@ -1,6 +1,5 @@
-# main_py15m_stable.py
-# ✅ Versão estável — 5m, 15m, 1h, 4h independentes
-# Correção: cooldowns separados por timeframe para evitar bloqueios
+# main_py15.py
+# Bot Binance SPOT - versão estável com alertas curtos e longos
 
 import os, asyncio, time, math
 from urllib.parse import urlencode
@@ -9,158 +8,193 @@ from datetime import datetime, timezone, timedelta
 import aiohttp
 from flask import Flask
 
-# ----------------- Config -----------------
 BINANCE_HTTP = "https://api.binance.com"
+INTERVAL_MAIN = "5m"
+INTERVAL_CONF = "15m"
 SHORTLIST_N = 65
 COOLDOWN_SEC = 15 * 60
 COOLDOWN_LONGTERM = 60 * 60
-EMA_FAST, MA_SLOW, MA_MED, MA_LONG, RSI_LEN, VOL_MA = 9, 20, 50, 200, 14, 9
-MIN_PCT, MIN_QV = 1.0, 300_000.0
+MIN_PCT = 1.0
+MIN_QV = 300_000.0
+
+EMA_FAST = 9
+MA_SLOW = 20
+MA_MED = 50
+MA_LONG = 200
+RSI_LEN = 14
+VOL_MA = 9
+BB_LEN = 20
+ADX_LEN = 14
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 CHAT_ID = os.getenv("CHAT_ID", "").strip()
 WEBHOOK_BASE = os.getenv("WEBHOOK_BASE", "").rstrip("/")
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "")
 
-# ----------------- Utils -----------------
-def fmt_symbol(s): return s[:-4] + "/USDT" if s.endswith("USDT") else s
-def binance_links(s):
-    b=s.upper().replace("USDT","")
-    a=f"https://www.binance.com/en/trade/{b}_USDT?type=spot"
-    c=f"https://www.binance.com/en/trade?type=spot&symbol={b}_USDT"
-    return f'🔗 <a href="{a}">Abrir (A)</a> | <a href="{c}">Abrir (B)</a>'
-def ts_brazil_now(): return (datetime.now(timezone.utc)-timedelta(hours=3)).strftime("%Y-%m-%d %H:%M:%S")+" 🇧🇷"
+# ----------------- Funções -----------------
+def fmt_symbol(symbol):
+    return symbol[:-4] + "/USDT" if symbol.endswith("USDT") else symbol
 
-async def send_alert(session,text):
+def binance_links(symbol):
+    base = symbol.upper().replace("USDT", "")
+    a = f"https://www.binance.com/en/trade/{base}_USDT?type=spot"
+    b = f"https://www.binance.com/en/trade?type=spot&symbol={base}_USDT"
+    return f'🔗 <a href="{a}">Abrir (A)</a> | <a href="{b}">Abrir (B)</a>'
+
+def ts_brazil_now():
+    return (datetime.now(timezone.utc) - timedelta(hours=3)).strftime("%Y-%m-%d %H:%M:%S") + " 🇧🇷"
+
+async def send_alert(session, text):
     if WEBHOOK_BASE and WEBHOOK_SECRET:
-        try: await session.post(f"{WEBHOOK_BASE}/{WEBHOOK_SECRET}",json={"message":text},timeout=10)
-        except: pass
+        try:
+            await session.post(f"{WEBHOOK_BASE}/{WEBHOOK_SECRET}", json={"message": text}, timeout=10)
+        except:
+            pass
     if TELEGRAM_TOKEN and CHAT_ID:
         try:
-            url=f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-            await session.post(url,data={"chat_id":CHAT_ID,"text":text,"parse_mode":"HTML","disable_web_page_preview":True},timeout=10)
-        except: pass
+            url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+            payload = {"chat_id": CHAT_ID, "text": text, "parse_mode": "HTML", "disable_web_page_preview": True}
+            await session.post(url, data=payload, timeout=10)
+        except:
+            pass
 
-# ----------------- Indicadores -----------------
-def sma(seq,n):
-    out,q,s=[],deque(),0
+def sma(seq, n):
+    out, q, s = [], deque(), 0.0
     for x in seq:
-        q.append(x);s+=x
-        if len(q)>n:s-=q.popleft()
-        out.append(s/len(q))
+        q.append(x); s += x
+        if len(q) > n: s -= q.popleft()
+        out.append(s / len(q))
     return out
-def ema(seq,span):
-    if not seq:return []
-    a=2/(span+1);e=seq[0];out=[e]
+
+def ema(seq, span):
+    if not seq: return []
+    out = []
+    alpha = 2.0 / (span + 1.0)
+    e = seq[0]; out.append(e)
     for x in seq[1:]:
-        e=a*x+(1-a)*e;out.append(e)
+        e = alpha * x + (1 - alpha) * e
+        out.append(e)
     return out
-def rsi_wilder(c,period=14):
-    if len(c)==0:return []
-    d=[0]+[c[i]-c[i-1] for i in range(1,len(c))]
-    g=[max(x,0) for x in d];l=[max(-x,0) for x in d];r=[50]*len(c)
-    if len(c)<period+1:return r
-    ag=sum(g[1:period+1])/period;al=sum(l[1:period+1])/period
-    for i in range(period+1,len(c)):
-        ag=(ag*(period-1)+g[i])/period;al=(al*(period-1)+l[i])/period
-        rs=ag/(al+1e-12);r[i]=100-(100/(1+rs))
-    return r
+
+def rolling_std(seq, n):
+    out, q = [], deque()
+    for x in seq:
+        q.append(x)
+        if len(q) > n: q.popleft()
+        m = sum(q) / len(q)
+        var = sum((v - m) ** 2 for v in q) / len(q)
+        out.append(math.sqrt(var))
+    return out
+
+def rsi_wilder(closes, period=14):
+    if len(closes) == 0: return []
+    deltas = [0.0] + [closes[i] - closes[i-1] for i in range(1, len(closes))]
+    gains = [max(d, 0.0) for d in deltas]
+    losses = [max(-d, 0.0) for d in deltas]
+    rsis = [50.0] * len(closes)
+    if len(closes) < period + 1: return rsis
+    avg_gain = sum(gains[1:period+1]) / period
+    avg_loss = sum(losses[1:period+1]) / period
+    for i in range(period+1, len(closes)):
+        avg_gain = (avg_gain * (period - 1) + gains[i]) / period
+        avg_loss = (avg_loss * (period - 1) + losses[i]) / period
+        rs = avg_gain / (avg_loss + 1e-12)
+        rsis[i] = 100.0 - (100.0 / (1.0 + rs))
+    return rsis
+
+def adx(h, l, c, period=14):
+    n = len(c)
+    if n < period + 1: return [20.0]*n, [0.0]*n, [0.0]*n
+    tr = [max(h[i]-l[i], abs(h[i]-c[i-1]), abs(l[i]-c[i-1])) for i in range(1,n)]
+    atr = [sum(tr[:period])/period]*n
+    plus_dm, minus_dm = [0.0]*n, [0.0]*n
+    for i in range(1,n):
+        up, down = h[i]-h[i-1], l[i-1]-l[i]
+        plus_dm[i] = up if up>down and up>0 else 0
+        minus_dm[i] = down if down>up and down>0 else 0
+    pdm, mdm = [sum(plus_dm[:period])]*n, [sum(minus_dm[:period])]*n
+    plus_di = [100*pdm[i]/(atr[i]+1e-12) for i in range(n)]
+    minus_di = [100*mdm[i]/(atr[i]+1e-12) for i in range(n)]
+    dx = [100*abs(plus_di[i]-minus_di[i])/(plus_di[i]+minus_di[i]+1e-12) for i in range(n)]
+    adx_vals = [sum(dx[:period])/period]*n
+    return adx_vals, plus_di, minus_di
+
 def compute_indicators(o,h,l,c,v):
-    return ema(c,EMA_FAST),sma(c,MA_SLOW),sma(c,MA_MED),sma(c,MA_LONG),rsi_wilder(c,RSI_LEN),sma(v,VOL_MA)
+    ema9 = ema(c, EMA_FAST)
+    ma20 = sma(c, MA_SLOW)
+    ma50 = sma(c, MA_MED)
+    ma200 = sma(c, MA_LONG)
+    rsi14 = rsi_wilder(c, RSI_LEN)
+    volma = sma(v, VOL_MA)
+    return ema9, ma20, ma50, ma200, rsi14, volma
 
-# ----------------- Binance -----------------
-async def get_klines(s,sym,itv="5m",lim=200):
-    url=f"{BINANCE_HTTP}/api/v3/klines?{urlencode({'symbol':sym,'interval':itv,'limit':lim})}"
-    async with s.get(url,timeout=12) as r:
-        r.raise_for_status();d=await r.json()
-    o,h,l,c,v=[],[],[],[],[]
-    for k in d[:-1]:
-        o.append(float(k[1]));h.append(float(k[2]));l.append(float(k[3]));c.append(float(k[4]));v.append(float(k[5]))
-    return o,h,l,c,v
-async def get_24h(s):
-    async with s.get(f"{BINANCE_HTTP}/api/v3/ticker/24hr",timeout=15) as r:
-        r.raise_for_status();return await r.json()
-def shortlist_from_24h(ticks,n=400):
-    out=[];blk=("UP","DOWN","BULL","BEAR","PERP","_PERP","USD_","_USD","_BUSD","_FDUSD","_TUSD","_USDC","_DAI","_BTC","_EUR","_TRY","_BRL","_ETH","_BNB","_SOL")
-    for t in ticks:
-        s=t.get("symbol","")
-        if not s.endswith("USDT") or any(x in s for x in blk):continue
-        pct=float(t.get("priceChangePercent","0")or 0);qv=float(t.get("quoteVolume","0")or 0)
-        if abs(pct)>=1 and qv>=300000:out.append((s,pct,qv))
-    out.sort(key=lambda x:(abs(x[1]),x[2]),reverse=True)
-    return [x[0] for x in out[:n]]
-
-# ----------------- Monitor com cooldown separado -----------------
+# ----------------- Monitor -----------------
 class Monitor:
-    def __init__(s):
-        s.cd=defaultdict(lambda:0.0)
-    def allowed(s,a,k,tf):return time.time()-s.cd[(a,k,tf)]>=COOLDOWN_SEC
-    def mark(s,a,k,tf):s.cd[(a,k,tf)]=time.time()
+    def __init__(self):
+        self.cooldown = defaultdict(lambda: 0.0)
+        self.cooldown_long = defaultdict(lambda: 0.0)
+    def allowed(self,s,k): return time.time()-self.cooldown[(s,k)]>=COOLDOWN_SEC
+    def mark(self,s,k): self.cooldown[(s,k)]=time.time()
+    def allowed_long(self,s): return time.time()-self.cooldown_long[s]>=COOLDOWN_LONGTERM
+    def mark_long(self,s): self.cooldown_long[s]=time.time()
 
-# ----------------- Worker 5m -----------------
-async def worker_5m(sess,sym,m):
-    try:
-        o,h,l,c,v=await get_klines(sess,sym,"5m",200)
-        if len(c)<60:return
-        e9,m20,m50,m200,rsi,vm=compute_indicators(o,h,l,c,v);i=len(c)-1;j=i-1
-        if e9[j]<=min(m20[j],m50[j]) and e9[i]>m20[i] and e9[i]>m50[i] and m.allowed(sym,"INI5","5m"):
-            await send_alert(sess,f"⭐ {fmt_symbol(sym)} ⬆️ — TENDÊNCIA INICIANDO (5m)\n💰 <code>{c[i]:.6f}</code>\n🧠 EMA9 cruzou MA20/MA50\n⏰ {ts_brazil_now()}\n{binance_links(sym)}");m.mark(sym,"INI5","5m")
-        if e9[i]>m20[i]>m50[i]>m200[i] and m.allowed(sym,"PRE5","5m"):
-            await send_alert(sess,f"🌕 {fmt_symbol(sym)} — PRÉ-CONFIRMADA (5m)\n💰 <code>{c[i]:.6f}</code>\n🧠 Médias cruzaram MA200\n⏰ {ts_brazil_now()}\n{binance_links(sym)}");m.mark(sym,"PRE5","5m")
-    except Exception as e:print("5m",sym,e)
+# ----------------- Workers -----------------
+async def get_klines(session, symbol, interval="5m", limit=200):
+    params = {"symbol": symbol, "interval": interval, "limit": limit}
+    url = f"{BINANCE_HTTP}/api/v3/klines?{urlencode(params)}"
+    async with session.get(url, timeout=10) as r:
+        r.raise_for_status(); data = await r.json()
+    o,h,l,c,v=[],[],[],[],[]
+    for k in data[:-1]:
+        o.append(float(k[1])); h.append(float(k[2])); l.append(float(k[3]))
+        c.append(float(k[4])); v.append(float(k[5]))
+    return o,h,l,c,v
 
-# ----------------- Worker 15m -----------------
-async def worker_15m(sess,sym,m):
+async def candle_worker(session, symbol, monitor):
     try:
-        o,h,l,c,v=await get_klines(sess,sym,"15m",200)
-        if len(c)<60:return
-        e9,m20,m50,m200,rsi,vm=compute_indicators(o,h,l,c,v);i=len(c)-1;j=i-1
-        if e9[j]<=m200[j] and e9[i]>m200[i] and rsi[i]>=50 and m.allowed(sym,"PRE15","15m"):
-            await send_alert(sess,f"🌕 {fmt_symbol(sym)} — PRÉ-CONFIRMADA (15m)\n💰 <code>{c[i]:.6f}</code>\n🧠 EMA9 cruzou MA200\n⏰ {ts_brazil_now()}\n{binance_links(sym)}");m.mark(sym,"PRE15","15m")
-        if e9[i]>m20[i]>m50[i]>m200[i] and rsi[i]>55 and m.allowed(sym,"CONF15","15m"):
-            await send_alert(sess,f"💎 {fmt_symbol(sym)} — TENDÊNCIA CONFIRMADA (15m)\n💰 <code>{c[i]:.6f}</code>\n🧠 Médias alinhadas + RSI {rsi[i]:.1f}\n⏰ {ts_brazil_now()}\n{binance_links(sym)}");m.mark(sym,"CONF15","15m")
-    except Exception as e:print("15m",sym,e)
+        o,h,l,c,v = await get_klines(session, symbol, interval="5m", limit=200)
+        ema9,ma20,ma50,ma200,rsi14,volma = compute_indicators(o,h,l,c,v)
+        last=len(c)-1
+        if ema9[last]>ma20[last]>ma50[last] and c[last]>ma200[last] and monitor.allowed(symbol,"TENDENCIA_PRE_CONF_5M"):
+            msg=f"🌕 <b>{fmt_symbol(symbol)} — PRÉ-CONFIRMADA (5m)</b>\n💰 <code>{c[last]:.6f}</code>\n🧠 Médias cruzaram MA200\n⏰ {ts_brazil_now()}\n{binance_links(symbol)}"
+            await send_alert(session,msg); monitor.mark(symbol,"TENDENCIA_PRE_CONF_5M")
+    except Exception as e:
+        print("erro curto",symbol,e)
 
-# ----------------- Worker Longo -----------------
-async def worker_long(sess,sym,m):
+async def longterm_worker(session, symbol, monitor):
     try:
-        o1,h1,l1,c1,v1=await get_klines(sess,sym,"1h",200)
-        o4,h4,l4,c4,v4=await get_klines(sess,sym,"4h",200)
-        if len(c1)<60 or len(c4)<60:return
-        e91,m201,m501,m2001,rsi1,vm1=compute_indicators(o1,h1,l1,c1,v1)
-        e94,m204,m504,m2004,rsi4,vm4=compute_indicators(o4,h4,l4,c4,v4)
-        i1=len(c1)-1;i4=len(c4)-1
-        if e91[i1-1]<=m201[i1-1] and e91[i1]>m201[i1] and 50<=rsi1[i1]<=60 and m.allowed(sym,"PRE1H","1h"):
-            await send_alert(sess,f"🌕 <b>{fmt_symbol(sym)} — PRÉ-CONFIRMAÇÃO LONGA (1H)</b>\n💰 <code>{c1[i1]:.6f}</code>\n🧠 EMA9 cruzou MA20 + RSI {rsi1[i1]:.1f}\n⏰ {ts_brazil_now()}\n{binance_links(sym)}");m.mark(sym,"PRE1H","1h")
-        if e91[i1]>m201[i1]>m501[i1]>m2001[i1] and rsi1[i1]>55 and m.allowed(sym,"CONF1H","1h"):
-            await send_alert(sess,f"🚀 <b>{fmt_symbol(sym)} — TENDÊNCIA LONGA CONFIRMADA (1H)</b>\n💰 <code>{c1[i1]:.6f}</code>\n🧠 Médias alinhadas + RSI {rsi1[i1]:.1f}\n⏰ {ts_brazil_now()}\n{binance_links(sym)}");m.mark(sym,"CONF1H","1h")
-        if e94[i4-1]<=m204[i4-1] and e94[i4]>m204[i4] and rsi4[i4]>50 and m.allowed(sym,"PRE4H","4h"):
-            await send_alert(sess,f"🌕 <b>{fmt_symbol(sym)} — PRÉ-CONFIRMAÇÃO LONGA (4H)</b>\n💰 <code>{c4[i4]:.6f}</code>\n🧠 EMA9 cruzou MA20 + RSI {rsi4[i4]:.1f}\n⏰ {ts_brazil_now()}\n{binance_links(sym)}");m.mark(sym,"PRE4H","4h")
-        if e94[i4]>m204[i4]>m504[i4]>m2004[i4] and rsi4[i4]>55 and m.allowed(sym,"CONF4H","4h"):
-            await send_alert(sess,f"🚀 <b>{fmt_symbol(sym)} — TENDÊNCIA LONGA CONFIRMADA (4H)</b>\n💰 <code>{c4[i4]:.6f}</code>\n🧠 Médias alinhadas + RSI {rsi4[i4]:.1f}\n⏰ {ts_brazil_now()}\n{binance_links(sym)}");m.mark(sym,"CONF4H","4h")
-    except Exception as e:print("long",sym,e)
+        o,h,l,c,v = await get_klines(session, symbol, interval="1h", limit=120)
+        ema9,ma20,ma50,ma200,rsi14,volma = compute_indicators(o,h,l,c,v)
+        last=len(c)-1
+        if ema9[last]>ma20[last]>ma50[last]>ma200[last] and monitor.allowed_long(symbol):
+            msg=f"🌕 <b>{fmt_symbol(symbol)} — CONFIRMADA (1h)</b>\n💰 <code>{c[last]:.6f}</code>\n⏰ {ts_brazil_now()}\n{binance_links(symbol)}"
+            await send_alert(session,msg); monitor.mark_long(symbol)
+    except Exception as e:
+        print("erro longo",symbol,e)
 
 # ----------------- Main -----------------
 async def main():
-    m=Monitor()
-    async with aiohttp.ClientSession() as s:
-        t=await get_24h(s);w=shortlist_from_24h(t,SHORTLIST_N)
-        hello=f"💻 py15m_stable | {len(w)} pares SPOT | {ts_brazil_now()}";await send_alert(s,hello);print(hello)
+    monitor=Monitor()
+    async with aiohttp.ClientSession() as session:
+        hello=f"✅ Bot ativo | {ts_brazil_now()}"
+        await send_alert(session,hello)
         while True:
+            tickers=["BTCUSDT","ETHUSDT"]
             tasks=[]
-            for x in w:
-                tasks+=[worker_5m(s,x,m),worker_15m(s,x,m),worker_long(s,x,m)]
+            for s in tickers:
+                tasks.append(candle_worker(session,s,monitor))
+                tasks.append(longterm_worker(session,s,monitor))
             await asyncio.gather(*tasks)
             await asyncio.sleep(180)
 
-# ----------------- Flask -----------------
 def start_bot():
-    try:asyncio.run(main())
-    except KeyboardInterrupt:pass
+    try: asyncio.run(main())
+    except KeyboardInterrupt: pass
+
 if __name__=="__main__":
     import threading
     threading.Thread(target=start_bot,daemon=True).start()
     app=Flask(__name__)
     @app.route("/")
-    def home():return "✅ Binance Alerts Bot py15m_stable 🇧🇷"
+    def home(): return "✅ Binance Alerts Bot v15 ativo"
     app.run(host="0.0.0.0",port=int(os.environ.get("PORT",10000)))
