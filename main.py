@@ -1,6 +1,6 @@
 # ============================================================
-#  Binance SPOT Monitor — v11.9 (greenlong_stable)
-#  Base: v11.8 stable + 🟢 long alerts (1h/4h/combinado/entrada segura)
+#  Binance SPOT Monitor — v11.9 (greenlong_fixed)
+#  Base: v11.8 stable + 🟢 long alerts + horário 🇧🇷 + links HTML
 #  ------------------------------------------------------------
 #  Autor: Diego & Aurora (2025-10-09)
 # ============================================================
@@ -8,7 +8,7 @@
 import os, asyncio, time
 from urllib.parse import urlencode
 from collections import defaultdict, deque
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import aiohttp
 from flask import Flask
 
@@ -25,7 +25,6 @@ MA_SLOW = 20
 MA_MED = 50
 RSI_LEN = 14
 VOL_MA = 9
-HH_WIN = 20
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 CHAT_ID = os.getenv("CHAT_ID", "").strip()
@@ -38,7 +37,10 @@ def binance_links(symbol: str) -> str:
     base = symbol.upper().replace("USDT", "")
     a = f"https://www.binance.com/en/trade/{base}_USDT?type=spot"
     b = f"https://www.binance.com/en/trade?type=spot&symbol={base}_USDT"
-    return f"[Abrir (A)]({a}) | [Abrir (B)]({b})"
+    return f'🔗 <a href="{a}">Abrir (A)</a> | <a href="{b}">Abrir (B)</a>'
+
+def ts_brazil_now() -> str:
+    return (datetime.now(timezone.utc) - timedelta(hours=3)).strftime("%Y-%m-%d %H:%M:%S") + " 🇧🇷"
 
 async def send_alert(session: aiohttp.ClientSession, text: str):
     if TELEGRAM_TOKEN and CHAT_ID:
@@ -142,32 +144,32 @@ class Monitor:
     def mark(self, symbol: str):
         self.cooldown[symbol] = time.time()
 
-# ---------------- PRINCIPAL ----------------
+# ---------------- ALERTAS ----------------
 async def candle_worker(session, symbol, monitor):
     try:
         o,h,l,c,v = await get_klines(session, symbol, interval=INTERVAL, limit=200)
         ema9, ma20, ma50, rsi14, vol_ma = compute_indicators(o,h,l,c,v)
         last, prev = len(c)-1, len(c)-2
-        ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S 🇧🇷")
+        ts = ts_brazil_now()
         sym_pretty = fmt_symbol(symbol)
         last_price = c[-1]
-        # Exemplo de alerta curto (mantido)
+        # Exemplo de alerta curto
         if ema9[last] > ma20[last] > ma50[last] and rsi14[last] > 55:
-            text = f"⭐ <b>{sym_pretty} — TENDÊNCIA CURTA</b>\n💰 {last_price:.6f}\n🧠 RSI {rsi14[last]:.1f}\n⏰ {ts}\n🔗 {binance_links(symbol)}"
+            text = f"⭐ <b>{sym_pretty} — TENDÊNCIA CURTA</b>\n💰 {last_price:.6f}\n🧠 RSI {rsi14[last]:.1f}\n⏰ {ts}\n{binance_links(symbol)}"
             if monitor.allowed(symbol):
                 await send_alert(session, text)
                 monitor.mark(symbol)
     except Exception as e:
         print("candle_worker error:", symbol, e)
 
-# ---------------- LONG ALERTS (1h,4h,etc) ----------------
+# ---------------- LONG ALERTS ----------------
 async def long_extensions_worker(session, symbol, monitor):
     try:
         o1,h1,l1,c1,v1 = await get_klines(session, symbol, interval="1h", limit=200)
         ema9, ma20, ma50, rsi14, vol_ma = compute_indicators(o1,h1,l1,c1,v1)
         last = len(c1)-1
         if ema9[last] > ma20[last] > ma50[last] and rsi14[last] > 50:
-            ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S 🇧🇷")
+            ts = ts_brazil_now()
             sym_pretty = fmt_symbol(symbol)
             last_price = c1[-1]
             desc = f"EMA9>MA20>MA50 | RSI {rsi14[last]:.1f}"
@@ -176,7 +178,7 @@ async def long_extensions_worker(session, symbol, monitor):
                 f"💰 {last_price:.6f}\n"
                 f"🧠 {desc}\n"
                 f"⏰ {ts}\n"
-                f"🔗 {binance_links(symbol)}"
+                f"{binance_links(symbol)}"
             )
             if monitor.allowed(symbol):
                 await send_alert(session, txt)
@@ -190,8 +192,8 @@ async def main():
     async with aiohttp.ClientSession() as session:
         tickers = await get_24h(session)
         watchlist = shortlist_from_24h(tickers, SHORTLIST_N)
-        ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S 🇧🇷")
-        await send_alert(session, f"💻 v11.9 (greenlong_stable) — {len(watchlist)} pares SPOT — {ts}")
+        ts = ts_brazil_now()
+        await send_alert(session, f"💻 v11.9 (greenlong_fixed) — {len(watchlist)} pares SPOT — {ts}")
         while True:
             tasks = []
             for s in watchlist:
@@ -211,7 +213,7 @@ app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return "✅ Binance Alerts Bot (v11.9 greenlong_stable) ativo!"
+    return "✅ Binance Alerts Bot (v11.9 greenlong_fixed) ativo!"
 
 if __name__ == "__main__":
     import threading
