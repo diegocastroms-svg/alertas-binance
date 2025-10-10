@@ -1,8 +1,8 @@
 # ===========================
-# 📁 novo_main_v1.3.py
+# 📁 novo_main_v1.3.1.py
 # ===========================
 # Autor: Diego Castro Oliveira
-# Projeto: Bot de Monitoramento SPOT Binance (Flask, top50, HTML msgs)
+# Projeto: Bot de Monitoramento SPOT Binance (Flask, HTML, top50, SPOT real)
 # ===========================
 
 import os
@@ -190,12 +190,21 @@ async def analyze_pair(symbol):
 # 🚀 Loop principal
 # -----------------------------
 async def main_loop():
-    print("🚀 Iniciando monitoramento SPOT USDT...")
+    print("🚀 Iniciando monitoramento SPOT USDT (somente pares SPOT reais)...")
 
     async with aiohttp.ClientSession() as session:
+        # Pega apenas símbolos SPOT reais
+        async with session.get("https://api.binance.com/api/v3/exchangeInfo") as resp:
+            info = await resp.json()
+            valid_spot = [
+                s["symbol"] for s in info["symbols"]
+                if s.get("isSpotTradingAllowed") and s["status"] == "TRADING" and s["symbol"].endswith("USDT")
+            ]
+
+        # Agora pega volumes apenas desses pares válidos
         async with session.get("https://api.binance.com/api/v3/ticker/24hr") as resp:
             ticker_data = await resp.json()
-            spot_pairs = [t for t in ticker_data if t["symbol"].endswith("USDT")]
+            spot_pairs = [t for t in ticker_data if t["symbol"] in valid_spot]
             sorted_pairs = sorted(spot_pairs, key=lambda x: float(x["quoteVolume"]), reverse=True)
             top_pairs = [p["symbol"] for p in sorted_pairs[:50]]
             other_pairs = [p["symbol"] for p in sorted_pairs[50:]]
