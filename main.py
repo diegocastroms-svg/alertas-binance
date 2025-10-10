@@ -1,189 +1,179 @@
-# ===========================
-# 📁 novo_main_v1.4.2.py
-# ===========================
-# Autor: Diego Castro Oliveira
-# Projeto: Bot Binance SPOT (Flask + EMA/MA + Filtro anti-USD + Cooldown 15min)
-# ===========================
-
-import os
 import asyncio
-import threading
-from datetime import datetime, timedelta
-from statistics import mean
 import aiohttp
+import os
+from datetime import datetime, timedelta
 from flask import Flask
 
-# -----------------------------
-# 🔧 Variáveis de ambiente
-# -----------------------------
+# =========================
+# CONFIGURAÇÕES GERAIS
+# =========================
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
+BINANCE_API_URL = "https://api.binance.com/api/v3/klines"
+EXCHANGE_INFO_URL = "https://api.binance.com/api/v3/exchangeInfo"
 
-# -----------------------------
-# 🕒 Controle de cooldown
-# -----------------------------
+# Intervalo principal
+INTERVAL = "15m"
+
+# Cooldown (15 minutos por par)
 cooldowns = {}
 COOLDOWN_TIME = timedelta(minutes=15)
 
-# -----------------------------
-# ⚙️ Funções auxiliares
-# -----------------------------
-async def send_telegram(msg: str):
-    if not TELEGRAM_TOKEN or not CHAT_ID:
-        print("❌ Variáveis de ambiente ausentes.")
-        return
+# Flask (Render)
+app = Flask(__name__)
+
+# =========================
+# FUNÇÕES AUXILIARES
+# =========================
+async def send_telegram(message: str):
+    """Envia mensagem formatada para o Telegram"""
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    payload = {"chat_id": CHAT_ID, "text": msg, "parse_mode": "HTML"}
+    payload = {"chat_id": CHAT_ID, "text": message, "parse_mode": "HTML"}
     async with aiohttp.ClientSession() as session:
         await session.post(url, data=payload)
 
-async def get_klines(symbol: str, interval="5m", limit=100):
-    url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url) as resp:
-            data = await resp.json()
-            valid = [c for c in data if c and len(c) >= 6 and c[4] not in (None, "null")]
-            return valid
+async def get_spot_pairs(session):
+    """Retorna apenas pares SPOT válidos, excluindo stablecoins e variantes USD"""
+    async with session.get(EXCHANGE_INFO_URL) as resp:
+        info = await resp.json()
+        valid_spot = []
+        for s in info["symbols"]:
+            sym = s["symbol"]
+            base = sym.replace("USDT", "")
+            if (
+                s.get("isSpotTradingAllowed")
+                and s["status"] == "TRADING"
+                and sym.endswith("USDT")
+                and not any(x in base for x in ["USD", "FDUSD", "BUSD", "TUSD", "USDC", "DAI", "AEUR", "EUR", "PYUSD"])
+            ):
+                valid_spot.append(sym)
+        return valid_spot
 
-def ma(values, period):
-    values = [v for v in values if v is not None]
-    if len(values) < period:
-        return None
-    return mean(values[-period:])
+async def fetch_klines(session, symbol, interval="15m", limit=200):
+    """Obtém dados de candles"""
+    params = {"symbol": symbol, "interval": interval, "limit": limit}
+    async with session.get(BINANCE_API_URL, params=params) as resp:
+        return await resp.json()
 
-def rsi(values, period=14):
-    values = [v for v in values if v is not None]
-    if len(values) < period + 1:
+# =========================
+# CÁLCULO DE MÉDIAS
+# =========================
+def calc_ma(data, period, index=-1):
+    closes = [float(x[4]) for x in data]
+    if len(closes) < period:
         return None
-    gains, losses = [], []
-    for i in range(1, period + 1):
-        diff = values[-i] - values[-i - 1]
-        if diff > 0:
-            gains.append(diff)
-        else:
-            losses.append(abs(diff))
-    if not gains and not losses:
-        return None
-    avg_gain = mean(gains) if gains else 0
-    avg_loss = mean(losses) if losses else 1e-6
-    rs = avg_gain / avg_loss
-    return 100 - (100 / (1 + rs))
+    return sum(closes[index - period + 1 : index + 1]) / period
 
-# -----------------------------
-# 📊 Lógica principal
-# -----------------------------
-async def analyze_pair(symbol):
+def calc_ema(data, period, index=-1):
+    closes = [float(x[4]) for x in data]
+    if len(closes) < period:
+        return None
+    k = 2 / (period + 1)
+    ema = closes[0]
+    for price in closes[1 : index + 1]:
+        ema = price * k + ema * (1 - k)
+    return ema
+
+# =========================
+# ANÁLISE PRINCIPAL
+# =========================
+async def analyze_pair(session, symbol):
     try:
-        # 🔒 Cooldown por símbolo
+        # Cooldown check
         now_time = datetime.now()
         if symbol in cooldowns and now_time - cooldowns[symbol] < COOLDOWN_TIME:
-            return  # ainda em cooldown
-
-        candles_5m = await get_klines(symbol, "5m", 120)
-        candles_15m = await get_klines(symbol, "15m", 120)
-        if not candles_5m or not candles_15m:
             return
 
-        closes_5m = [float(c[4]) for c in candles_5m]
-        closes_15m = [float(c[4]) for c in candles_15m]
+        data = await fetch_klines(session, symbol, INTERVAL, limit=200)
+        if not isinstance(data, list) or len(data) < 50:
+            return
 
-        ema9_15 = ma(closes_15m, 9)
-        ma20_15 = ma(closes_15m, 20)
-        ma50_15 = ma(closes_15m, 50)
-        ma200_15 = ma(closes_15m, 200)
-        rsi_15 = rsi(closes_15m)
-        last_price_15 = closes_15m[-1]
-        now = datetime.now().strftime("%Y-%m-%d %H:%M")
-        separator = "\n━━━━━━━━━━━━━━━━━━━━━━━"
+        close = float(data[-1][4])
+        ema9 = calc_ema(data, 9)
+        ma20 = calc_ma(data, 20)
+        ma50 = calc_ma(data, 50)
+        ma200 = calc_ma(data, 200)
 
-        # =============================
-        # ⚙️ ALERTAS PRINCIPAIS
-        # =============================
+        if not all([ema9, ma20, ma50, ma200]):
+            return
 
-        # 15m - Tendência pré-confirmada
-        if ema9_15 and ma200_15 and ema9_15 > ma200_15:
-            msg = f"🟢 <b>{symbol}</b>\n⚡ <b>TENDÊNCIA PRÉ-CONFIRMADA (15m)</b>\n📈 EMA9 cruzou acima da MA200\n💰 Preço atual: {last_price_15}\n🕒 {now}{separator}"
-            await send_telegram(msg)
-            cooldowns[symbol] = datetime.now()
+        msg = ""
+        color = "⚪"
 
-        # 15m - Tendência confirmada
-        if ma20_15 and ma50_15 and ma200_15 and ma20_15 > ma200_15 and ma50_15 > ma200_15:
-            msg = f"🟢 <b>{symbol}</b>\n🔥 <b>TENDÊNCIA CONFIRMADA (15m)</b>\n📈 MA20 e MA50 cruzaram acima da MA200\n💰 Preço atual: {last_price_15}\n🕒 {now}{separator}"
-            await send_telegram(msg)
-            cooldowns[symbol] = datetime.now()
+        # =========================
+        # DETECÇÃO DE PADRÕES
+        # =========================
 
-        # 15m - Reteste fraco
-        if (abs(last_price_15 - ema9_15) / last_price_15 < 0.003 or abs(last_price_15 - ma20_15) / last_price_15 < 0.003) and rsi_15 and rsi_15 < 45:
-            msg = f"🟠 <b>{symbol}</b>\n⚠️ <b>RETESTE FRACO (15m)</b>\n📊 Preço testou EMA9 ou MA20 e perdeu força\n💬 Possível queda\n💰 Preço atual: {last_price_15}\n🕒 {now}{separator}"
-            await send_telegram(msg)
-            cooldowns[symbol] = datetime.now()
+        # 1️⃣ Mercado em queda
+        if ema9 < ma20 < ma50 and close < ma200:
+            msg = f"⏸️ Lateralizando após queda\n🇮🇹 Em queda, monitorando possível alta"
+            color = "🔴"
+
+        # 2️⃣ Tendência iniciada (EMA9 cruza MA20 e MA50)
+        elif ema9 > ma20 and ema9 > ma50 and close > ma200:
+            msg = f"📈 EMA9 cruzou acima das MA20 e MA50"
+            color = "🚀"
+
+        # 3️⃣ Tendência pré-confirmada (EMA9 e MA20 e MA50 acima da MA200)
+        elif ema9 > ma20 > ma50 > ma200:
+            msg = f"📊 EMA9, MA20 e MA50 cruzaram acima da MA200 — tendência pré-confirmada"
+            color = "🟢"
+
+        # 4️⃣ Reteste confirmado (somente se preço acima da MA200)
+        elif close > ma200 and abs(close - ema9) / ema9 < 0.005:
+            msg = f"📊 Preço testou a EMA9 ou MA20 e reverteu com confirmação dos indicadores\n💬 Continuação de alta"
+            color = "🟢"
+
+        # 5️⃣ Reteste fraco (somente se preço acima da MA200)
+        elif close > ma200 and abs(close - ema9) / ema9 < 0.005 and ema9 < ma20:
+            msg = f"📊 Preço testou EMA9 ou MA20 e perdeu força\n💬 Possível queda"
+            color = "🟠"
+
+        # Se nenhuma condição, sai
+        if not msg:
+            return
+
+        text = (
+            f"{color} <b>{symbol}</b>\n"
+            f"{msg}\n"
+            f"💰 Preço atual: <b>{close:.4f}</b>\n"
+            f"🕒 {datetime.now().strftime('%Y-%m-%d %H:%M')}\n"
+            f"{'━'*20}"
+        )
+
+        await send_telegram(text)
+        cooldowns[symbol] = datetime.now()
 
     except Exception as e:
-        print(f"⚠️ Erro ao analisar {symbol}: {e}")
+        print(f"Erro em {symbol}: {e}")
 
-# -----------------------------
-# 🚀 Loop principal
-# -----------------------------
+# =========================
+# LOOP PRINCIPAL
+# =========================
 async def main_loop():
-    print("🚀 Iniciando monitoramento SPOT com cooldown de 15 minutos...")
-
-    async with aiohttp.ClientSession() as session:
-        # 🔎 Filtro anti-USD universal
-        async with session.get("https://api.binance.com/api/v3/exchangeInfo") as resp:
-            info = await resp.json()
-            valid_spot = []
-            for s in info["symbols"]:
-                sym = s["symbol"]
-                base = sym.replace("USDT", "")
-                if (
-                    s.get("isSpotTradingAllowed")
-                    and s["status"] == "TRADING"
-                    and sym.endswith("USDT")
-                    and not any(x in base for x in ["USD", "FDUSD", "BUSD", "TUSD", "USDC", "DAI", "AEUR", "EUR", "PYUSD"])
-                ):
-                    valid_spot.append(sym)
-
-        # 🔹 Volume e ordenação
-        async with session.get("https://api.binance.com/api/v3/ticker/24hr") as resp:
-            ticker_data = await resp.json()
-            spot_pairs = [t for t in ticker_data if t["symbol"] in valid_spot]
-            sorted_pairs = sorted(spot_pairs, key=lambda x: float(x["quoteVolume"]), reverse=True)
-            top_pairs = [p["symbol"] for p in sorted_pairs[:50]]
-
-    # ✅ Notificação inicial no Telegram
-    start_time = datetime.now().strftime("%Y-%m-%d %H:%M")
-    msg = (
-        f"✅ <b>BOT ATIVO NO RENDER</b>\n"
-        f"🕒 {start_time}\n"
-        f"💹 {len(valid_spot)} pares SPOT válidos carregados (anti-USD ativo)\n"
-        f"⏱️ Cooldown ativo: 15 minutos por par\n"
-        f"🔝 Top 5 por volume: {', '.join(top_pairs[:5])}"
-    )
-    await send_telegram(msg)
-
-    print(f"✅ {len(valid_spot)} pares SPOT válidos carregados (anti-USD ativo).")
-    print(f"🔝 Top 10 por volume: {[p for p in top_pairs[:10]]}")
-
-    # 🔁 Loop contínuo
+    await send_telegram("✅ BOT ATIVO NO RENDER — Monitorando pares SPOT (v1.4.3)")
     while True:
-        await asyncio.gather(*[analyze_pair(s) for s in top_pairs])
-        await asyncio.sleep(60)
+        async with aiohttp.ClientSession() as session:
+            pairs = await get_spot_pairs(session)
+            top_50 = pairs[:50]
+            tasks = [analyze_pair(session, s) for s in top_50]
+            await asyncio.gather(*tasks)
+        await asyncio.sleep(60)  # ciclo a cada 1 min
 
-# -----------------------------
-# 🌐 Flask (keep-alive)
-# -----------------------------
-app = Flask(__name__)
+# =========================
+# FLASK PARA RENDER
+# =========================
+@app.route('/')
+def home():
+    return "Binance Spot Alert Bot — v1.4.3"
 
-@app.route("/")
-@app.route("/health")
-def health():
-    return "OK", 200
-
-def run_bot():
+@app.route('/run')
+def run():
     asyncio.run(main_loop())
+    return "Bot iniciado!"
 
-threading.Thread(target=run_bot, daemon=True).start()
-
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+# =========================
+# EXECUÇÃO LOCAL
+# =========================
+if __name__ == '__main__':
+    asyncio.run(main_loop())
