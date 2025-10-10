@@ -1,14 +1,14 @@
 # ===========================
-# 📁 novo_main_v1.4.1.py
+# 📁 novo_main_v1.4.2.py
 # ===========================
 # Autor: Diego Castro Oliveira
-# Projeto: Bot Binance SPOT (Flask + EMA/MA + Filtros + Notificação Inicial)
+# Projeto: Bot Binance SPOT (Flask + EMA/MA + Filtro anti-USD + Cooldown 15min)
 # ===========================
 
 import os
 import asyncio
 import threading
-from datetime import datetime
+from datetime import datetime, timedelta
 from statistics import mean
 import aiohttp
 from flask import Flask
@@ -18,6 +18,12 @@ from flask import Flask
 # -----------------------------
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
+
+# -----------------------------
+# 🕒 Controle de cooldown
+# -----------------------------
+cooldowns = {}
+COOLDOWN_TIME = timedelta(minutes=15)
 
 # -----------------------------
 # ⚙️ Funções auxiliares
@@ -68,6 +74,11 @@ def rsi(values, period=14):
 # -----------------------------
 async def analyze_pair(symbol):
     try:
+        # 🔒 Cooldown por símbolo
+        now_time = datetime.now()
+        if symbol in cooldowns and now_time - cooldowns[symbol] < COOLDOWN_TIME:
+            return  # ainda em cooldown
+
         candles_5m = await get_klines(symbol, "5m", 120)
         candles_15m = await get_klines(symbol, "15m", 120)
         if not candles_5m or not candles_15m:
@@ -76,10 +87,6 @@ async def analyze_pair(symbol):
         closes_5m = [float(c[4]) for c in candles_5m]
         closes_15m = [float(c[4]) for c in candles_15m]
 
-        ema9 = ma(closes_5m, 9)
-        ma20 = ma(closes_5m, 20)
-        ma50 = ma(closes_5m, 50)
-        ma200 = ma(closes_5m, 200)
         ema9_15 = ma(closes_15m, 9)
         ma20_15 = ma(closes_15m, 20)
         ma50_15 = ma(closes_15m, 50)
@@ -97,16 +104,19 @@ async def analyze_pair(symbol):
         if ema9_15 and ma200_15 and ema9_15 > ma200_15:
             msg = f"🟢 <b>{symbol}</b>\n⚡ <b>TENDÊNCIA PRÉ-CONFIRMADA (15m)</b>\n📈 EMA9 cruzou acima da MA200\n💰 Preço atual: {last_price_15}\n🕒 {now}{separator}"
             await send_telegram(msg)
+            cooldowns[symbol] = datetime.now()
 
         # 15m - Tendência confirmada
         if ma20_15 and ma50_15 and ma200_15 and ma20_15 > ma200_15 and ma50_15 > ma200_15:
             msg = f"🟢 <b>{symbol}</b>\n🔥 <b>TENDÊNCIA CONFIRMADA (15m)</b>\n📈 MA20 e MA50 cruzaram acima da MA200\n💰 Preço atual: {last_price_15}\n🕒 {now}{separator}"
             await send_telegram(msg)
+            cooldowns[symbol] = datetime.now()
 
         # 15m - Reteste fraco
         if (abs(last_price_15 - ema9_15) / last_price_15 < 0.003 or abs(last_price_15 - ma20_15) / last_price_15 < 0.003) and rsi_15 and rsi_15 < 45:
             msg = f"🟠 <b>{symbol}</b>\n⚠️ <b>RETESTE FRACO (15m)</b>\n📊 Preço testou EMA9 ou MA20 e perdeu força\n💬 Possível queda\n💰 Preço atual: {last_price_15}\n🕒 {now}{separator}"
             await send_telegram(msg)
+            cooldowns[symbol] = datetime.now()
 
     except Exception as e:
         print(f"⚠️ Erro ao analisar {symbol}: {e}")
@@ -115,7 +125,7 @@ async def analyze_pair(symbol):
 # 🚀 Loop principal
 # -----------------------------
 async def main_loop():
-    print("🚀 Iniciando monitoramento SPOT com filtro anti-USD universal...")
+    print("🚀 Iniciando monitoramento SPOT com cooldown de 15 minutos...")
 
     async with aiohttp.ClientSession() as session:
         # 🔎 Filtro anti-USD universal
@@ -140,12 +150,13 @@ async def main_loop():
             sorted_pairs = sorted(spot_pairs, key=lambda x: float(x["quoteVolume"]), reverse=True)
             top_pairs = [p["symbol"] for p in sorted_pairs[:50]]
 
-    # ✅ Envia notificação inicial no Telegram
+    # ✅ Notificação inicial no Telegram
     start_time = datetime.now().strftime("%Y-%m-%d %H:%M")
     msg = (
         f"✅ <b>BOT ATIVO NO RENDER</b>\n"
         f"🕒 {start_time}\n"
         f"💹 {len(valid_spot)} pares SPOT válidos carregados (anti-USD ativo)\n"
+        f"⏱️ Cooldown ativo: 15 minutos por par\n"
         f"🔝 Top 5 por volume: {', '.join(top_pairs[:5])}"
     )
     await send_telegram(msg)
