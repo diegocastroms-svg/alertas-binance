@@ -1,8 +1,8 @@
 # ===========================
-# 📁 novo_main_v1.1.py
+# 📁 novo_main_v1.2.py
 # ===========================
 # Autor: Diego Castro Oliveira
-# Projeto: Bot de Monitoramento SPOT Binance (com Flask keep-alive)
+# Projeto: Bot de Monitoramento SPOT Binance (com Flask keep-alive e top50)
 # ===========================
 
 import os
@@ -75,23 +75,22 @@ async def analyze_pair(symbol):
         ma50 = ma(closes_5m, 50)
         ma200 = ma(closes_5m, 200)
         rsi_5m = rsi(closes_5m)
-
         last_price = closes_5m[-1]
         now = datetime.now().strftime("%Y-%m-%d %H:%M")
 
         # 1️⃣ Queda + Lateralização
         if closes_5m[-3] > closes_5m[-2] > closes_5m[-1] and abs(closes_5m[-1] - closes_5m[-3]) < 0.002 * closes_5m[-1]:
-            msg = f"📉 *MERCADO EM QUEDA — {symbol} (5m)*\n⏸️ Lateralizando após queda\n📊 Em queda, monitorando possível alta\n💰 Preço atual: {last_price}\n🕒 {now}"
+            msg = f"🔴 {symbol}\n📉 *MERCADO EM QUEDA (5m)*\n⏸️ Lateralizando após queda\n📊 Em queda, monitorando possível alta\n💰 Preço atual: {last_price}\n🕒 {now}"
             await send_telegram(msg)
 
         # 2️⃣ EMA9 cruza MA20/MA50 → tendência de alta
         if ema9 and ma20 and ma50 and ema9 > ma20 > ma50:
-            msg = f"🚀 *TENDÊNCIA DE ALTA INICIADA — {symbol} (5m)*\n📈 EMA9 cruzou acima das MA20 e MA50\n💰 Preço atual: {last_price}\n🕒 {now}"
+            msg = f"🟢 {symbol}\n🚀 *TENDÊNCIA DE ALTA INICIADA (5m)*\n📈 EMA9 cruzou acima das MA20 e MA50\n💰 Preço atual: {last_price}\n🕒 {now}"
             await send_telegram(msg)
 
         # 3️⃣ EMA9 + MA20 + MA50 acima da MA200 → pré-confirmada
         if ema9 and ma20 and ma50 and ma200 and ema9 > ma200 and ma20 > ma200 and ma50 > ma200:
-            msg = f"⚡ *TENDÊNCIA PRÉ-CONFIRMADA — {symbol} (5m)*\n📈 EMA9, MA20 e MA50 cruzaram acima da MA200\n💰 Preço atual: {last_price}\n🕒 {now}"
+            msg = f"🟢 {symbol}\n⚡ *TENDÊNCIA PRÉ-CONFIRMADA (5m)*\n📈 EMA9, MA20 e MA50 cruzaram acima da MA200\n💰 Preço atual: {last_price}\n🕒 {now}"
             await send_telegram(msg)
 
         # ----- 15 MINUTOS -----
@@ -103,32 +102,31 @@ async def analyze_pair(symbol):
         ma50_15 = ma(closes_15m, 50)
         ma200_15 = ma(closes_15m, 200)
         rsi_15 = rsi(closes_15m)
-
         last_price_15 = closes_15m[-1]
 
         # 4️⃣ EMA9 cruza MA200 → pré-confirmação
         if ema9_15 and ma200_15 and ema9_15 > ma200_15:
-            msg = f"⚡ *TENDÊNCIA PRÉ-CONFIRMADA — {symbol} (15m)*\n📈 EMA9 cruzou acima da MA200\n💰 Preço atual: {last_price_15}\n🕒 {now}"
+            msg = f"🟢 {symbol}\n⚡ *TENDÊNCIA PRÉ-CONFIRMADA (15m)*\n📈 EMA9 cruzou acima da MA200\n💰 Preço atual: {last_price_15}\n🕒 {now}"
             await send_telegram(msg)
 
         # 5️⃣ MA20 + MA50 cruzam MA200 → tendência confirmada
         if ma20_15 and ma50_15 and ma200_15 and ma20_15 > ma200_15 and ma50_15 > ma200_15:
-            msg = f"🔥 *TENDÊNCIA CONFIRMADA — {symbol} (15m)*\n📈 MA20 e MA50 cruzaram acima da MA200\n💰 Preço atual: {last_price_15}\n🕒 {now}"
+            msg = f"🟢 {symbol}\n🔥 *TENDÊNCIA CONFIRMADA (15m)*\n📈 MA20 e MA50 cruzaram acima da MA200\n💰 Preço atual: {last_price_15}\n🕒 {now}"
             await send_telegram(msg)
 
         # 6️⃣ Reteste EMA9/MA20 e reverte com força
         if (abs(last_price_15 - ema9_15) / last_price_15 < 0.003 or abs(last_price_15 - ma20_15) / last_price_15 < 0.003) and rsi_15 > 50:
-            msg = f"🔁 *RETESTE CONFIRMADO — {symbol} (15m)*\n📊 Preço testou a EMA9 ou MA20 e reverteu com confirmação dos indicadores\n💬 Continuação de alta\n💰 Preço atual: {last_price_15}\n🕒 {now}"
+            msg = f"🟢 {symbol}\n🔁 *RETESTE CONFIRMADO (15m)*\n📊 Preço testou a EMA9 ou MA20 e reverteu com confirmação dos indicadores\n💬 Continuação de alta\n💰 Preço atual: {last_price_15}\n🕒 {now}"
             await send_telegram(msg)
 
         # 7️⃣ Reteste fraco — possível queda
         if (abs(last_price_15 - ema9_15) / last_price_15 < 0.003 or abs(last_price_15 - ma20_15) / last_price_15 < 0.003) and rsi_15 < 45:
-            msg = f"⚠️ *RETESTE FRACO — {symbol} (15m)*\n📊 Preço testou EMA9 ou MA20 e perdeu força com confirmação dos indicadores\n💬 Possível queda\n💰 Preço atual: {last_price_15}\n🕒 {now}"
+            msg = f"🟠 {symbol}\n⚠️ *RETESTE FRACO (15m)*\n📊 Preço testou EMA9 ou MA20 e perdeu força com confirmação dos indicadores\n💬 Possível queda\n💰 Preço atual: {last_price_15}\n🕒 {now}"
             await send_telegram(msg)
 
         # 8️⃣ Reteste MA200 — confirmação de força
         if abs(last_price_15 - ma200_15) / last_price_15 < 0.003 and rsi_15 > 50:
-            msg = f"🔁 *RETESTE MA200 — {symbol} (15m)*\n📊 Preço testou a MA200 e confirmou força pelos indicadores\n💬 Reteste MA200 — tendência de continuação de alta\n💰 Preço atual: {last_price_15}\n🕒 {now}"
+            msg = f"🟢 {symbol}\n🔁 *RETESTE MA200 (15m)*\n📊 Preço testou a MA200 e confirmou força pelos indicadores\n💬 Tendência de continuação de alta\n💰 Preço atual: {last_price_15}\n🕒 {now}"
             await send_telegram(msg)
 
     except Exception as e:
@@ -139,15 +137,26 @@ async def analyze_pair(symbol):
 # -----------------------------
 async def main_loop():
     print("🚀 Iniciando monitoramento SPOT USDT...")
+
     async with aiohttp.ClientSession() as session:
-        async with session.get("https://api.binance.com/api/v3/exchangeInfo") as resp:
-            data = await resp.json()
-            pairs = [s["symbol"] for s in data["symbols"] if s["symbol"].endswith("USDT") and s["status"] == "TRADING"]
+        async with session.get("https://api.binance.com/api/v3/ticker/24hr") as resp:
+            ticker_data = await resp.json()
+            spot_pairs = [t for t in ticker_data if t["symbol"].endswith("USDT")]
+            # Ordena por volume
+            sorted_pairs = sorted(spot_pairs, key=lambda x: float(x["quoteVolume"]), reverse=True)
+            top_pairs = [p["symbol"] for p in sorted_pairs[:50]]
+            other_pairs = [p["symbol"] for p in sorted_pairs[50:]]
 
     while True:
-        tasks = [analyze_pair(symbol) for symbol in pairs]
+        # Analisa primeiro as top50
+        tasks = [analyze_pair(symbol) for symbol in top_pairs]
         await asyncio.gather(*tasks)
-        await asyncio.sleep(60)
+
+        # Analisa as demais em background
+        other_tasks = [analyze_pair(symbol) for symbol in other_pairs]
+        await asyncio.gather(*other_tasks)
+
+        await asyncio.sleep(60)  # varredura a cada 1 min
 
 # -----------------------------
 # 🌐 Flask (keep-alive)
