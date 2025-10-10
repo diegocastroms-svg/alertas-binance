@@ -1,8 +1,8 @@
 # ===========================
-# 📁 novo_main_v1.3.2.py
+# 📁 novo_main_v1.3.3.py
 # ===========================
 # Autor: Diego Castro Oliveira
-# Projeto: Bot de Monitoramento SPOT Binance (Flask, HTML, top50, SPOT real, Safe RSI)
+# Projeto: Bot de Monitoramento SPOT Binance (Flask, HTML, top50, SPOT real, Safe RSI, Anti-Stable)
 # ===========================
 
 import os
@@ -141,12 +141,18 @@ async def analyze_pair(symbol):
 async def main_loop():
     print("🚀 Iniciando monitoramento SPOT USDT (somente pares SPOT reais)...")
 
+    # 🔎 Filtro anti-stablecoins
+    EXCLUDED_KEYWORDS = ["USDC", "TUSD", "FDUSD", "BUSD", "DAI", "AEUR", "EURT", "EURS", "PYUSD", "USDP"]
+
     async with aiohttp.ClientSession() as session:
         async with session.get("https://api.binance.com/api/v3/exchangeInfo") as resp:
             info = await resp.json()
             valid_spot = [
                 s["symbol"] for s in info["symbols"]
-                if s.get("isSpotTradingAllowed") and s["status"] == "TRADING" and s["symbol"].endswith("USDT")
+                if s.get("isSpotTradingAllowed")
+                and s["status"] == "TRADING"
+                and s["symbol"].endswith("USDT")
+                and not any(x in s["symbol"] for x in EXCLUDED_KEYWORDS)
             ]
 
         async with session.get("https://api.binance.com/api/v3/ticker/24hr") as resp:
@@ -156,7 +162,7 @@ async def main_loop():
             top_pairs = [p["symbol"] for p in sorted_pairs[:50]]
             other_pairs = [p["symbol"] for p in sorted_pairs[50:]]
 
-    print(f"✅ {len(valid_spot)} pares SPOT válidos carregados.")
+    print(f"✅ {len(valid_spot)} pares SPOT válidos carregados (stablecoins excluídas).")
     print(f"🔝 Top 10 por volume: {[p for p in top_pairs[:10]]}")
 
     while True:
