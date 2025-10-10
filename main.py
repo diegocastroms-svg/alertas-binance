@@ -1,8 +1,8 @@
 # ===========================
-# 📁 novo_main_v1.3.1.py
+# 📁 novo_main_v1.3.2.py
 # ===========================
 # Autor: Diego Castro Oliveira
-# Projeto: Bot de Monitoramento SPOT Binance (Flask, HTML, top50, SPOT real)
+# Projeto: Bot de Monitoramento SPOT Binance (Flask, HTML, top50, SPOT real, Safe RSI)
 # ===========================
 
 import os
@@ -37,25 +37,34 @@ async def get_klines(symbol: str, interval="5m", limit=100):
     url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
     async with aiohttp.ClientSession() as session:
         async with session.get(url) as resp:
-            return await resp.json()
+            data = await resp.json()
+            # 🔒 Remove candles inválidos (valores None)
+            valid = [float(c[4]) for c in data if c[4] not in (None, "null")]
+            return valid
 
 def ma(values, period):
-    """Cálculo simples de média móvel"""
+    """Cálculo simples de média móvel com proteção"""
+    values = [v for v in values if v is not None]
     if len(values) < period:
         return None
     return mean(values[-period:])
 
 def rsi(values, period=14):
-    """Cálculo simplificado de RSI"""
+    """Cálculo simplificado de RSI com proteção contra None"""
+    values = [v for v in values if v is not None]
     if len(values) < period + 1:
         return None
     gains, losses = [], []
     for i in range(1, period + 1):
+        if i >= len(values):
+            break
         diff = values[-i] - values[-i - 1]
         if diff > 0:
             gains.append(diff)
         else:
             losses.append(abs(diff))
+    if not gains and not losses:
+        return None
     avg_gain = mean(gains) if gains else 0
     avg_loss = mean(losses) if losses else 1e-6
     rs = avg_gain / avg_loss
@@ -66,125 +75,65 @@ def rsi(values, period=14):
 # -----------------------------
 async def analyze_pair(symbol):
     try:
-        # ----- 5 MINUTOS -----
         data_5m = await get_klines(symbol, "5m", 120)
-        closes_5m = [float(c[4]) for c in data_5m]
+        data_15m = await get_klines(symbol, "15m", 120)
+        if not data_5m or not data_15m:
+            return  # pula moedas sem histórico
 
-        ema9 = ma(closes_5m, 9)
-        ma20 = ma(closes_5m, 20)
-        ma50 = ma(closes_5m, 50)
-        ma200 = ma(closes_5m, 200)
-        rsi_5m = rsi(closes_5m)
-        last_price = closes_5m[-1]
+        ema9 = ma(data_5m, 9)
+        ma20 = ma(data_5m, 20)
+        ma50 = ma(data_5m, 50)
+        ma200 = ma(data_5m, 200)
+        rsi_5m = rsi(data_5m)
+        last_price = data_5m[-1]
         now = datetime.now().strftime("%Y-%m-%d %H:%M")
-
         separator = "\n━━━━━━━━━━━━━━━━━━━━━━━"
 
-        # 1️⃣ Queda + Lateralização
-        if closes_5m[-3] > closes_5m[-2] > closes_5m[-1] and abs(closes_5m[-1] - closes_5m[-3]) < 0.002 * closes_5m[-1]:
-            msg = (
-                f"🔴 <b>{symbol}</b>\n"
-                f"📉 <b>MERCADO EM QUEDA (5m)</b>\n"
-                f"⏸️ Lateralizando após queda\n"
-                f"📊 Em queda, monitorando possível alta\n"
-                f"💰 Preço atual: {last_price}\n"
-                f"🕒 {now}{separator}"
-            )
+        # 5m - Lateralização após queda
+        if len(data_5m) >= 3 and data_5m[-3] > data_5m[-2] > data_5m[-1] and abs(data_5m[-1] - data_5m[-3]) < 0.002 * data_5m[-1]:
+            msg = f"🔴 <b>{symbol}</b>\n📉 <b>MERCADO EM QUEDA (5m)</b>\n⏸️ Lateralizando após queda\n📊 Em queda, monitorando possível alta\n💰 Preço atual: {last_price}\n🕒 {now}{separator}"
             await send_telegram(msg)
 
-        # 2️⃣ EMA9 cruza MA20/MA50 → tendência de alta
+        # 5m - EMA9 cruzando MA20/50
         if ema9 and ma20 and ma50 and ema9 > ma20 > ma50:
-            msg = (
-                f"🟢 <b>{symbol}</b>\n"
-                f"🚀 <b>TENDÊNCIA DE ALTA INICIADA (5m)</b>\n"
-                f"📈 EMA9 cruzou acima das MA20 e MA50\n"
-                f"💰 Preço atual: {last_price}\n"
-                f"🕒 {now}{separator}"
-            )
+            msg = f"🟢 <b>{symbol}</b>\n🚀 <b>TENDÊNCIA DE ALTA INICIADA (5m)</b>\n📈 EMA9 cruzou acima das MA20 e MA50\n💰 Preço atual: {last_price}\n🕒 {now}{separator}"
             await send_telegram(msg)
 
-        # 3️⃣ EMA9 + MA20 + MA50 acima da MA200 → pré-confirmada
+        # 5m - Pré-confirmada
         if ema9 and ma20 and ma50 and ma200 and ema9 > ma200 and ma20 > ma200 and ma50 > ma200:
-            msg = (
-                f"🟢 <b>{symbol}</b>\n"
-                f"⚡ <b>TENDÊNCIA PRÉ-CONFIRMADA (5m)</b>\n"
-                f"📈 EMA9, MA20 e MA50 cruzaram acima da MA200\n"
-                f"💰 Preço atual: {last_price}\n"
-                f"🕒 {now}{separator}"
-            )
+            msg = f"🟢 <b>{symbol}</b>\n⚡ <b>TENDÊNCIA PRÉ-CONFIRMADA (5m)</b>\n📈 EMA9, MA20 e MA50 cruzaram acima da MA200\n💰 Preço atual: {last_price}\n🕒 {now}{separator}"
             await send_telegram(msg)
 
-        # ----- 15 MINUTOS -----
-        data_15m = await get_klines(symbol, "15m", 120)
-        closes_15m = [float(c[4]) for c in data_15m]
+        # 15m
+        ema9_15 = ma(data_15m, 9)
+        ma20_15 = ma(data_15m, 20)
+        ma50_15 = ma(data_15m, 50)
+        ma200_15 = ma(data_15m, 200)
+        rsi_15 = rsi(data_15m)
+        last_price_15 = data_15m[-1]
 
-        ema9_15 = ma(closes_15m, 9)
-        ma20_15 = ma(closes_15m, 20)
-        ma50_15 = ma(closes_15m, 50)
-        ma200_15 = ma(closes_15m, 200)
-        rsi_15 = rsi(closes_15m)
-        last_price_15 = closes_15m[-1]
-
-        # 4️⃣ EMA9 cruza MA200 → pré-confirmação
         if ema9_15 and ma200_15 and ema9_15 > ma200_15:
-            msg = (
-                f"🟢 <b>{symbol}</b>\n"
-                f"⚡ <b>TENDÊNCIA PRÉ-CONFIRMADA (15m)</b>\n"
-                f"📈 EMA9 cruzou acima da MA200\n"
-                f"💰 Preço atual: {last_price_15}\n"
-                f"🕒 {now}{separator}"
-            )
+            msg = f"🟢 <b>{symbol}</b>\n⚡ <b>TENDÊNCIA PRÉ-CONFIRMADA (15m)</b>\n📈 EMA9 cruzou acima da MA200\n💰 Preço atual: {last_price_15}\n🕒 {now}{separator}"
             await send_telegram(msg)
 
-        # 5️⃣ MA20 + MA50 cruzam MA200 → tendência confirmada
         if ma20_15 and ma50_15 and ma200_15 and ma20_15 > ma200_15 and ma50_15 > ma200_15:
-            msg = (
-                f"🟢 <b>{symbol}</b>\n"
-                f"🔥 <b>TENDÊNCIA CONFIRMADA (15m)</b>\n"
-                f"📈 MA20 e MA50 cruzaram acima da MA200\n"
-                f"💰 Preço atual: {last_price_15}\n"
-                f"🕒 {now}{separator}"
-            )
+            msg = f"🟢 <b>{symbol}</b>\n🔥 <b>TENDÊNCIA CONFIRMADA (15m)</b>\n📈 MA20 e MA50 cruzaram acima da MA200\n💰 Preço atual: {last_price_15}\n🕒 {now}{separator}"
             await send_telegram(msg)
 
-        # 6️⃣ Reteste EMA9/MA20 e reverte com força
-        if (abs(last_price_15 - ema9_15) / last_price_15 < 0.003 or abs(last_price_15 - ma20_15) / last_price_15 < 0.003) and rsi_15 > 50:
-            msg = (
-                f"🟢 <b>{symbol}</b>\n"
-                f"🔁 <b>RETESTE CONFIRMADO (15m)</b>\n"
-                f"📊 Preço testou a EMA9 ou MA20 e reverteu com confirmação dos indicadores\n"
-                f"💬 Continuação de alta\n"
-                f"💰 Preço atual: {last_price_15}\n"
-                f"🕒 {now}{separator}"
-            )
+        if (abs(last_price_15 - ema9_15) / last_price_15 < 0.003 or abs(last_price_15 - ma20_15) / last_price_15 < 0.003) and rsi_15 and rsi_15 > 50:
+            msg = f"🟢 <b>{symbol}</b>\n🔁 <b>RETESTE CONFIRMADO (15m)</b>\n📊 Preço testou a EMA9 ou MA20 e reverteu com confirmação dos indicadores\n💬 Continuação de alta\n💰 Preço atual: {last_price_15}\n🕒 {now}{separator}"
             await send_telegram(msg)
 
-        # 7️⃣ Reteste fraco — possível queda
-        if (abs(last_price_15 - ema9_15) / last_price_15 < 0.003 or abs(last_price_15 - ma20_15) / last_price_15 < 0.003) and rsi_15 < 45:
-            msg = (
-                f"🟠 <b>{symbol}</b>\n"
-                f"⚠️ <b>RETESTE FRACO (15m)</b>\n"
-                f"📊 Preço testou EMA9 ou MA20 e perdeu força com confirmação dos indicadores\n"
-                f"💬 Possível queda\n"
-                f"💰 Preço atual: {last_price_15}\n"
-                f"🕒 {now}{separator}"
-            )
+        if (abs(last_price_15 - ema9_15) / last_price_15 < 0.003 or abs(last_price_15 - ma20_15) / last_price_15 < 0.003) and rsi_15 and rsi_15 < 45:
+            msg = f"🟠 <b>{symbol}</b>\n⚠️ <b>RETESTE FRACO (15m)</b>\n📊 Preço testou EMA9 ou MA20 e perdeu força com confirmação dos indicadores\n💬 Possível queda\n💰 Preço atual: {last_price_15}\n🕒 {now}{separator}"
             await send_telegram(msg)
 
-        # 8️⃣ Reteste MA200 — confirmação de força
-        if abs(last_price_15 - ma200_15) / last_price_15 < 0.003 and rsi_15 > 50:
-            msg = (
-                f"🟢 <b>{symbol}</b>\n"
-                f"🔁 <b>RETESTE MA200 (15m)</b>\n"
-                f"📊 Preço testou a MA200 e confirmou força pelos indicadores\n"
-                f"💬 Tendência de continuação de alta\n"
-                f"💰 Preço atual: {last_price_15}\n"
-                f"🕒 {now}{separator}"
-            )
+        if ma200_15 and rsi_15 and abs(last_price_15 - ma200_15) / last_price_15 < 0.003 and rsi_15 > 50:
+            msg = f"🟢 <b>{symbol}</b>\n🔁 <b>RETESTE MA200 (15m)</b>\n📊 Preço testou a MA200 e confirmou força pelos indicadores\n💬 Tendência de continuação de alta\n💰 Preço atual: {last_price_15}\n🕒 {now}{separator}"
             await send_telegram(msg)
 
     except Exception as e:
-        print(f"Erro ao analisar {symbol}: {e}")
+        print(f"⚠️ Erro ao analisar {symbol}: {e}")
 
 # -----------------------------
 # 🚀 Loop principal
@@ -193,7 +142,6 @@ async def main_loop():
     print("🚀 Iniciando monitoramento SPOT USDT (somente pares SPOT reais)...")
 
     async with aiohttp.ClientSession() as session:
-        # Pega apenas símbolos SPOT reais
         async with session.get("https://api.binance.com/api/v3/exchangeInfo") as resp:
             info = await resp.json()
             valid_spot = [
@@ -201,13 +149,15 @@ async def main_loop():
                 if s.get("isSpotTradingAllowed") and s["status"] == "TRADING" and s["symbol"].endswith("USDT")
             ]
 
-        # Agora pega volumes apenas desses pares válidos
         async with session.get("https://api.binance.com/api/v3/ticker/24hr") as resp:
             ticker_data = await resp.json()
             spot_pairs = [t for t in ticker_data if t["symbol"] in valid_spot]
             sorted_pairs = sorted(spot_pairs, key=lambda x: float(x["quoteVolume"]), reverse=True)
             top_pairs = [p["symbol"] for p in sorted_pairs[:50]]
             other_pairs = [p["symbol"] for p in sorted_pairs[50:]]
+
+    print(f"✅ {len(valid_spot)} pares SPOT válidos carregados.")
+    print(f"🔝 Top 10 por volume: {[p for p in top_pairs[:10]]}")
 
     while True:
         tasks = [analyze_pair(symbol) for symbol in top_pairs]
