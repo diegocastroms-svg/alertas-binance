@@ -1,183 +1,351 @@
+# main_short_v0.py — BOT CURTO (5m/15m) • SPOT/USDT • Render-ready
+# ---------------------------------------------------------------
+# Variáveis de ambiente no Render:
+#   TELEGRAM_TOKEN      -> token do bot (BotFather)
+#   TELEGRAM_CHAT_ID    -> id do chat/usuário/grupo
+#   PORT                -> fornecida automaticamente pelo Render
+#
+# requirements.txt:
+#   Flask==3.0.3
+#   requests==2.31.0
+
+import os
 import time
-import requests
 import threading
-import math
-from datetime import datetime, timedelta
-from flask import Flask
+from datetime import datetime, timedelta, timezone
 from collections import defaultdict
 
+import requests
+from flask import Flask
+
+# ==========================
+# CONFIG
+# ==========================
+BINANCE = "https://api.binance.com"
+INTERVAL_5M = "5m"
+INTERVAL_15M = "15m"
+K_LIMIT = 300                 # barras por série (suficiente para MA200/RSI)
+TOP_N = 50                    # Top 50 por volume (SPOT/USDT)
+TOP_REFRESH_SEC = 3600        # recarrega Top 50 a cada 1h
+SCAN_SLEEP = 300              # varredura a cada 5 min
+COOLDOWN_SEC = 15 * 60        # 15 min por par + tipo de alerta
+MAX_WORKERS = 40              # threads por lote (estável p/ Render)
+
+# Excluir tokens alavancados/sintéticos e anti-USD
+EXCLUDE_KEYWORDS = ("UP","DOWN","BULL","BEAR","2L","2S","3L","3S","4L","4S","5L","5S","1000")
+
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN","").strip()
+CHAT_ID = os.getenv("TELEGRAM_CHAT_ID","").strip()
+
+BR_TZ = timezone(timedelta(hours=-3))  # Horário de Brasília
+
+# Estado
+cooldowns = defaultdict(dict)    # cooldowns[symbol][alert_key] = last_ts
+current_top = []                 # lista Top N atual
+last_top_update = 0
+
+# Flask (healthcheck Render)
 app = Flask(__name__)
+@app.route("/")
+def health(): return "OK", 200
 
-TELEGRAM_TOKEN = "SEU_TOKEN_AQUI"
-CHAT_ID = "SEU_CHAT_ID_AQUI"
-BASE_URL = "https://api.binance.com"
-COOLDOWN_TIME = 900  # 15 minutos
+# ==========================
+# UTILITÁRIOS
+# ==========================
+def now_br_str() -> str:
+    return datetime.now(BR_TZ).strftime("%Y-%m-%d %H:%M")
 
-cooldowns = defaultdict(dict)
+def log(msg: str):
+    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {msg}")
 
-def send_message(text):
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    payload = {"chat_id": CHAT_ID, "text": text, "parse_mode": "HTML"}
+def send_telegram(text: str):
+    if not TELEGRAM_TOKEN or not CHAT_ID:
+        log("AVISO: TELEGRAM_TOKEN/CHAT_ID não configurados. Mensagem não enviada.")
+        return
     try:
-        requests.post(url, json=payload, timeout=10)
+        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+        payload = {"chat_id": CHAT_ID, "text": text, "parse_mode": "HTML", "disable_web_page_preview": True}
+        requests.post(url, json=payload, timeout=15)
     except Exception as e:
-        print(f"Erro ao enviar mensagem: {e}")
+        log(f"Erro Telegram: {e}")
 
-def get_klines(symbol, interval="5m", limit=200):
+def fetch_json(url, params=None, timeout=15):
     try:
-        url = f"{BASE_URL}/api/v3/klines"
-        params = {"symbol": symbol, "interval": interval, "limit": limit}
-        data = requests.get(url, params=params, timeout=10).json()
-        return [[float(x[1]), float(x[2]), float(x[3]), float(x[4]), float(x[5])] for x in data]
-    except Exception:
-        return []
+        r = requests.get(url, params=params, timeout=timeout)
+        if r.status_code == 200:
+            return r.json()
+    except Exception as e:
+        log(f"fetch_json erro: {e}")
+    return None
 
-def sma(values, period):
-    if len(values) < period:
-        return None
-    return sum(values[-period:]) / period
+def get_klines(symbol: str, interval: str, limit: int = K_LIMIT):
+    data = fetch_json(f"{BINANCE}/api/v3/klines", {"symbol": symbol, "interval": interval, "limit": limit})
+    if not data:
+        return [], []
+    closes = [float(x[4]) for x in data]
+    vols   = [float(x[5]) for x in data]
+    return closes, vols
 
-def ema(values, period):
-    if len(values) < period:
-        return None
+def sma(values, period: int):
+    out, s, q = [], 0.0, []
+    for v in values:
+        q.append(v); s += v
+        if len(q) > period:
+            s -= q.pop(0)
+        out.append((s / period) if len(q) == period else None)
+    return out
+
+def ema(values, period: int):
+    out = []
     k = 2 / (period + 1)
-    ema_val = values[-period]
-    for val in values[-period + 1:]:
-        ema_val = val * k + ema_val * (1 - k)
-    return ema_val
+    e = None
+    for v in values:
+        e = v if e is None else v * k + e * (1 - k)
+        out.append(e)
+    return out
 
-def rsi(values, period=14):
+def rsi(values, period: int = 14):
     if len(values) < period + 1:
         return None
     gains, losses = [], []
-    for i in range(-period, -1):
-        delta = values[i + 1] - values[i]
-        if delta >= 0:
-            gains.append(delta)
-        else:
-            losses.append(abs(delta))
-    avg_gain = sum(gains) / period if gains else 0
-    avg_loss = sum(losses) / period if losses else 0
-    if avg_loss == 0:
-        return 100
-    rs = avg_gain / avg_loss
+    for i in range(1, len(values)):
+        d = values[i] - values[i-1]
+        gains.append(max(d, 0.0))
+        losses.append(-min(d, 0.0))
+    ag = sum(gains[:period]) / period
+    al = sum(losses[:period]) / period
+    for i in range(period, len(gains)):
+        ag = (ag * (period - 1) + gains[i]) / period
+        al = (al * (period - 1) + losses[i]) / period
+    if al == 0:
+        return 100.0
+    rs = ag / al
     return 100 - (100 / (1 + rs))
 
-def get_spot_pairs():
-    try:
-        info = requests.get(f"{BASE_URL}/api/v3/exchangeInfo", timeout=10).json()
-        symbols = [s["symbol"] for s in info["symbols"]
-                   if s["quoteAsset"] == "USDT"
-                   and s["status"] == "TRADING"
-                   and not any(x in s["symbol"] for x in ["UP", "DOWN", "BULL", "BEAR", "1000", "2X", "3X", "5L", "5S"])]
-        return symbols
-    except Exception:
-        return []
+def cross_up(prev_a, now_a, prev_b, now_b) -> bool:
+    if any(x is None for x in (prev_a, now_a, prev_b, now_b)):
+        return False
+    return prev_a <= prev_b and now_a > now_b
 
-def check_cooldown(symbol, alert_type):
+def check_cooldown(symbol: str, key: str) -> bool:
     now = time.time()
-    if alert_type in cooldowns[symbol]:
-        if now - cooldowns[symbol][alert_type] < COOLDOWN_TIME:
-            return True
-    cooldowns[symbol][alert_type] = now
+    last = cooldowns[symbol].get(key, 0)
+    if now - last < COOLDOWN_SEC:
+        return True  # ainda em cooldown
+    cooldowns[symbol][key] = now
     return False
 
-def format_message(symbol, title, motivo, price, rsi_value, vol_ratio, timeframe):
-    hora_brasil = (datetime.utcnow() - timedelta(hours=3)).strftime("%Y-%m-%d %H:%M")
-    return (f"🟢 <b>{symbol} — {title}</b>\n"
-            f"<b>Motivo:</b> {motivo}\n"
-            f"RSI: {rsi_value:.1f} • Volume: {vol_ratio:+.0f}%\n"
-            f"💰 <b>Preço atual:</b> {price}\n"
-            f"🕒 <b>Horário:</b> {hora_brasil} 🇧🇷\n"
-            f"🔗 <a href='binance://app/spot/trade?symbol={symbol}'>Ver no app Binance</a>\n"
-            "━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+def chart_link(symbol: str, label: str) -> str:
+    return f"https://www.binance.com/en/trade?symbol={symbol}&type=spot"
 
-def analyze(symbol):
-    klines_5m = get_klines(symbol, "5m")
-    klines_15m = get_klines(symbol, "15m")
-    if not klines_5m or not klines_15m:
-        return
+def fmt_msg(symbol, emoji, titulo, motivo, price, rsi_val, e9, m20, m50, m200, label):
+    return (
+        f"{emoji} <b>{symbol}</b>\n"
+        f"🧭 <b>{titulo}</b>\n"
+        f"📊 {motivo}\n"
+        f"💰 Preço: {price:.6f}\n"
+        f"📈 EMA9: {e9:.5f} | MA20: {m20:.5f} | MA50: {m50:.5f}\n"
+        f"🌙 MA200: {m200:.5f}\n"
+        f"🧪 RSI: {rsi_val:.1f}\n"
+        f"🇧🇷 {now_br_str()}\n"
+        f"🔗 <a href='{chart_link(symbol,label)}'>Ver gráfico {label} (Binance)</a>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━"
+    )
 
-    closes_5m = [c[3] for c in klines_5m]
-    volumes_5m = [c[4] for c in klines_5m]
-    closes_15m = [c[3] for c in klines_15m]
-    volumes_15m = [c[4] for c in klines_15m]
+# ==========================
+# COLETA TOP 50 SPOT/USDT
+# ==========================
+def is_filtered_symbol(symbol: str, base_asset: str) -> bool:
+    s = symbol.upper()
+    b = base_asset.upper()
+    if s.endswith("USD") or b.endswith("USD"):   # anti-USD (queremos USDT)
+        return True
+    for kw in EXCLUDE_KEYWORDS:
+        if kw in s:
+            return True
+    return False
 
-    price = closes_5m[-1]
-    rsi_5m = rsi(closes_5m)
-    rsi_15m = rsi(closes_15m)
+def get_valid_spot_usdt():
+    info = fetch_json(f"{BINANCE}/api/v3/exchangeInfo")
+    out = []
+    if not info or "symbols" not in info:
+        return out
+    for s in info["symbols"]:
+        if s.get("status") != "TRADING":
+            continue
+        if s.get("quoteAsset") != "USDT":
+            continue
+        symbol = s.get("symbol", "")
+        base   = s.get("baseAsset", "")
+        if is_filtered_symbol(symbol, base):
+            continue
+        out.append(symbol)
+    return out
 
-    ema9_5m = ema(closes_5m, 9)
-    ma20_5m = sma(closes_5m, 20)
-    ma50_5m = sma(closes_5m, 50)
-    ma200_5m = sma(closes_5m, 200)
-    vol_avg_5m = sma(volumes_5m, 20)
-    vol_ratio_5m = ((volumes_5m[-1] / vol_avg_5m) - 1) * 100 if vol_avg_5m else 0
+def get_top50():
+    valid = set(get_valid_spot_usdt())
+    data = fetch_json(f"{BINANCE}/api/v3/ticker/24hr")
+    ranked = []
+    if not data:
+        return []
+    for t in data:
+        sym = t.get("symbol", "")
+        if sym in valid:
+            try:
+                qv = float(t.get("quoteVolume") or 0.0)
+                ranked.append((sym, qv))
+            except:
+                pass
+    ranked.sort(key=lambda x: x[1], reverse=True)
+    return [s for s, _ in ranked[:TOP_N]]
 
-    ema9_15m = ema(closes_15m, 9)
-    ma20_15m = sma(closes_15m, 20)
-    ma50_15m = sma(closes_15m, 50)
-    ma200_15m = sma(closes_15m, 200)
-    vol_avg_15m = sma(volumes_15m, 20)
-    vol_ratio_15m = ((volumes_15m[-1] / vol_avg_15m) - 1) * 100 if vol_avg_15m else 0
+# ==========================
+# ANÁLISE (5m/15m)
+# ==========================
+def analyze_symbol(symbol: str):
+    try:
+        # -------- 5m --------
+        c5, v5 = get_klines(symbol, INTERVAL_5M, K_LIMIT)
+        if len(c5) < 210:
+            return
+        ema9_5 = ema(c5, 9)
+        ma20_5 = sma(c5, 20)
+        ma50_5 = sma(c5, 50)
+        ma200_5 = sma(c5, 200)
+        r5 = rsi(c5, 14)
+        p5 = c5[-1]
+        e9_5, m20_5, m50_5, m200_5 = ema9_5[-1], ma20_5[-1], ma50_5[-1], ma200_5[-1]
+        e9p_5, m20p_5 = ema9_5[-2], ma20_5[-2]
 
-    # ================== ALERTAS 5 MIN ==================
-    if ema9_5m and ma20_5m and ma50_5m and ma200_5m:
-        # Tendência Iniciando
-        if ema9_5m > ma20_5m > ma50_5m and closes_5m[-2] < ma20_5m and closes_5m[-1] > ma20_5m and ema9_5m < ma200_5m:
-            if not check_cooldown(symbol, "inicio_5m"):
-                motivo = "Queda → lateralização → EMA9 cruzou MA20 e MA50 (abaixo da MA200)"
-                send_message(format_message(symbol, "TENDÊNCIA INICIANDO (5m)", motivo, price, rsi_5m, vol_ratio_5m, "5m"))
+        # (5m) MERCADO CAIU + LATERALIZANDO (pré-alerta)
+        # Queda: MA20 descendente nos últimos 10 candles; Lateralização: amplitude < ~1% do preço médio recente
+        if ma20_5[-10] and ma20_5[-1] and ma20_5[-1] < ma20_5[-10]:
+            ult = c5[-20:]
+            if ult and (max(ult) - min(ult)) < 0.01 * (sum(ult) / len(ult)):
+                key = "queda_lat_5m"
+                if not check_cooldown(symbol, key):
+                    send_telegram(
+                        f"🔻 <b>{symbol}</b>\n"
+                        f"💬 Mercado em queda, lateralizando — monitorando possível alta\n"
+                        f"🇧🇷 {now_br_str()}\n"
+                        f"🔗 <a href='{chart_link(symbol,'5m')}'>Ver gráfico 5m</a>\n"
+                        f"━━━━━━━━━━━━━━━━━━━━━━━"
+                    )
 
-        # Cruzamento Forte (EMA9 e MA20 acima da MA200)
-        if ema9_5m > ma200_5m and ma20_5m > ma200_5m and closes_5m[-1] > ma200_5m:
-            if not check_cooldown(symbol, "cruzamento_5m"):
-                motivo = "EMA9 e MA20 cruzaram pra cima da MA200"
-                send_message(format_message(symbol, "CRUZAMENTO FORTE (5m)", motivo, price, rsi_5m, vol_ratio_5m, "5m"))
+        # (5m) TENDÊNCIA INICIANDO — EMA9 cruza MA20 p/ cima e ainda abaixo da MA200
+        if cross_up(e9p_5, e9_5, m20p_5, m20_5) and (e9_5 is not None and m20_5 is not None and m200_5 is not None) and (e9_5 < m200_5):
+            key = "inicio_5m"
+            if not check_cooldown(symbol, key):
+                send_telegram(fmt_msg(
+                    symbol, "🟢", "TENDÊNCIA INICIANDO (5m)",
+                    "EMA9 cruzou MA20 p/ cima (abaixo da MA200) após queda/lateralização",
+                    p5, r5 or 0.0, e9_5, m20_5, m50_5, m200_5, "5m"
+                ))
 
-        # Confirmação de Força (volume + RSI)
-        if ema9_5m > ma20_5m > ma50_5m and ema9_5m > ma200_5m and vol_ratio_5m > 30 and rsi_5m > 55:
-            if not check_cooldown(symbol, "confirmacao_5m"):
-                motivo = "Volume e RSI confirmam força após virada de tendência"
-                send_message(format_message(symbol, "⚡️ CONFIRMAÇÃO DE FORÇA (5m)", motivo, price, rsi_5m, vol_ratio_5m, "5m"))
+        # -------- 15m --------
+        c15, v15 = get_klines(symbol, INTERVAL_15M, K_LIMIT)
+        if len(c15) < 210:
+            return
+        ema9_15 = ema(c15, 9)
+        ma20_15 = sma(c15, 20)
+        ma50_15 = sma(c15, 50)
+        ma200_15 = sma(c15, 200)
+        r15 = rsi(c15, 14)
+        p15 = c15[-1]
+        e9_15, m20_15, m50_15, m200_15 = ema9_15[-1], ma20_15[-1], ma50_15[-1], ma200_15[-1]
+        e9p_15, m200p_15 = ema9_15[-2], ma200_15[-2]
 
-    # ================== ALERTAS 15 MIN ==================
-    if ema9_15m and ma20_15m and ma50_15m and ma200_15m:
-        # Pré-confirmação de Alta
-        if ema9_15m > ma200_15m and closes_15m[-2] < ma200_15m:
-            if not check_cooldown(symbol, "preconf_15m"):
-                motivo = "EMA9 cruzou pra cima da MA200"
-                send_message(format_message(symbol, "PRÉ-CONFIRMAÇÃO DE ALTA (15m)", motivo, price, rsi_15m, vol_ratio_15m, "15m"))
+        # (15m) TENDÊNCIA PRÉ-CONFIRMADA — EMA9 cruzou MA200 p/ cima
+        if cross_up(e9p_15, e9_15, m200p_15, m200_15):
+            key = "preconf_15m"
+            if not check_cooldown(symbol, key):
+                send_telegram(fmt_msg(
+                    symbol, "🔵", "TENDÊNCIA PRÉ-CONFIRMADA (15m)",
+                    "EMA9 cruzou a MA200 p/ cima",
+                    p15, r15 or 0.0, e9_15, m20_15, m50_15, m200_15, "15m"
+                ))
 
-        # Tendência Confirmada
-        if ma20_15m > ma200_15m and ma50_15m > ma200_15m:
-            if not check_cooldown(symbol, "confirmada_15m"):
-                motivo = "MA20 e MA50 cruzaram pra cima da MA200"
-                send_message(format_message(symbol, "TENDÊNCIA CONFIRMADA (15m)", motivo, price, rsi_15m, vol_ratio_15m, "15m"))
+        # (15m) RETESTE CONFIRMADO — tocou EMA9/MA20, RSI>55, vol>média20 e preço acima da MA20
+        vol_avg_15 = sum(v15[-20:]) / 20 if len(v15) >= 20 else None
+        touch9 = (e9_15 is not None) and abs(p15 - e9_15) / p15 < 0.006
+        touch20 = (m20_15 is not None) and abs(p15 - m20_15) / p15 < 0.006
 
-        # Reteste Confirmado (continuação)
-        if abs(closes_15m[-1] - ema9_15m) / ema9_15m < 0.006 or abs(closes_15m[-1] - ma20_15m) / ma20_15m < 0.006:
-            if closes_15m[-1] > ema9_15m and rsi_15m > 55 and vol_ratio_15m > 0:
-                if not check_cooldown(symbol, "reteste_ok_15m"):
-                    motivo = "Preço testou EMA9/MA20 e reverteu pra cima com confirmação dos indicadores"
-                    send_message(format_message(symbol, "RETESTE CONFIRMADO (15m)", motivo, price, rsi_15m, vol_ratio_15m, "15m"))
-            elif closes_15m[-1] < ema9_15m and rsi_15m < 50:
-                if not check_cooldown(symbol, "reteste_fraco_15m"):
-                    motivo = "Preço testou EMA9/MA20 e perdeu força — possível queda"
-                    send_message(format_message(symbol, "RETESTE FRACO (15m)", motivo, price, rsi_15m, vol_ratio_15m, "15m"))
+        if (touch9 or touch20) and r15 and r15 > 55 and vol_avg_15 and v15[-1] > vol_avg_15 and (m20_15 is not None) and p15 > m20_15:
+            key = "reteste_ok_15m"
+            if not check_cooldown(symbol, key):
+                send_telegram(fmt_msg(
+                    symbol, "🟢", "RETESTE CONFIRMADO (15m)",
+                    "Preço testou EMA9/MA20 e retomou com força (RSI>55, vol>média)",
+                    p15, r15, e9_15, m20_15, m50_15, m200_15, "15m"
+                ))
 
-def run_bot():
-    pairs = get_spot_pairs()
-    send_message(f"✅ BOT ATIVO NO RENDER — Monitorando {len(pairs)} pares SPOT USDT 🇧🇷")
+        # (15m) RETESTE FRACO — tocou e perdeu, RSI<50 e preço abaixo da EMA9
+        if (touch9 or touch20) and r15 and r15 < 50 and (e9_15 is not None) and p15 < e9_15:
+            key = "reteste_fraco_15m"
+            if not check_cooldown(symbol, key):
+                send_telegram(fmt_msg(
+                    symbol, "🟠", "RETESTE FRACO (15m)",
+                    "Preço testou EMA9/MA20 e perdeu força — possível queda",
+                    p15, r15, e9_15, m20_15, m50_15, m200_15, "15m"
+                ))
+
+    except Exception as e:
+        log(f"Erro analisando {symbol}: {e}")
+
+# ==========================
+# LOOP PRINCIPAL
+# ==========================
+def refresh_top():
+    global current_top, last_top_update
+    top = get_top50()
+    if top:
+        current_top = top
+        last_top_update = time.time()
+        send_telegram(f"🔄 TOP {TOP_N} atualizado automaticamente ({len(current_top)} pares) 🇧🇷")
+        log(f"TOP atualizado: {len(current_top)} pares")
+
+def worker(sym):
+    analyze_symbol(sym)
+    time.sleep(0.1)  # suaviza rajada na API
+
+def main_loop():
+    send_telegram(
+        f"✅ BOT CURTO ATIVO — SPOT/USDT\n"
+        f"⏱️ Cooldown: 15 min por par/alerta\n"
+        f"🔁 Atualização TOP {TOP_N}: a cada 1h\n"
+        f"🇧🇷 {now_br_str()}"
+    )
+
+    refresh_top()
+    if current_top:
+        send_telegram(f"📦 Top 5: {', '.join(current_top[:5])}")
+
     while True:
-        for symbol in pairs:
-            threading.Thread(target=analyze, args=(symbol,)).start()
-        time.sleep(300)  # atualiza a cada 5 minutos
+        if (time.time() - last_top_update >= TOP_REFRESH_SEC) or (not current_top):
+            refresh_top()
 
-@app.route('/')
-def home():
-    return "Bot de Monitoramento SPOT USDT ativo — v1_zero_ultima_chance_da_aurora"
+        if current_top:
+            threads = []
+            for s in current_top:
+                threads.append(threading.Thread(target=worker, args=(s,), daemon=True))
+
+            # roda em lotes p/ estabilidade
+            for i in range(0, len(threads), MAX_WORKERS):
+                batch = threads[i:i+MAX_WORKERS]
+                for t in batch: t.start()
+                for t in batch: t.join()
+
+        time.sleep(SCAN_SLEEP)
+
+# ==========================
+# START (Render)
+# ==========================
+def start_flask():
+    port = int(os.environ.get("PORT", "5000"))
+    log(f"FLASK ouvindo em 0.0.0.0:{port}")
+    app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
 
 if __name__ == "__main__":
-    threading.Thread(target=run_bot).start()
-    app.run(host="0.0.0.0", port=5000)
+    threading.Thread(target=start_flask, daemon=True).start()
+    main_loop()
+```0
