@@ -1,192 +1,212 @@
-import requests
+import asyncio
+import aiohttp
+import os
 import time
-from concurrent.futures import ThreadPoolExecutor
+import math
+from datetime import datetime
+from threading import Thread
 from flask import Flask
+from dotenv import load_dotenv
 
-# ==============================
-# CONFIGURAÇÕES DO BOT
-# ==============================
-TELEGRAM_TOKEN = "SEU_TELEGRAM_TOKEN_AQUI"
-CHAT_ID = "SEU_CHAT_ID_AQUI"
-
-UPDATE_INTERVAL = 3600  # Atualiza Top 50 a cada 1h
-COOLDOWN_TIME = 900     # 15 min entre alertas por par
-TIMEFRAME = "5m"
-MAX_THREADS = 50
-
+# ======================================
+# CONFIGURAÇÕES INICIAIS
+# ======================================
+load_dotenv()
+TOKEN = os.getenv("TELEGRAM_TOKEN")
+CHAT_ID = os.getenv("CHAT_ID")
+COOLDOWN = 900  # 15 minutos
+TOP_LIMIT = 50  # top 50 por volume
+UPDATE_INTERVAL = 3600  # 1 hora para atualizar a lista
+BASE_URL = "https://api.binance.com/api/v3"
 app = Flask(__name__)
+
+# Controle de tempo entre alertas
 last_alert_time = {}
 top_pairs = []
-last_update_time = 0
 
-# ==============================
-# FUNÇÕES BASE
-# ==============================
-def send_message(text):
-    """Envia mensagem para o Telegram"""
+# ======================================
+# FUNÇÃO: ENVIAR MENSAGEM TELEGRAM
+# ======================================
+async def send_message(text):
+    url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
+    payload = {"chat_id": CHAT_ID, "text": text, "parse_mode": "HTML"}
     try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        payload = {"chat_id": CHAT_ID, "text": text, "parse_mode": "HTML"}
-        requests.post(url, json=payload)
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, data=payload) as resp:
+                return await resp.text()
     except Exception as e:
-        print(f"Erro ao enviar mensagem: {e}")
+        print("Erro ao enviar mensagem:", e)
 
-def get_top_50_spot_pairs():
-    """Obtém as 50 moedas SPOT com maior volume"""
+# ======================================
+# FUNÇÃO: OBTER PARES SPOT USDT
+# ======================================
+async def get_spot_pairs():
+    global top_pairs
     try:
-        tickers = requests.get("https://api.binance.com/api/v3/ticker/24hr").json()
-        pairs = [
-            t["symbol"] for t in tickers
-            if t["symbol"].endswith("USDT")
-            and not any(x in t["symbol"] for x in ["UP", "DOWN", "BULL", "BEAR", "2L", "3L", "2S", "3S"])
-        ]
-        sorted_pairs = sorted(
-            [t for t in tickers if t["symbol"] in pairs],
-            key=lambda x: float(x["quoteVolume"]),
-            reverse=True
-        )
-        top50 = [t["symbol"] for t in sorted_pairs[:50]]
-        return top50
+        async with aiohttp.ClientSession() as session:
+            async with session.get(f"{BASE_URL}/ticker/24hr") as resp:
+                data = await resp.json()
+                usdt_pairs = [
+                    item for item in data
+                    if item["symbol"].endswith("USDT")
+                    and not any(x in item["symbol"] for x in ["UP", "DOWN", "BULL", "BEAR", "PERP", "2L", "3L", "4L"])
+                ]
+                sorted_pairs = sorted(usdt_pairs, key=lambda x: float(x["quoteVolume"]), reverse=True)
+                top_pairs = [p["symbol"] for p in sorted_pairs[:TOP_LIMIT]]
+                print(f"✅ Atualizada lista de {len(top_pairs)} pares SPOT.")
     except Exception as e:
-        print(f"Erro ao obter Top 50: {e}")
+        print("Erro ao obter pares:", e)
+
+# ======================================
+# FUNÇÃO: OBTER DADOS DE VELA
+# ======================================
+async def get_klines(session, symbol, interval="5m", limit=100):
+    try:
+        url = f"{BASE_URL}/klines?symbol={symbol}&interval={interval}&limit={limit}"
+        async with session.get(url) as resp:
+            return await resp.json()
+    except:
         return []
 
-def get_klines(symbol, interval="5m", limit=200):
-    """Baixa candles de uma moeda"""
-    try:
-        url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
-        data = requests.get(url).json()
-        closes = [float(c[4]) for c in data]
-        volumes = [float(c[5]) for c in data]
-        return closes, volumes
-    except Exception as e:
-        print(f"Erro ao obter klines de {symbol}: {e}")
-        return [], []
+# ======================================
+# CÁLCULO DE MÉDIAS MÓVEIS
+# ======================================
+def moving_average(data, period):
+    if len(data) < period:
+        return []
+    return [sum(data[i-period:i]) / period for i in range(period, len(data)+1)]
 
-# ==============================
-# INDICADORES (SEM NUMPY)
-# ==============================
-def sma(values, period):
-    if len(values) < period:
-        return [sum(values) / len(values)]
-    sma_vals = []
-    for i in range(period - 1, len(values)):
-        sma_vals.append(sum(values[i - period + 1:i + 1]) / period)
-    return sma_vals
-
-def ema(values, period):
-    if not values or len(values) < period:
-        return [0]
-    ema_vals = []
+def exponential_moving_average(data, period):
+    ema = []
     k = 2 / (period + 1)
-    ema_vals.append(sum(values[:period]) / period)
-    for price in values[period:]:
-        ema_vals.append(price * k + ema_vals[-1] * (1 - k))
-    return ema_vals
-
-def rsi(values, period=14):
-    if len(values) < period + 1:
-        return 50
-    gains, losses = [], []
-    for i in range(1, len(values)):
-        diff = values[i] - values[i - 1]
-        if diff >= 0:
-            gains.append(diff)
-            losses.append(0)
+    for i, price in enumerate(data):
+        if i == 0:
+            ema.append(price)
         else:
-            gains.append(0)
-            losses.append(abs(diff))
+            ema.append(price * k + ema[-1] * (1 - k))
+    return ema
+
+# ======================================
+# FUNÇÃO: MONITORAR MERCADO
+# ======================================
+async def analyze_market(session, symbol):
+    try:
+        klines = await get_klines(session, symbol, "5m", 200)
+        closes = [float(x[4]) for x in klines]
+        if len(closes) < 200:
+            return
+
+        ema9 = exponential_moving_average(closes, 9)
+        ma20 = moving_average(closes, 20)
+        ma50 = moving_average(closes, 50)
+        ma200 = moving_average(closes, 200)
+
+        rsi = calc_rsi(closes)
+        price = closes[-1]
+
+        # ===============================
+        # ALERTA 1 — TENDÊNCIA INICIANDO (5m)
+        # ===============================
+        if (
+            ema9[-1] > ma20[-1] > ma50[-1]
+            and price > ma200[-1]
+            and rsi > 50
+        ):
+            await trigger_alert(symbol, "🚀 TENDÊNCIA INICIANDO (5m)", ema9, ma20, ma50, ma200, price, rsi)
+
+        # ===============================
+        # ALERTA 2 — PRÉ-CONFIRMAÇÃO (5m)
+        # ===============================
+        if (
+            ema9[-1] > ma20[-1] > ma50[-1]
+            and price < ma200[-1]
+            and rsi > 55
+        ):
+            await trigger_alert(symbol, "🟢 PRÉ-CONFIRMAÇÃO (5m)", ema9, ma20, ma50, ma200, price, rsi)
+
+        # ===============================
+        # ALERTA 3 — PULLBACK (15m)
+        # ===============================
+        klines_15m = await get_klines(session, symbol, "15m", 200)
+        closes_15m = [float(x[4]) for x in klines_15m]
+        ema9_15m = exponential_moving_average(closes_15m, 9)
+        ma20_15m = moving_average(closes_15m, 20)
+        ma50_15m = moving_average(closes_15m, 50)
+        ma200_15m = moving_average(closes_15m, 200)
+        rsi_15m = calc_rsi(closes_15m)
+
+        if (
+            ma20_15m[-1] > ma50_15m[-1]
+            and ema9_15m[-1] > ma20_15m[-1]
+            and closes_15m[-1] > ma200_15m[-1]
+        ):
+            await trigger_alert(symbol, "📈 PULLBACK (15m)", ema9_15m, ma20_15m, ma50_15m, ma200_15m, closes_15m[-1], rsi_15m)
+
+    except Exception as e:
+        print(f"Erro ao analisar {symbol}: {e}")
+
+# ======================================
+# RSI
+# ======================================
+def calc_rsi(data, period=14):
+    if len(data) < period + 1:
+        return 0
+    gains, losses = [], []
+    for i in range(1, len(data)):
+        delta = data[i] - data[i - 1]
+        gains.append(max(delta, 0))
+        losses.append(abs(min(delta, 0)))
     avg_gain = sum(gains[-period:]) / period
     avg_loss = sum(losses[-period:]) / period
     if avg_loss == 0:
         return 100
     rs = avg_gain / avg_loss
-    return round(100 - (100 / (1 + rs)), 2)
+    return 100 - (100 / (1 + rs))
 
-# ==============================
-# ANÁLISE E ALERTAS
-# ==============================
-def analyze(symbol):
-    try:
-        global last_alert_time
+# ======================================
+# ALERTA GERAL
+# ======================================
+async def trigger_alert(symbol, alert_type, ema9, ma20, ma50, ma200, price, rsi):
+    now = time.time()
+    if symbol in last_alert_time and now - last_alert_time[symbol] < COOLDOWN:
+        return
+    last_alert_time[symbol] = now
 
-        closes, volumes = get_klines(symbol)
-        if len(closes) < 200:
-            return
+    hora_brasil = datetime.utcnow().strftime("%Y-%m-%d %H:%M")
+    text = (
+        f"{alert_type}\n\n"
+        f"<b>{symbol}</b>\n"
+        f"📊 EMA9: {ema9[-1]:.5f} | MA20: {ma20[-1]:.5f} | MA50: {ma50[-1]:.5f}\n"
+        f"💫 MA200: {ma200[-1]:.5f}\n"
+        f"💰 Preço: {price:.6f}\n"
+        f"📈 RSI: {rsi:.1f}\n"
+        f"🇧🇷 {hora_brasil}\n"
+        f"<a href='https://www.binance.com/en/trade?symbol={symbol}&type=spot'>📎 Ver gráfico 5m no app da Binance</a>"
+    )
+    await send_message(text)
 
-        ema9 = ema(closes, 9)
-        ma20 = sma(closes, 20)
-        ma50 = sma(closes, 50)
-        ma200 = sma(closes, 200)
-        rsi_val = rsi(closes)
-        vol_avg = sum(volumes[-20:]) / 20
-        vol_now = volumes[-1]
-        price = closes[-1]
-        now = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
-
-        # Cooldown
-        if symbol in last_alert_time and time.time() - last_alert_time[symbol] < COOLDOWN_TIME:
-            return
-
-        msg = None
-
-        # 5m - Início de tendência
-        if ema9[-1] > ma20[-1] and ema9[-2] <= ma20[-2] and price < ma200[-1]:
-            msg = f"🟢 <b>{symbol}</b>\n🚀 EMA9 cruzou MA20 pra cima em queda — possível reversão\n💰 Preço: {price}\n🕒 {now} 🇧🇷"
-
-        # 15m - Pré-confirmação
-        elif ema9[-1] > ma200[-1] and ema9[-2] <= ma200[-2]:
-            msg = f"🔵 <b>{symbol}</b>\n📈 EMA9 cruzou MA200 — tendência pré-confirmada (15m)\n💰 Preço: {price}\n🕒 {now} 🇧🇷"
-
-        # 15m - Confirmação
-        elif ma20[-1] > ma200[-1] and ma50[-1] > ma200[-1]:
-            msg = f"🟣 <b>{symbol}</b>\n✅ MA20 e MA50 acima da MA200 — tendência confirmada (15m)\n💰 Preço: {price}\n🕒 {now} 🇧🇷"
-
-        # 15m - Reteste confirmado
-        elif price > ema9[-1] and vol_now > vol_avg and rsi_val > 55:
-            msg = f"🟢 <b>{symbol}</b>\n🔁 Reteste EMA9/MA20 confirmado — continuação de alta (15m)\n💰 Preço: {price}\n🕒 {now} 🇧🇷"
-
-        # 15m - Reteste fraco
-        elif price < ema9[-1] and rsi_val < 50:
-            msg = f"🟠 <b>{symbol}</b>\n⚠️ Reteste fraco — possível queda (15m)\n💰 Preço: {price}\n🕒 {now} 🇧🇷"
-
-        if msg:
-            send_message(msg)
-            last_alert_time[symbol] = time.time()
-
-    except Exception as e:
-        print(f"Erro analisando {symbol}: {e}")
-
-# ==============================
+# ======================================
 # LOOP PRINCIPAL
-# ==============================
-def run_bot():
-    global top_pairs, last_update_time
+# ======================================
+async def run_bot():
+    await get_spot_pairs()
+    await send_message("✅ BOT ATIVO NO RENDER\n🟢 Monitorando pares SPOT da Binance\n🇧🇷 Cooldown: 15min por par\n")
+    while True:
+        try:
+            async with aiohttp.ClientSession() as session:
+                tasks = [analyze_market(session, s) for s in top_pairs]
+                await asyncio.gather(*tasks)
+            await asyncio.sleep(300)
+        except Exception as e:
+            print("Erro no loop principal:", e)
 
-    send_message("✅ BOT ATIVO NO RENDER — Iniciando carregamento... 🇧🇷")
-
-    top_pairs = get_top_50_spot_pairs()
-    last_update_time = time.time()
-    send_message(f"✅ {len(top_pairs)} pares SPOT carregados — monitorando Top 50 🇧🇷")
-
-    with ThreadPoolExecutor(max_workers=MAX_THREADS) as executor:
-        while True:
-            now = time.time()
-            if now - last_update_time > UPDATE_INTERVAL or not top_pairs:
-                top_pairs = get_top_50_spot_pairs()
-                last_update_time = now
-                send_message(f"🔄 Lista Top 50 atualizada ({len(top_pairs)} pares SPOT) 🇧🇷")
-
-            executor.map(analyze, top_pairs)
-            time.sleep(300)
-
-# ==============================
-# FLASK (Render)
-# ==============================
-@app.route('/')
-def home():
-    return "Bot ativo no Render — Aurora v1_zero_ultima_chance (sem numpy)"
-
-if __name__ == '__main__':
+# ======================================
+# FLASK + THREAD + RENDER PORT FIX
+# ======================================
+if __name__ == "__main__":
     send_message("♻️ Reiniciando bot no Render... 🇧🇷")
-    run_bot()
+
+    port = int(os.environ.get("PORT", 5000))
+    Thread(target=lambda: app.run(host="0.0.0.0", port=port)).start()
+
+    asyncio.run(run_bot())
