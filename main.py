@@ -23,9 +23,9 @@ TOP_N = 50
 COOLDOWN_MIN = 15
 COOLDOWN = timedelta(minutes=COOLDOWN_MIN)
 TOP_REFRESH_EVERY = timedelta(hours=1)
-ANTI_LIST = ["USD","FDUSD","BUSD","TUSD","USDC","DAI","AEUR","EUR","PYUSD"]
+ANTI_LIST = ["USD", "FDUSD", "BUSD", "TUSD", "USDC", "DAI", "AEUR", "EUR", "PYUSD"]
 
-cooldowns = {tf:{} for tf in ["5m","15m","1h","4h"]}
+cooldowns = {tf: {} for tf in ["5m", "15m", "1h", "4h"]}
 top_pairs_cache = []
 next_top_refresh_at = None
 
@@ -51,7 +51,7 @@ async def send_telegram(msg: str):
         except Exception as e:
             print(f"[{datetime.utcnow()}] ⚠️ Erro ao enviar Telegram: {e}")
 
-def chart_link(symbol, tf): return f"binance://app/spot/trade?symbol={symbol.replace('USDT','')}_USDT"
+def chart_link(symbol, tf): return f"binance://app/spot/trade?symbol={symbol.replace('USDT', '')}_USDT"
 
 def ma(series, p): return mean(series[-p:]) if len(series) >= p else None
 
@@ -134,7 +134,7 @@ def was_falling_then_sideways(c):
 async def analyze_5m(session, symbol):
     now = datetime.utcnow()
     if symbol in cooldowns["5m"] and now - cooldowns["5m"][symbol] < COOLDOWN:
-        print(f"[{now}] ⏳ {symbol} em cooldown para 5m")
+        print(f"[{now}] ⏳ {symbol} em cooldown para 5m (última: {cooldowns['5m'][symbol]})")
         return
     k = await get_klines(session, symbol, "5m", 240)
     if not k or len(k) < 210:
@@ -155,7 +155,7 @@ async def analyze_5m(session, symbol):
     print(f"[5m] {symbol}: P={price:.6f} EMA9={ema9:.6f} MA20={ma20:.6f} MA50={ma50:.6f} MA200={ma200:.6f} RSI={rsi14:.1f} VolR={volr:.2f}")
 
     if ema9 > ma20 > ma50 and price < ma200 and rsi14 > 50 and was_falling_then_sideways(c):
-        print(f"[{now}] 🟢 {symbol} -> Tendência iniciando (5m)")
+        print(f"[{now}] 🟢 {symbol} -> Tendência iniciando (5m) - Enviando notificação")
         msg = f"🟢 <b>[TENDÊNCIA INICIANDO 5m]</b> {symbol}\nEMA9>MA20>MA50 abaixo da MA200.\n💰{price:.6f}"
         await send_telegram(msg)
         cooldowns["5m"][symbol] = now
