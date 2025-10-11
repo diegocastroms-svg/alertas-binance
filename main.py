@@ -121,35 +121,80 @@ async def analyze_5m(session,symbol):
         await send_telegram(f"🟢 <b>[TENDÊNCIA INICIANDO 5m]</b> {symbol}\nEMA9>MA20>MA50 abaixo da MA200.\n💰{price:.6f}")
         cooldowns["5m"][symbol]=now
 
-async def analyze_15m(session,symbol):
-    now=datetime.utcnow()
-    if symbol in cooldowns["15m"] and now-cooldowns["15m"][symbol]<COOLDOWN:return
-    k=await get_klines(session,symbol,"15m",240)
-    if not k or len(k)<210:return
-    c=[float(x[4]) for x in k]; price=c[-1]
-    ema9=ema(c,9);ma20=ma(c,20);ma50=ma(c,50);ma200=ma(c,200);rsi14=rsi(c,14)
-    if not all([ema9,ma20,ma50,ma200,rsi14]):return
-    print(f"[15m] {symbol}: EMA9={ema9:.6f} MA20={ma20:.6f} MA50={ma50:.6f} MA200={ma200:.6f} RSI={rsi14:.1f}")
+async def analyze_15m(session, symbol):
+    now = datetime.utcnow()
+    if symbol in cooldowns["15m"] and now - cooldowns["15m"][symbol] < COOLDOWN:
+        return
+    k = await get_klines(session, symbol, "15m", 240)
+    if not k or len(k) < 210:
+        return
+    c = [float(x[4]) for x in k]
+    price = c[-1]
+    ema9 = ema(c, 9)
+    ma20 = ma(c, 20)
+    ma50 = ma(c, 50)
+    ma200 = ma(c, 200)
+    rsi14 = rsi(c, 14)
+    if not all([ema9, ma20, ma50, ma200, rsi14]):
+        return
+    print(f"[15m] {symbol}: P={price:.6f} EMA9={ema9:.6f} MA20={ma20:.6f} MA50={ma50:.6f} MA200={ma200:.6f} RSI={rsi14:.1f}")
+    
+    # Verificar condições para notificação
+    if ema9 > ma20 > ma50 and price < ma200 and rsi14 > 50 and was_falling_then_sideways(c):
+        print(f"🟢 {symbol} -> Tendência iniciando (15m)")
+        msg = f"🟢 <b>[TENDÊNCIA INICIANDO 15m]</b> {symbol}\nEMA9>MA20>MA50 abaixo da MA200.\n💰{price:.6f}"
+        await send_telegram(msg)
+        cooldowns["15m"][symbol] = now
 
-async def analyze_1h(session,symbol):
-    now=datetime.utcnow()
-    if symbol in cooldowns["1h"] and now-cooldowns["1h"][symbol]<COOLDOWN:return
-    k=await get_klines(session,symbol,"1h",240)
-    if not k or len(k)<210:return
-    c=[float(x[4]) for x in k]; price=c[-1]
-    ema9=ema(c,9);ma20=ma(c,20);ma50=ma(c,50);ma200=ma(c,200);rsi14=rsi(c,14)
-    if not all([ema9,ma20,ma50,ma200,rsi14]):return
-    print(f"[1h] {symbol}: EMA9={ema9:.6f} MA20={ma20:.6f} MA50={ma50:.6f} MA200={ma200:.6f} RSI={rsi14:.1f}")
+async def analyze_1h(session, symbol):
+    now = datetime.utcnow()
+    if symbol in cooldowns["1h"] and now - cooldowns["1h"][symbol] < COOLDOWN:
+        return
+    k = await get_klines(session, symbol, "1h", 240)
+    if not k or len(k) < 210:
+        return
+    c = [float(x[4]) for x in k]
+    price = c[-1]
+    ema9 = ema(c, 9)
+    ma20 = ma(c, 20)
+    ma50 = ma(c, 50)
+    ma200 = ma(c, 200)
+    rsi14 = rsi(c, 14)
+    if not all([ema9, ma20, ma50, ma200, rsi14]):
+        return
+    print(f"[1h] {symbol}: P={price:.6f} EMA9={ema9:.6f} MA20={ma20:.6f} MA50={ma50:.6f} MA200={ma200:.6f} RSI={rsi14:.1f}")
+    
+    # Verificar condições para notificação
+    if ema9 > ma20 > ma50 and price < ma200 and rsi14 > 50 and was_falling_then_sideways(c):
+        print(f"🟢 {symbol} -> Tendência iniciando (1h)")
+        msg = f"🟢 <b>[TENDÊNCIA INICIANDO 1h]</b> {symbol}\nEMA9>MA20>MA50 abaixo da MA200.\n💰{price:.6f}"
+        await send_telegram(msg)
+        cooldowns["1h"][symbol] = now
 
-async def analyze_4h(session,symbol):
-    now=datetime.utcnow()
-    if symbol in cooldowns["4h"] and now-cooldowns["4h"][symbol]<COOLDOWN:return
-    k=await get_klines(session,symbol,"4h",240)
-    if not k or len(k)<210:return
-    c=[float(x[4]) for x in k]; price=c[-1]
-    ema9=ema(c,9);ma20=ma(c,20);ma50=ma(c,50);ma200=ma(c,200);rsi14=rsi(c,14)
-    if not all([ema9,ma20,ma50,ma200,rsi14]):return
-    print(f"[4h] {symbol}: EMA9={ema9:.6f} MA20={ma20:.6f} MA50={ma50:.6f} MA200={ma200:.6f} RSI={rsi14:.1f}")
+async def analyze_4h(session, symbol):
+    now = datetime.utcnow()
+    if symbol in cooldowns["4h"] and now - cooldowns["4h"][symbol] < COOLDOWN:
+        return
+    k = await get_klines(session, symbol, "4h", 240)
+    if not k or len(k) < 210:
+        return
+    c = [float(x[4]) for x in k]
+    price = c[-1]
+    ema9 = ema(c, 9)
+    ma20 = ma(c, 20)
+    ma50 = ma(c, 50)
+    ma200 = ma(c, 200)
+    rsi14 = rsi(c, 14)
+    if not all([ema9, ma20, ma50, ma200, rsi14]):
+        return
+    print(f"[4h] {symbol}: P={price:.6f} EMA9={ema9:.6f} MA20={ma20:.6f} MA50={ma50:.6f} MA200={ma200:.6f} RSI={rsi14:.1f}")
+    
+    # Verificar condições para notificação
+    if ema9 > ma20 > ma50 and price < ma200 and rsi14 > 50 and was_falling_then_sideways(c):
+        print(f"🟢 {symbol} -> Tendência iniciando (4h)")
+        msg = f"🟢 <b>[TENDÊNCIA INICIANDO 4h]</b> {symbol}\nEMA9>MA20>MA50 abaixo da MA200.\n💰{price:.6f}"
+        await send_telegram(msg)
+        cooldowns["4h"][symbol] = now
 
 # ======================
 # 🔁 LOOP
