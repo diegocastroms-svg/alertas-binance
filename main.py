@@ -1,6 +1,5 @@
 import requests
 import time
-import numpy as np
 from concurrent.futures import ThreadPoolExecutor
 from flask import Flask
 
@@ -10,10 +9,10 @@ from flask import Flask
 TELEGRAM_TOKEN = "SEU_TELEGRAM_TOKEN_AQUI"
 CHAT_ID = "SEU_CHAT_ID_AQUI"
 
-UPDATE_INTERVAL = 3600  # 1 hora para atualizar a lista Top 50
-COOLDOWN_TIME = 900     # 15 minutos de cooldown entre alertas por par
-TIMEFRAME = "5m"        # Gráfico principal
-MAX_THREADS = 50         # Limite técnico de threads simultâneas
+UPDATE_INTERVAL = 3600  # Atualiza Top 50 a cada 1h
+COOLDOWN_TIME = 900     # 15 min entre alertas por par
+TIMEFRAME = "5m"
+MAX_THREADS = 50
 
 app = Flask(__name__)
 last_alert_time = {}
@@ -24,7 +23,7 @@ last_update_time = 0
 # FUNÇÕES BASE
 # ==============================
 def send_message(text):
-    """Envia mensagem formatada para o Telegram"""
+    """Envia mensagem para o Telegram"""
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
         payload = {"chat_id": CHAT_ID, "text": text, "parse_mode": "HTML"}
@@ -33,7 +32,7 @@ def send_message(text):
         print(f"Erro ao enviar mensagem: {e}")
 
 def get_top_50_spot_pairs():
-    """Obtém as 50 moedas SPOT com maior volume em 24h"""
+    """Obtém as 50 moedas SPOT com maior volume"""
     try:
         tickers = requests.get("https://api.binance.com/api/v3/ticker/24hr").json()
         pairs = [
@@ -52,37 +51,57 @@ def get_top_50_spot_pairs():
         print(f"Erro ao obter Top 50: {e}")
         return []
 
-def get_klines(symbol, interval="5m", limit=100):
+def get_klines(symbol, interval="5m", limit=200):
     """Baixa candles de uma moeda"""
     try:
         url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
         data = requests.get(url).json()
         closes = [float(c[4]) for c in data]
         volumes = [float(c[5]) for c in data]
-        return np.array(closes), np.array(volumes)
+        return closes, volumes
     except Exception as e:
         print(f"Erro ao obter klines de {symbol}: {e}")
-        return None, None
+        return [], []
 
 # ==============================
-# INDICADORES
+# INDICADORES (SEM NUMPY)
 # ==============================
-def ema(values, period):
-    return np.convolve(values, np.ones(period)/period, mode='valid')
-
 def sma(values, period):
-    return np.convolve(values, np.ones(period)/period, mode='valid')
+    if len(values) < period:
+        return [sum(values) / len(values)]
+    sma_vals = []
+    for i in range(period - 1, len(values)):
+        sma_vals.append(sum(values[i - period + 1:i + 1]) / period)
+    return sma_vals
+
+def ema(values, period):
+    if not values or len(values) < period:
+        return [0]
+    ema_vals = []
+    k = 2 / (period + 1)
+    ema_vals.append(sum(values[:period]) / period)
+    for price in values[period:]:
+        ema_vals.append(price * k + ema_vals[-1] * (1 - k))
+    return ema_vals
 
 def rsi(values, period=14):
-    deltas = np.diff(values)
-    gains = np.where(deltas > 0, deltas, 0)
-    losses = np.where(deltas < 0, -deltas, 0)
-    avg_gain = np.mean(gains[-period:])
-    avg_loss = np.mean(losses[-period:])
+    if len(values) < period + 1:
+        return 50
+    gains, losses = [], []
+    for i in range(1, len(values)):
+        diff = values[i] - values[i - 1]
+        if diff >= 0:
+            gains.append(diff)
+            losses.append(0)
+        else:
+            gains.append(0)
+            losses.append(abs(diff))
+    avg_gain = sum(gains[-period:]) / period
+    avg_loss = sum(losses[-period:]) / period
     if avg_loss == 0:
         return 100
     rs = avg_gain / avg_loss
-    return 100 - (100 / (1 + rs))
+    return round(100 - (100 / (1 + rs)), 2)
 
 # ==============================
 # ANÁLISE E ALERTAS
@@ -92,7 +111,7 @@ def analyze(symbol):
         global last_alert_time
 
         closes, volumes = get_klines(symbol)
-        if closes is None or len(closes) < 200:
+        if len(closes) < 200:
             return
 
         ema9 = ema(closes, 9)
@@ -100,9 +119,8 @@ def analyze(symbol):
         ma50 = sma(closes, 50)
         ma200 = sma(closes, 200)
         rsi_val = rsi(closes)
-        vol_avg = np.mean(volumes[-20:])
+        vol_avg = sum(volumes[-20:]) / 20
         vol_now = volumes[-1]
-
         price = closes[-1]
         now = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
 
@@ -111,7 +129,6 @@ def analyze(symbol):
             return
 
         msg = None
-        emoji = "⚪"
 
         # 5m - Início de tendência
         if ema9[-1] > ma20[-1] and ema9[-2] <= ma20[-2] and price < ma200[-1]:
@@ -146,24 +163,20 @@ def analyze(symbol):
 def run_bot():
     global top_pairs, last_update_time
 
-    # ✅ Mensagem inicial antes de qualquer processo pesado
     send_message("✅ BOT ATIVO NO RENDER — Iniciando carregamento... 🇧🇷")
 
-    # 🔄 Carrega a lista inicial Top 50
     top_pairs = get_top_50_spot_pairs()
     last_update_time = time.time()
     send_message(f"✅ {len(top_pairs)} pares SPOT carregados — monitorando Top 50 🇧🇷")
 
-    # 🔁 Loop contínuo com atualização de 1h e análise a cada 5m
     with ThreadPoolExecutor(max_workers=MAX_THREADS) as executor:
         while True:
             now = time.time()
-            # Atualiza Top 50 a cada 1 hora
             if now - last_update_time > UPDATE_INTERVAL or not top_pairs:
                 top_pairs = get_top_50_spot_pairs()
                 last_update_time = now
                 send_message(f"🔄 Lista Top 50 atualizada ({len(top_pairs)} pares SPOT) 🇧🇷")
-            
+
             executor.map(analyze, top_pairs)
             time.sleep(300)
 
@@ -172,7 +185,7 @@ def run_bot():
 # ==============================
 @app.route('/')
 def home():
-    return "Bot ativo no Render — Aurora v1_zero_ultima_chance"
+    return "Bot ativo no Render — Aurora v1_zero_ultima_chance (sem numpy)"
 
 if __name__ == '__main__':
     send_message("♻️ Reiniciando bot no Render... 🇧🇷")
