@@ -1,10 +1,11 @@
 # ============================================
-# 📁 main_v2_1_signal_strength.py
+# 📁 main_v2_2_chartlink.py
 # ============================================
-# Diego + Aurora — Binance Spot Alerts (v2.1):
+# Binance Spot Alerts (v2.2)
+# Setups paralelos:
 # 1) Pump Detector (5m + check 15m) — fases: formação / entrada segura / saída
 # 2) Day Trade (15m) — reteste inteligente (entrada possível / segura / saída)
-# 3) Swing Trade (1h/4h) — confirmação multi-TF (entrada possível / segura / saída)
+# 3) Swing Trade (1h/4h) — multi-timeframe (entrada possível / segura / saída)
 # Infra: Flask keep-alive (Render), Telegram, aiohttp, async
 # ============================================
 
@@ -43,7 +44,7 @@ app = Flask(__name__)
 @app.route("/")
 @app.route("/health")
 def health():
-    return "OK — multi-setup v2.1 (pump/day/swing)", 200
+    return "OK — multi-setup v2.2 (pump/day/swing)", 200
 
 # -----------------------------
 # ✉️ Telegram
@@ -53,11 +54,26 @@ async def send_telegram(msg: str):
         print("❌ TELEGRAM_TOKEN/CHAT_ID ausentes.")
         return
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    payload = {"chat_id": CHAT_ID, "text": msg, "parse_mode": "HTML"}
+    payload = {"chat_id": CHAT_ID, "text": msg, "parse_mode": "HTML", "disable_web_page_preview": True}
     async with aiohttp.ClientSession() as s:
         async with s.post(url, data=payload) as r:
             if r.status != 200:
                 print("⚠️ Falha Telegram:", await r.text())
+
+# -----------------------------
+# 🔗 Links (abrir gráfico direto no app da Binance)
+# -----------------------------
+def binance_chart_link(symbol: str) -> str:
+    """
+    Abre diretamente o GRÁFICO (aba Chart) no app da Binance, modo avançado.
+    Funciona em Android/iOS quando o app está instalado.
+    """
+    base = symbol.replace("USDT", "")
+    return f"https://www.binance.com/en/trade/{base}_USDT?ref=open_in_app&layout=pro"
+
+def chart_link_line(symbol: str, tf_label: str) -> str:
+    """Texto final padronizado por módulo."""
+    return f'🔗 <a href="{binance_chart_link(symbol)}">Ver gráfico {tf_label} no app da Binance</a>'
 
 # -----------------------------
 # 🔎 Requests utilitários
@@ -105,24 +121,27 @@ def rsi(series, p=14):
 # -----------------------------
 # 🚫 Filtro SPOT válido (anti-USD universal)
 # -----------------------------
+ANTI_LIST = ["USD","FDUSD","BUSD","TUSD","USDC","DAI","AEUR","EUR","PYUSD"]
+
 async def load_valid_spot(session):
     info = await get_exchange_info(session)
     valid = []
-    for s in info["symbols"]:
-        sym = s["symbol"]
+    for s in info.get("symbols", []):
+        sym = s.get("symbol", "")
         base = sym.replace("USDT", "")
         if (
             s.get("isSpotTradingAllowed")
-            and s["status"] == "TRADING"
+            and s.get("status") == "TRADING"
             and sym.endswith("USDT")
-            and not any(x in base for x in ["USD","FDUSD","BUSD","TUSD","USDC","DAI","AEUR","EUR","PYUSD"])
+            and not any(x in base for x in ANTI_LIST)
         ):
             valid.append(sym)
     # ordenar por volume
     t = await get_ticker_24h(session)
-    tmap = {x["symbol"]: float(x.get("quoteVolume","0") or 0) for x in t}
+    tmap = {x.get("symbol"): float(x.get("quoteVolume","0") or 0) for x in t}
     valid_sorted = [s for s in sorted(valid, key=lambda k: tmap.get(k,0), reverse=True)]
-    return valid_sorted[:TOP_N], valid_sorted[TOP_N:]
+    top = valid_sorted[:TOP_N]
+    return top, valid_sorted[TOP_N:]
 
 # -----------------------------
 # 🧠 Regras compartilhadas de classificação
@@ -152,7 +171,7 @@ def entry_classification_day(rsi14_15, vol_ratio):
 
 def entry_classification_swing(rsi14_1h, rsi14_4h):
     if rsi14_1h is None or rsi14_4h is None:
-        return "ℹ️ Aguardando confirmação multi-TF", "📌 Saída: abaixo da EMA9(1h) ou RSI(1h)<50"
+        return "ℹ️ Aguardando confirmação multi-TF", "<b>📌 Saída:</b> abaixo da EMA9(1h) ou RSI(1h)<50"
     if rsi14_1h > 55 and rsi14_4h > 55:
         return "🟢 <b>Entrada segura confirmada</b>", "<b>📌 Saída:</b> abaixo da EMA9(1h) ou RSI(1h)<50"
     if 50 <= rsi14_1h <= 55 and rsi14_4h >= 50:
@@ -193,7 +212,7 @@ async def pump_detector(session, symbol):
     rsi14_15 = rsi(c15,14)
 
     # Perda de força (alerta de saída)
-    last_open5 = float(k5[-2][1]); last_close5 = float(k5[-2][4])
+    last_close5 = float(k5[-2][4])
     ema9_close = ema9_5
     losing = (rsi14_5 < 50) or (last_close5 < ema9_close)
 
@@ -201,12 +220,13 @@ async def pump_detector(session, symbol):
         entry_label, exit_hint = entry_classification_pump(rsi14_5, vol_ratio)
         msg = (
             f"🚀 PUMP — {symbol}\n"
-            f"EMA9>MA20 • RSI(5m)={rsi14_5:.1f} • Vol≈{vol_ratio:.1f}x\n"
+            f"EMA9>MA20 • RSI(5m)={rsi14_5:.1f} • Vol≈{(vol_ratio or 0):.1f}x\n"
             f"🧪 Confirmação 15m: RSI={rsi14_15:.1f} (>50)\n"
             f"{entry_label}\n"
             f"{exit_hint}\n"
             f"💰 Preço: {price:.6f}\n"
             f"🕒 {now.strftime('%Y-%m-%d %H:%M')}\n"
+            f"{chart_link_line(symbol, '5m')}\n"
             f"{'━'*28}"
         )
         await send_telegram(msg)
@@ -218,6 +238,7 @@ async def pump_detector(session, symbol):
                 f"{losing_strength_msg('5m')}\n"
                 f"RSI(5m)={rsi14_5:.1f} • Close<EMA9? {'Sim' if last_close5 < ema9_close else 'Não'}\n"
                 f"💰 Preço: {price:.6f}\n"
+                f"{chart_link_line(symbol, '5m')}\n"
                 f"{'━'*28}"
             )
             await send_telegram(msg2)
@@ -243,18 +264,19 @@ async def daytrade_retest(session, symbol):
     touch = (abs(price-ema9_15)/ema9_15 < 0.005) or (abs(price-ma20_15)/ma20_15 < 0.005)
 
     # Perda de força (saída)
-    last_open15 = float(k15[-2][1]); last_close15 = float(k15[-2][4])
+    last_close15 = float(k15[-2][4])
     losing = (rsi14_15 < 50) or (last_close15 < ema9_15)
 
     if trend_up and touch:
         entry_label, exit_hint = entry_classification_day(rsi14_15, vol_ratio)
         msg = (
             f"🟢 <b>[DAY TRADE]</b> {symbol}\n"
-            f"Reteste EMA9/MA20 • RSI(15m)={rsi14_15:.1f} • Vol≈{(vol_ratio or 1):.1f}x\n"
+            f"Reteste EMA9/MA20 • RSI(15m)={rsi14_15:.1f} • Vol≈{(vol_ratio or 0):.1f}x\n"
             f"{entry_label}\n"
             f"{exit_hint}\n"
             f"💰 Preço: {price:.6f}\n"
             f"🕒 {now.strftime('%Y-%m-%d %H:%M')}\n"
+            f"{chart_link_line(symbol, '15m')}\n"
             f"{'━'*28}"
         )
         await send_telegram(msg)
@@ -266,6 +288,7 @@ async def daytrade_retest(session, symbol):
                 f"{losing_strength_msg('15m')}\n"
                 f"RSI(15m)={rsi14_15:.1f} • Close<EMA9? {'Sim' if last_close15 < ema9_15 else 'Não'}\n"
                 f"💰 Preço: {price:.6f}\n"
+                f"{chart_link_line(symbol, '15m')}\n"
                 f"{'━'*28}"
             )
             await send_telegram(msg2)
@@ -303,7 +326,7 @@ async def swing_detector(session, symbol):
     breakout_1h = price > (ma50_1h or price)
 
     # Perda de força (saída)
-    last_open1h = float(k1h[-2][1]); last_close1h = float(k1h[-2][4])
+    last_close1h = float(k1h[-2][4])
     losing = (rsi14_1h < 50) or (last_close1h < ema9_1h)
 
     if trend_1h and confirm_4h and (touch_1h or breakout_1h):
@@ -317,6 +340,7 @@ async def swing_detector(session, symbol):
             f"{exit_hint}\n"
             f"💰 Preço: <b>{price:.6f}</b>\n"
             f"🕒 {now.strftime('%Y-%m-%d %H:%M')}\n"
+            f"{chart_link_line(symbol, '1h/4h')}\n"
             f"{'━'*28}"
         )
         await send_telegram(msg)
@@ -328,6 +352,7 @@ async def swing_detector(session, symbol):
                 f"<b>{losing_strength_msg('1h')}</b>\n"
                 f"RSI(1h)={rsi14_1h:.1f} • Close<EMA9? {'Sim' if last_close1h < ema9_1h else 'Não'}\n"
                 f"💰 Preço: <b>{price:.6f}</b>\n"
+                f"{chart_link_line(symbol, '1h/4h')}\n"
                 f"{'━'*28}"
             )
             await send_telegram(msg2)
@@ -336,7 +361,7 @@ async def swing_detector(session, symbol):
 # 🔁 Loop principal
 # -----------------------------
 async def main_loop():
-    await send_telegram("✅ <b>BOT ATIVO — Multi-Setup v2.1</b>\n🧠 Pump (5m), Day (15m), Swing (1h/4h)\n⏱️ Cooldown: 15 min por par/módulo")
+    await send_telegram("✅ <b>BOT ATIVO — Multi-Setup v2.2</b>\n🧠 Pump (5m), Day (15m), Swing (1h/4h)\n⏱️ Cooldown: 15 min por par/módulo")
     async with aiohttp.ClientSession() as session:
         top_pairs, _ = await load_valid_spot(session)
         await send_telegram(f"💹 Pares carregados (TOP {len(top_pairs)}): {', '.join(top_pairs[:10])} ...")
