@@ -1,8 +1,7 @@
 # ============================================
 # 📁 main_v2_2_chartlink.py
 # ============================================
-# Binance Spot Alerts (v2.2)
-# Setups paralelos:
+# Binance Spot Alerts (v2.2) — Multi-Setup:
 # 1) Pump Detector (5m + check 15m) — fases: formação / entrada segura / saída
 # 2) Day Trade (15m) — reteste inteligente (entrada possível / segura / saída)
 # 3) Swing Trade (1h/4h) — multi-timeframe (entrada possível / segura / saída)
@@ -27,8 +26,8 @@ BASE = "https://api.binance.com/api/v3"
 # -----------------------------
 # ⚙️ Parâmetros gerais
 # -----------------------------
-TOP_N = 50  # top por volume 24h
-COOLDOWN_MIN = 15
+TOP_N = 50                 # Top por volume 24h (foco no que anda)
+COOLDOWN_MIN = 15          # Cooldown por par/módulo
 COOLDOWN = timedelta(minutes=COOLDOWN_MIN)
 
 # Cooldowns separados por módulo
@@ -50,29 +49,39 @@ def health():
 # ✉️ Telegram
 # -----------------------------
 async def send_telegram(msg: str):
+    """Envia mensagem para o Telegram com preview desativado."""
     if not TELEGRAM_TOKEN or not CHAT_ID:
-        print("❌ TELEGRAM_TOKEN/CHAT_ID ausentes.")
+        print("❌ TELEGRAM_TOKEN/CHAT_ID ausentes — mensagem não enviada.")
         return
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    payload = {"chat_id": CHAT_ID, "text": msg, "parse_mode": "HTML", "disable_web_page_preview": True}
+    payload = {
+        "chat_id": CHAT_ID,
+        "text": msg,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": True
+    }
     async with aiohttp.ClientSession() as s:
         async with s.post(url, data=payload) as r:
             if r.status != 200:
-                print("⚠️ Falha Telegram:", await r.text())
+                try:
+                    err = await r.text()
+                except:
+                    err = f"HTTP {r.status}"
+                print("⚠️ Falha Telegram:", err)
 
 # -----------------------------
-# 🔗 Links (abrir gráfico direto no app da Binance)
+# 🔗 Links — abrir gráfico direto no app da Binance
 # -----------------------------
 def binance_chart_link(symbol: str) -> str:
     """
-    Abre diretamente o GRÁFICO (aba Chart) no app da Binance, modo avançado.
+    Link que abre diretamente o GRÁFICO (aba Chart) no app da Binance (modo avançado).
     Funciona em Android/iOS quando o app está instalado.
     """
     base = symbol.replace("USDT", "")
     return f"https://www.binance.com/en/trade/{base}_USDT?ref=open_in_app&layout=pro"
 
 def chart_link_line(symbol: str, tf_label: str) -> str:
-    """Texto final padronizado por módulo."""
+    """Linha final padrão com o texto personalizado por módulo."""
     return f'🔗 <a href="{binance_chart_link(symbol)}">Ver gráfico {tf_label} no app da Binance</a>'
 
 # -----------------------------
@@ -124,6 +133,7 @@ def rsi(series, p=14):
 ANTI_LIST = ["USD","FDUSD","BUSD","TUSD","USDC","DAI","AEUR","EUR","PYUSD"]
 
 async def load_valid_spot(session):
+    """Carrega pares SPOT/USDT válidos e retorna TOP_N por volume 24h."""
     info = await get_exchange_info(session)
     valid = []
     for s in info.get("symbols", []):
@@ -136,7 +146,7 @@ async def load_valid_spot(session):
             and not any(x in base for x in ANTI_LIST)
         ):
             valid.append(sym)
-    # ordenar por volume
+    # Ordenar por quoteVolume (24h)
     t = await get_ticker_24h(session)
     tmap = {x.get("symbol"): float(x.get("quoteVolume","0") or 0) for x in t}
     valid_sorted = [s for s in sorted(valid, key=lambda k: tmap.get(k,0), reverse=True)]
@@ -144,7 +154,7 @@ async def load_valid_spot(session):
     return top, valid_sorted[TOP_N:]
 
 # -----------------------------
-# 🧠 Regras compartilhadas de classificação
+# 🧠 Regras compartilhadas de classificação (entrada/saída)
 # -----------------------------
 def entry_classification_pump(rsi14_5, vol_ratio):
     # Pump em formação / Entrada segura / Evitar topo
@@ -191,12 +201,13 @@ async def pump_detector(session, symbol):
     now = datetime.now()
     if symbol in cooldown_pump and now - cooldown_pump[symbol] < COOLDOWN:
         return
-    # 5m: gatilho
+
     k5 = await get_klines(session, symbol, "5m", 120)
     if not isinstance(k5, list) or len(k5) < 40: return
     c5 = [float(c[4]) for c in k5]
     v5 = [float(c[5]) for c in k5]
     price = c5[-1]
+
     ema9_5 = ema(c5,9); ma20_5 = ma(c5,20)
     rsi14_5 = rsi(c5,14)
     vol20_5 = ma(v5,20)
@@ -204,17 +215,16 @@ async def pump_detector(session, symbol):
     if not all([ema9_5, ma20_5, rsi14_5]):
         return
 
-    cond_cross = ema9_5 > ma20_5
-    # Check 15m de força mínima
+    # Confirmação em 15m
     k15 = await get_klines(session, symbol, "15m", 120)
     if not isinstance(k15, list) or len(k15) < 40: return
     c15 = [float(c[4]) for c in k15]
     rsi14_15 = rsi(c15,14)
 
-    # Perda de força (alerta de saída)
+    cond_cross = ema9_5 > ma20_5
+    # Perda de força (saída)
     last_close5 = float(k5[-2][4])
-    ema9_close = ema9_5
-    losing = (rsi14_5 < 50) or (last_close5 < ema9_close)
+    losing = (rsi14_5 < 50) or (last_close5 < ema9_5)
 
     if cond_cross and rsi14_15 and rsi14_15 > 50:
         entry_label, exit_hint = entry_classification_pump(rsi14_5, vol_ratio)
@@ -236,7 +246,7 @@ async def pump_detector(session, symbol):
             msg2 = (
                 f"🚨 PUMP — {symbol}\n"
                 f"{losing_strength_msg('5m')}\n"
-                f"RSI(5m)={rsi14_5:.1f} • Close<EMA9? {'Sim' if last_close5 < ema9_close else 'Não'}\n"
+                f"RSI(5m)={rsi14_5:.1f} • Close<EMA9? {'Sim' if last_close5 < ema9_5 else 'Não'}\n"
                 f"💰 Preço: {price:.6f}\n"
                 f"{chart_link_line(symbol, '5m')}\n"
                 f"{'━'*28}"
@@ -250,11 +260,13 @@ async def daytrade_retest(session, symbol):
     now = datetime.now()
     if symbol in cooldown_day and now - cooldown_day[symbol] < COOLDOWN:
         return
+
     k15 = await get_klines(session, symbol, "15m", 200)
     if not isinstance(k15, list) or len(k15) < 120: return
     c15 = [float(c[4]) for c in k15]
     v15 = [float(c[5]) for c in k15]
     price = c15[-1]
+
     ema9_15 = ema(c15,9); ma20_15 = ma(c15,20); ma50_15 = ma(c15,50); ma200_15 = ma(c15,200)
     rsi14_15 = rsi(c15,14)
     if not all([ema9_15, ma20_15, ma50_15, ma200_15, rsi14_15]): return
@@ -361,11 +373,17 @@ async def swing_detector(session, symbol):
 # 🔁 Loop principal
 # -----------------------------
 async def main_loop():
+    print("✅ Bot iniciado no Render v2.2 Chartlink")
+    # Mensagem de ativação
     await send_telegram("✅ <b>BOT ATIVO — Multi-Setup v2.2</b>\n🧠 Pump (5m), Day (15m), Swing (1h/4h)\n⏱️ Cooldown: 15 min por par/módulo")
+
+    # Pares iniciais
     async with aiohttp.ClientSession() as session:
         top_pairs, _ = await load_valid_spot(session)
-        await send_telegram(f"💹 Pares carregados (TOP {len(top_pairs)}): {', '.join(top_pairs[:10])} ...")
+        if top_pairs:
+            await send_telegram(f"💹 Pares carregados (TOP {len(top_pairs)}): {', '.join(top_pairs[:10])} ...")
 
+    # Loop contínuo
     while True:
         try:
             async with aiohttp.ClientSession() as session:
@@ -380,17 +398,19 @@ async def main_loop():
                 await asyncio.gather(*tasks)
             await asyncio.sleep(60)  # roda a cada 1 min
         except Exception as e:
-            print("❌ Erro no loop:", e)
+            print("❌ Erro no loop principal:", e)
             await asyncio.sleep(10)
 
 # -----------------------------
-# 🚀 Inicialização (Render)
+# 🚀 Execução para Render
+# Mantém Flask ativo e inicia o loop em paralelo
 # -----------------------------
 def _start_bot():
     asyncio.run(main_loop())
 
-threading.Thread(target=_start_bot, daemon=True).start()
-
 if __name__ == "__main__":
+    # Inicia o loop do bot em segundo plano
+    threading.Thread(target=_start_bot, daemon=True).start()
+    # Mantém o Flask ativo para o Render detectar a porta
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
