@@ -1,5 +1,5 @@
-# main_short.py — versão com alerta "mercado caiu e lateralizando"
-# Básico, funcional e leve — 5m/15m (SPOT/USDT, top 50 por volume)
+# main_short.py — versão funcional e revisada (erro corrigido)
+# MONITORA SPOT USDT | 5m e 15m | Top 50 por volume | alerta de lateralização incluído
 
 import os, time, threading, requests
 from datetime import datetime, timedelta, timezone
@@ -76,6 +76,10 @@ def fmt_msg(s,e,t,m,p,r,e9,m20,m50,m200,i):
     return (f"{e} <b>{s}</b>\n🧭 <b>{t}</b>\n📊 {m}\n💰 Preço: {p:.6f}\n"
             f"📈 EMA9:{e9:.5f} | MA20:{m20:.5f} | MA50:{m50:.5f}\n🌙 MA200:{m200:.5f}\n"
             f"🧪 RSI:{r:.1f}\n🇧🇷 {now_br_str()}\n🔗 <a href='{chart_link(s,i)}'>Ver gráfico {i}</a>\n━━━━━━━━━━━")
+
+# ==========================
+# COLETA TOP 50
+# ==========================
 def get_valid_spot_usdt():
     i=fetch_json(f"{BINANCE}/api/v3/exchangeInfo");out=[]
     if not i:return out
@@ -86,17 +90,25 @@ def get_valid_spot_usdt():
         if sym.endswith("USD") or base.endswith("USD"):continue
         out.append(sym)
     return out
+
 def get_top50():
-    v=set(get_valid_spot_usdt());d=fetch_json(f"{BINANCE}/api/v3/ticker/24hr");r=[]
-    if not d:return []
+    v=set(get_valid_spot_usdt())
+    d=fetch_json(f"{BINANCE}/api/v3/ticker/24hr")
+    r=[]
+    if not d:
+        return []
     for t in d:
-        s=t["symbol"]; 
+        s=t["symbol"]
         if s in v:
-            try:r.append((s,float(t["quoteVolume"])));except:pass
-    r.sort(key=lambda x:x[1],reverse=True);return [s for s,_ in r[:TOP_N]]
+            try:
+                r.append((s, float(t["quoteVolume"])))
+            except:
+                pass
+    r.sort(key=lambda x: x[1], reverse=True)
+    return [s for s, _ in r[:TOP_N]]
 
 # ==========================
-# ANÁLISE
+# ANÁLISE PRINCIPAL
 # ==========================
 def analyze_symbol(sym):
     try:
@@ -162,7 +174,9 @@ def analyze_symbol(sym):
 def refresh_top():
     global current_top,last_top_update
     t=get_top50()
-    if t: current_top,last_top_update=t,time.time();send_telegram(f"🔄 TOP {TOP_N} atualizado ({len(t)} pares)")
+    if t:
+        current_top,last_top_update=t,time.time()
+        send_telegram(f"🔄 TOP {TOP_N} atualizado ({len(t)} pares)")
 
 def worker(s): analyze_symbol(s);time.sleep(0.1)
 
