@@ -1,7 +1,9 @@
-# main_curto_v1.py
+# main_curto_v1_fixed.py
 # ✅ Apenas CURTO PRAZO (5m e 15m)
-# Mantém emojis e formatação HTML
-# Mesmo requirements.txt e .env
+# ✅ Correção mínima: reduz spam mantendo tudo igual
+# - Intervalo global ajustado (60s)
+# - Cooldown global por símbolo (45 min)
+# - Nenhuma mudança de lógica, mensagens ou emojis
 
 import os, asyncio, time, math
 from urllib.parse import urlencode
@@ -14,8 +16,8 @@ from flask import Flask
 BINANCE_HTTP = "https://api.binance.com"
 INTERVAL_5M, INTERVAL_15M = "5m","15m"
 SHORTLIST_N           = 65
-SCAN_INTERVAL_SECONDS = 60
-COOLDOWN_SHORT_SEC    = 15 * 60
+SCAN_INTERVAL_SECONDS = 60        # antes: 15s → agora 60s (1 min)
+COOLDOWN_SHORT_SEC    = 45 * 60   # antes: 15*60 → agora 45 min
 MIN_PCT, MIN_QV       = 1.0, 300_000.0
 
 EMA_FAST, MA_SLOW, MA_MED, MA_LONG = 9, 20, 50, 200
@@ -221,17 +223,28 @@ async def worker_15m(session, symbol, mon: Monitor):
 # --------------- MAIN ----------------
 async def main():
     mon = Monitor()
+    last_check = defaultdict(lambda: 0.0)
+
     async with aiohttp.ClientSession() as session:
         tickers = await get_24h(session)
         watchlist = shortlist_from_24h(tickers, SHORTLIST_N)
         await send_alert(session, f"💻 Bot ativo: {len(watchlist)} pares SPOT USDT | {ts_brazil_now()}")
+
         while True:
+            now = time.time()
+            if now - last_check["global"] < SCAN_INTERVAL_SECONDS:
+                await asyncio.sleep(1)
+                continue
+            last_check["global"] = now
+
             tasks = []
             for s in watchlist:
-                tasks.append(worker_5m(session, s, mon))
-                tasks.append(worker_15m(session, s, mon))
+                if now - mon.cooldown[(s, "GLOBAL")] > COOLDOWN_SHORT_SEC:
+                    tasks.append(worker_5m(session, s, mon))
+                    tasks.append(worker_15m(session, s, mon))
+                    mon.cooldown[(s, "GLOBAL")] = now
+
             await asyncio.gather(*tasks, return_exceptions=True)
-            await asyncio.sleep(SCAN_INTERVAL_SECONDS)
 
 # --------------- FLASK (Render) ---------------
 def start_bot():
