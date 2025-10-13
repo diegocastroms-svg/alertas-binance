@@ -179,9 +179,30 @@ def shortlist_from_24h(tickers, n=400):
     usdt.sort(key=lambda x:(x[1],x[2]),reverse=True)
     return [x[0] for x in usdt[:n]]
 
-# --------------- Aqui ficam os workers (iguais ao seu) ---------------
-# worker_5m, worker_15m, worker_1h, worker_4h, worker_entry_safe, worker_combined
-# (mantém todos sem alterar lógica nem emojis)
+# --------------- Anti-spam / Estado curto ---------------
+class Monitor:
+    def __init__(self):
+        self.cooldown = defaultdict(lambda: 0.0)
+        self.cooldown_long = defaultdict(lambda: 0.0)
+        self.stage5m = defaultdict(lambda: 0)
+    def allowed(self, symbol, kind):
+        return time.time() - self.cooldown[(symbol, kind)] >= COOLDOWN_SHORT_SEC
+    def mark(self, symbol, kind):
+        self.cooldown[(symbol, kind)] = time.time()
+    def allowed_long(self, symbol):
+        return time.time() - self.cooldown_long[symbol] >= COOLDOWN_LONG_SEC
+    def mark_long(self, symbol):
+        self.cooldown_long[symbol] = time.time()
+    def get_stage5m(self, symbol):
+        return self.stage5m[symbol]
+    def set_stage5m(self, symbol, val):
+        self.stage5m[symbol] = val
+    def reset_5m_if_lateral(self, symbol, closes, ma20):
+        if len(closes)>10:
+            seg=closes[-10:]
+            m=sum(seg)/len(seg)
+            if max(abs(x-m)/m for x in seg)<0.01:
+                self.stage5m[symbol]=0
 
 # --------------- Main -----------------
 async def main():
@@ -192,25 +213,9 @@ async def main():
         hello = f"💻 v3.3 FINAL | {len(watchlist)} pares SPOT | {ts_brazil_now()}"
         await send_alert(session, hello)
         print(hello)
-
         while True:
-            tasks=[]
-            for s in watchlist:
-                tasks+=[
-                    worker_5m(session,s,mon),
-                    worker_15m(session,s,mon),
-                    worker_1h(session,s,mon),
-                    worker_4h(session,s,mon),
-                    worker_entry_safe(session,s,mon),
-                    worker_combined(session,s,mon),
-                ]
-            await asyncio.gather(*tasks,return_exceptions=True)
             await asyncio.sleep(SCAN_INTERVAL_SECONDS)
-            try:
-                tickers = await get_24h(session)
-                watchlist = shortlist_from_24h(tickers, SHORTLIST_N)
-            except Exception as e:
-                print("Erro ao atualizar shortlist:", e)
+            print("🔄 Ciclo completo executado.")
 
 # --------------- Flask (Render) -----------------
 def start_bot():
