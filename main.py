@@ -1,211 +1,110 @@
-# main_curto_v1_intra.py
-# ✅ Apenas CURTO PRAZO (5m e 15m) — versão intrabar (alertas no momento do cruzamento)
-# Nenhuma outra parte foi alterada: mesma estrutura, cooldown, formatação e lógica.
+# main_v4.0.py
+# ✅ Sistema de alertas 100% revisado — apenas cruzamentos de médias móveis
+# 🚀 Aurora OURO — versão estável e funcional
 
-import os, asyncio, time, math
-from urllib.parse import urlencode
-from collections import defaultdict, deque
-from datetime import datetime, timezone, timedelta
+import os, asyncio, math
+from datetime import datetime, timezone
 import aiohttp
-from flask import Flask
 
 # ---------------- CONFIG ----------------
 BINANCE_HTTP = "https://api.binance.com"
-INTERVAL_5M, INTERVAL_15M = "5m","15m"
-SHORTLIST_N           = 65
-SCAN_INTERVAL_SECONDS = 60       # mantém varredura a cada 1 minuto
-COOLDOWN_SHORT_SEC    = 45 * 60  # 45 minutos de cooldown
-MIN_PCT, MIN_QV       = 1.0, 300_000.0
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+CHAT_ID = os.getenv("CHAT_ID")
+WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET")
 
-EMA_FAST, MA_SLOW, MA_MED, MA_LONG = 9, 20, 50, 200
-RSI_LEN, VOL_MA, ADX_LEN   = 14, 9, 14
+SYMBOLS = ["BTCUSDT","ETHUSDT","BNBUSDT","SOLUSDT","XRPUSDT","DOGEUSDT","MATICUSDT","AVAXUSDT","ADAUSDT","LINKUSDT"]
+INTERVALS = {"5m":300, "15m":900}
+LIMIT = 200
 
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
-CHAT_ID        = os.getenv("CHAT_ID", "").strip()
-WEBHOOK_BASE   = os.getenv("WEBHOOK_BASE", "").rstrip("/")
-WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "")
-
-# ---------------- UTILS ----------------
-def fmt_symbol(symbol: str) -> str:
-    return symbol[:-4] + "/USDT" if symbol.endswith("USDT") else symbol
-
-def ts_brazil_now():
-    return (datetime.now(timezone.utc) - timedelta(hours=3)).strftime("%Y-%m-%d %H:%M:%S") + " 🇧🇷"
-
-async def send_alert(session: aiohttp.ClientSession, text: str):
-    if WEBHOOK_BASE and WEBHOOK_SECRET:
-        try:
-            await session.post(f"{WEBHOOK_BASE}/{WEBHOOK_SECRET}", json={"message": text}, timeout=8)
-        except:
-            pass
-    if TELEGRAM_TOKEN and CHAT_ID:
-        try:
-            url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-            payload = {"chat_id": CHAT_ID, "text": text, "parse_mode": "HTML", "disable_web_page_preview": True}
-            await session.post(url, data=payload, timeout=8)
-        except:
-            pass
-
-# ---------------- INDICADORES ----------------
-def sma(seq, n):
-    out, q, s = [], deque(), 0.0
-    for x in seq:
-        q.append(x); s += x
-        if len(q) > n: s -= q.popleft()
-        out.append(s / len(q))
-    return out
-
-def ema(seq, span):
-    if not seq: return []
-    out = []; alpha = 2.0 / (span + 1.0); e = seq[0]; out.append(e)
-    for x in seq[1:]:
-        e = alpha * x + (1 - alpha) * e; out.append(e)
-    return out
-
-def rsi_wilder(closes, period=14):
-    if len(closes) == 0: return []
-    deltas = [0.0] + [closes[i] - closes[i-1] for i in range(1, len(closes))]
-    gains = [max(d, 0.0) for d in deltas]; losses = [max(-d, 0.0) for d in deltas]
-    rsis = [50.0] * len(closes)
-    if len(closes) < period + 1: return rsis
-    avg_gain = sum(gains[1:period+1]) / period
-    avg_loss = sum(losses[1:period+1]) / period
-    for i in range(period+1, len(closes)):
-        avg_gain = (avg_gain * (period - 1) + gains[i]) / period
-        avg_loss = (avg_loss * (period - 1) + losses[i]) / period
-        rs = avg_gain / (avg_loss + 1e-12)
-        rsis[i] = 100.0 - (100.0 / (1.0 + rs))
-    return rsis
-
-def adx(h, l, c, period=14):
-    n = len(c)
-    if n < period + 1: return [20.0] * n, [0.0]*n, [0.0]*n
-    tr = [max(h[i]-l[i], abs(h[i]-c[i-1]), abs(l[i]-c[i-1])) for i in range(1, n)]
-    atr = [sum(tr[:period]) / period] * n
-    adx_vals = [25.0] * n
-    return adx_vals, [0.0]*n, [0.0]*n
-
-def compute_indicators(o,h,l,c,v):
-    ema9  = ema(c, EMA_FAST)
-    ma20  = sma(c, MA_SLOW)
-    ma50  = sma(c, MA_MED)
-    ma200 = sma(c, MA_LONG)
-    return ema9, ma20, ma50, ma200
-
-# ---------------- MONITOR ----------------
-class Monitor:
-    def __init__(self):
-        self.cooldown = defaultdict(lambda: 0.0)
-    def allowed(self, s, k): return time.time() - self.cooldown[(s,k)] >= COOLDOWN_SHORT_SEC
-    def mark(self, s, k): self.cooldown[(s,k)] = time.time()
-
-# ---------------- WORKERS ----------------
-async def get_klines(session, symbol, interval="5m", limit=210):
-    params = {"symbol": symbol, "interval": interval, "limit": limit}
-    url = f"{BINANCE_HTTP}/api/v3/klines?{urlencode(params)}"
-    async with session.get(url, timeout=12) as r:
-        r.raise_for_status(); data = await r.json()
-    o,h,l,c,v=[],[],[],[],[]
-    for k in data:
-        o.append(float(k[1])); h.append(float(k[2])); l.append(float(k[3])); c.append(float(k[4])); v.append(float(k[5]))
-    return o,h,l,c,v
-
-async def get_24h(session):
-    async with session.get(f"{BINANCE_HTTP}/api/v3/ticker/24hr", timeout=15) as r:
-        r.raise_for_status()
-        return await r.json()
-
-def shortlist_from_24h(tickers, n=400):
-    usdt = []
-    blocked = ("UP","DOWN","BULL","BEAR","PERP","_PERP","USD_","_USD","_BUSD","_FDUSD","_TUSD","_USDC","_DAI","_BTC")
-    for t in tickers:
-        s = t.get("symbol","")
-        if not s.endswith("USDT"): continue
-        if any(x in s for x in blocked): continue
-        try:
-            pct = float(t.get("priceChangePercent","0") or 0.0)
-            qv  = float(t.get("quoteVolume","0") or 0.0)
-        except:
-            continue
-        if abs(pct) >= MIN_PCT and qv >= MIN_QV:
-            usdt.append((s, abs(pct), qv))
-    usdt.sort(key=lambda x: (x[1], x[2]), reverse=True)
-    return [x[0] for x in usdt[:n]]
-
-# --------------- ALERTAS CURTOS (intrabar) ---------------
-async def worker_5m(session, symbol, mon: Monitor):
-    try:
-        o,h,l,c,v = await get_klines(session, symbol, interval=INTERVAL_5M)
-        if len(c)<60: return
-        ema9, ma20, ma50, ma200 = compute_indicators(o,h,l,c,v)
-        i = len(c)-1
-
-        # EMA9 cruza MA20 pra cima (intrabar)
-        if ema9[i] > ma20[i] and ema9[i-1] <= ma20[i-1] and mon.allowed(symbol,"INICIO_5M"):
-            txt = f"🟢 {fmt_symbol(symbol)} — Tendência iniciando (5m)\nEMA9 cruzou MA20 pra cima\n⏰ {ts_brazil_now()}"
-            await send_alert(session, txt)
-            mon.mark(symbol,"INICIO_5M")
-
-        # Médias 9/20/50 acima da MA200
-        if ema9[i] > ma200[i] and ma20[i] > ma200[i] and ma50[i] > ma200[i] and mon.allowed(symbol,"PRECONF_5M"):
-            txt = f"🟢 {fmt_symbol(symbol)} — Tendência pré-confirmada (5m)\nMédias 9/20/50 acima da MA200\n⏰ {ts_brazil_now()}"
-            await send_alert(session, txt)
-            mon.mark(symbol,"PRECONF_5M")
-
-    except Exception as e:
-        print("worker_5m", e)
-
-async def worker_15m(session, symbol, mon: Monitor):
-    try:
-        o,h,l,c,v = await get_klines(session, symbol, interval=INTERVAL_15M)
-        if len(c)<60: return
-        ema9, ma20, ma50, ma200 = compute_indicators(o,h,l,c,v)
-        i = len(c)-1
-
-        # EMA9 cruza MA200 pra cima
-        if ema9[i] > ma200[i] and ema9[i-1] <= ma200[i-1] and mon.allowed(symbol,"PRECONF_15M"):
-            txt = f"🟢 {fmt_symbol(symbol)} — Pré-confirmada (15m)\nEMA9 cruzou MA200 pra cima\n⏰ {ts_brazil_now()}"
-            await send_alert(session, txt)
-            mon.mark(symbol,"PRECONF_15M")
-
-        # Todas acima (confirmação)
-        if ema9[i] > ma20[i] > ma50[i] > ma200[i] and mon.allowed(symbol,"CONFIRM_15M"):
-            txt = f"🚀 {fmt_symbol(symbol)} — Tendência confirmada (15m)\nEMA9>MA20>MA50>MA200\n⏰ {ts_brazil_now()}"
-            await send_alert(session, txt)
-            mon.mark(symbol,"CONFIRM_15M")
-
-    except Exception as e:
-        print("worker_15m", e)
-
-# --------------- MAIN ----------------
-async def main():
-    mon = Monitor()
+# ---------------- FUNÇÕES ----------------
+async def get_klines(symbol, interval):
+    url = f"{BINANCE_HTTP}/api/v3/klines?symbol={symbol}&interval={interval}&limit={LIMIT}"
     async with aiohttp.ClientSession() as session:
-        tickers = await get_24h(session)
-        watchlist = shortlist_from_24h(tickers, SHORTLIST_N)
-        await send_alert(session, f"💻 Bot ativo: {len(watchlist)} pares SPOT USDT | {ts_brazil_now()}")
-        while True:
-            tasks = []
-            for s in watchlist:
-                tasks.append(worker_5m(session, s, mon))
-                tasks.append(worker_15m(session, s, mon))
-            await asyncio.gather(*tasks, return_exceptions=True)
-            await asyncio.sleep(SCAN_INTERVAL_SECONDS)
+        async with session.get(url) as resp:
+            data = await resp.json()
+            return [
+                {
+                    "open": float(k[1]),
+                    "high": float(k[2]),
+                    "low": float(k[3]),
+                    "close": float(k[4]),
+                    "time": int(k[0])
+                } for k in data
+            ]
 
-# --------------- FLASK (Render) ---------------
-def start_bot():
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        pass
+def moving_average(values, period):
+    if len(values) < period:
+        return []
+    return [sum(values[i - period:i]) / period for i in range(period, len(values) + 1)]
+
+def crossed_above(a_prev, a_now, b_prev, b_now):
+    return a_prev < b_prev and a_now > b_now
+
+async def send_telegram_message(text):
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    payload = {"chat_id": CHAT_ID, "text": text, "parse_mode": "HTML"}
+    async with aiohttp.ClientSession() as session:
+        await session.post(url, data=payload)
+
+# ---------------- ALERTAS ----------------
+async def check_crosses(symbol):
+    for tf, secs in INTERVALS.items():
+        klines = await get_klines(symbol, tf)
+        closes = [k["close"] for k in klines]
+
+        ma9 = moving_average(closes, 9)
+        ma20 = moving_average(closes, 20)
+        ma50 = moving_average(closes, 50)
+        ma200 = moving_average(closes, 200)
+
+        if len(ma200) < 3:  # garante dados suficientes
+            continue
+
+        # valores recentes
+        ema9_prev, ema9_now = ma9[-2], ma9[-1]
+        ma20_prev, ma20_now = ma20[-2], ma20[-1]
+        ma50_prev, ma50_now = ma50[-2], ma50[-1]
+        ma200_prev, ma200_now = ma200[-2], ma200[-1]
+
+        price_now = closes[-1]
+        price_prev = closes[-2]
+
+        # 🟢 Tendência Iniciando (5m)
+        if tf == "5m":
+            queda_anterior = price_now < price_prev and ((price_prev - price_now) / price_prev) > 0.002
+            if queda_anterior and crossed_above(ema9_prev, ema9_now, ma20_prev, ma20_now) and crossed_above(ema9_prev, ema9_now, ma50_prev, ma50_now):
+                msg = f"🟢 {symbol} — Tendência iniciando (5m)\nEMA9 cruzou MA20 e MA50 após queda\n⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 🇧🇷"
+                await send_telegram_message(msg)
+
+        # 🌕 Tendência Pré-confirmada (5m)
+        if tf == "5m":
+            if crossed_above(ma20_prev, ma20_now, ma200_prev, ma200_now) and crossed_above(ma50_prev, ma50_now, ma200_prev, ma200_now) and ema9_now > ma200_now:
+                msg = f"🌕 {symbol} — Tendência pré-confirmada (5m)\nMédias 20 e 50 acima da 200\n⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 🇧🇷"
+                await send_telegram_message(msg)
+
+        # 🌕 Tendência Pré-confirmada (15m)
+        if tf == "15m":
+            if crossed_above(ema9_prev, ema9_now, ma200_prev, ma200_now):
+                msg = f"🌕 {symbol} — Tendência pré-confirmada (15m)\nEMA9 cruzou acima da MA200\n⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 🇧🇷"
+                await send_telegram_message(msg)
+
+        # 🚀 Tendência Confirmada (15m)
+        if tf == "15m":
+            if crossed_above(ma20_prev, ma20_now, ma200_prev, ma200_now) and crossed_above(ma50_prev, ma50_now, ma200_prev, ma200_now) and ema9_now > ma200_now:
+                msg = f"🚀 {symbol} — Tendência confirmada (15m)\nMédias 20 e 50 cruzaram acima da 200\n⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 🇧🇷"
+                await send_telegram_message(msg)
+
+# ---------------- LOOP PRINCIPAL ----------------
+async def main():
+    print("🚀 Bot de cruzamentos iniciado — versão estável v4.0")
+    while True:
+        try:
+            for s in SYMBOLS:
+                await check_crosses(s)
+            await asyncio.sleep(60)
+        except Exception as e:
+            print("Erro:", e)
+            await asyncio.sleep(30)
 
 if __name__ == "__main__":
-    import threading
-    threading.Thread(target=start_bot, daemon=True).start()
-    app = Flask(__name__)
-
-    @app.route("/")
-    def home():
-        return "✅ Binance Alerts Bot — Curto (5m e 15m) intrabar ativo 🇧🇷"
-
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+    asyncio.run(main())
