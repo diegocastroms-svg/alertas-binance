@@ -26,8 +26,8 @@ SHORTLIST_N        = 120         # até 120 pares SPOT
 REFRESH_SHORTLIST  = 10 * 60     # 10 min
 COOLDOWN_SEC       = 15 * 60     # 15 min
 
-MIN_PCT = 0.5                    # variação mínima 24h p/ entrar no radar
-MIN_QV  = 5_00_000.0             # quote volume mínimo 24h
+MIN_PCT = 0.0                    # variação mínima 24h p/ entrar no radar
+MIN_QV  = 10000.0             # quote volume mínimo 24h
 
 # MAs
 EMA_FAST = 9
@@ -299,3 +299,4 @@ if __name__ == "__main__":
 
     port = int(os.environ.get("PORT", "10000"))
     app.run(host="0.0.0.0", port=port)
+
