@@ -1,7 +1,6 @@
-# main_v3.1_debug.py
-# ✅ Igual ao v3.1, apenas com logs e contadores de debug
-# ✅ Não altera lógica de alertas — apenas exibe onde está o bloqueio
-# ✅ Cooldown reduzido para 5min só para teste
+# main_v3.1_debug_exclude.py
+# ✅ Igual ao v3.1_debug, só adiciona filtro de exclusão de stablecoins
+# ✅ Nenhuma outra linha foi alterada
 
 import os, asyncio, math, time
 from collections import defaultdict, deque
@@ -13,9 +12,9 @@ from flask import Flask
 BINANCE_HTTP = "https://api.binance.com"
 INTERVALS = ["5m", "15m"]
 SHORTLIST_N = 80
-MIN_PCT = -1000.0  # Sem filtro temporariamente
-MIN_QV = 100_000.0 # Volume mínimo reduzido p/ debug
-COOLDOWN_SEC = 300 # 5min p/ testar
+MIN_PCT = -1000.0
+MIN_QV = 100_000.0
+COOLDOWN_SEC = 300
 DEBUG = True
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
@@ -23,7 +22,6 @@ CHAT_ID = os.getenv("CHAT_ID", "")
 WEBHOOK_BASE = os.getenv("WEBHOOK_BASE", "").rstrip("/")
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "")
 
-# Contadores globais
 counts = {
     "loop": 0,
     "pairs": 0,
@@ -31,6 +29,12 @@ counts = {
     "sent": {"START_5M":0, "PRE_5M":0, "PRE_15M":0, "CONF_15M":0},
     "blocked_cooldown": {"START_5M":0, "PRE_5M":0, "PRE_15M":0, "CONF_15M":0}
 }
+
+# ---------------- EXCLUDE FILTER ----------------
+EXCLUDE = ["USDC", "BUSD", "TUSD", "EUR", "GBP", "FDUSD", "DAI", "USDP", "USTC"]
+
+def is_excluded(symbol):
+    return any(x in symbol for x in EXCLUDE)
 
 # ---------------- UTILS ----------------
 def now_br():
@@ -50,7 +54,6 @@ async def send_alert(session, text):
     except Exception as e:
         print("Telegram/Webhook error:", e)
 
-# ---------------- INDICADORES ----------------
 def sma(seq,n):
     out,q,s=[],deque(),0.0
     for x in seq:
@@ -66,13 +69,11 @@ def ema(seq,span):
         e=a*x+(1-a)*e; out.append(e)
     return out
 
-# ---------------- CLASSES ----------------
 class Cooldown:
     def __init__(self): self.last=defaultdict(lambda:0.0)
     def allow(self,key): return time.time()-self.last[key]>=COOLDOWN_SEC
     def mark(self,key): self.last[key]=time.time()
 
-# ---------------- DATA ----------------
 async def get_klines(session,symbol,interval="5m",limit=200):
     try:
         url=f"{BINANCE_HTTP}/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
@@ -96,7 +97,8 @@ def shortlist_from_24h(tickers,n=100):
     pairs=[]
     for t in tickers:
         s=t.get("symbol","")
-        if not s.endswith("USDT"): continue
+        if not s.endswith("USDT") or is_excluded(s):
+            continue
         if any(x in s for x in ["UP","DOWN","BULL","BEAR","PERP"]): continue
         pct=float(t.get("priceChangePercent","0") or 0)
         qv=float(t.get("quoteVolume","0") or 0)
@@ -105,7 +107,6 @@ def shortlist_from_24h(tickers,n=100):
     pairs.sort(key=lambda x:x[2],reverse=True)
     return [x[0] for x in pairs[:n]]
 
-# ---------------- MENSAGENS ----------------
 def msg_trend_start(symbol,price):
     return f"🟢 {fmt_symbol(symbol)} ⬆️ Tendência iniciando (5m)\n💰 {price}\n🕒 {now_br()}"
 
@@ -118,16 +119,14 @@ def msg_pre15(symbol,price):
 def msg_conf15(symbol,price):
     return f"🚀 {fmt_symbol(symbol)} ⬆️ Tendência confirmada (15m)\n💰 {price}\n🕒 {now_br()}"
 
-# ---------------- WORKER ----------------
 async def worker_tf(session,symbol,interval,cool):
     try:
         o,h,l,c=await get_klines(session,symbol,interval)
         if len(c)<60: return
         ema9=ema(c,9);ma20=sma(c,20);ma50=sma(c,50);ma200=sma(c,200)
         last=len(c)-1;price=c[last]
-        dropped=c[last]<ma200[last]*0.97  # após queda
+        dropped=c[last]<ma200[last]*0.97
 
-        # Tendência iniciando (5m)
         if interval=="5m" and dropped and ema9[last]>ma20[last]>ma50[last]:
             counts["candidates"]["START_5M"]+=1
             if cool.allow((symbol,"START_5M")):
@@ -136,7 +135,6 @@ async def worker_tf(session,symbol,interval,cool):
             else:
                 counts["blocked_cooldown"]["START_5M"]+=1
 
-        # Pré-confirmada (5m)
         if interval=="5m" and ema9[last]>ma20[last]>ma50[last]>ma200[last]:
             counts["candidates"]["PRE_5M"]+=1
             if cool.allow((symbol,"PRE_5M")):
@@ -145,7 +143,6 @@ async def worker_tf(session,symbol,interval,cool):
             else:
                 counts["blocked_cooldown"]["PRE_5M"]+=1
 
-        # Pré-confirmada (15m)
         if interval=="15m" and ema9[last]>ma200[last]:
             counts["candidates"]["PRE_15M"]+=1
             if cool.allow((symbol,"PRE_15M")):
@@ -154,7 +151,6 @@ async def worker_tf(session,symbol,interval,cool):
             else:
                 counts["blocked_cooldown"]["PRE_15M"]+=1
 
-        # Confirmada (15m)
         if interval=="15m" and ema9[last]>ma20[last]>ma50[last]>ma200[last]:
             counts["candidates"]["CONF_15M"]+=1
             if cool.allow((symbol,"CONF_15M")):
@@ -166,15 +162,14 @@ async def worker_tf(session,symbol,interval,cool):
     except Exception as e:
         print("worker",symbol,interval,"err:",e)
 
-# ---------------- MAIN LOOP ----------------
 async def main_loop():
     cool=Cooldown()
     async with aiohttp.ClientSession() as session:
         tickers=await get_24h(session)
         watch=shortlist_from_24h(tickers,SHORTLIST_N)
         counts["pairs"]=len(watch)
-        print(f"💻 v3.1_debug — {len(watch)} pares SPOT — {now_br()}")
-        await send_alert(session,f"💻 v3.1_debug — {len(watch)} pares SPOT — {now_br()}")
+        print(f"💻 v3.1_debug_exclude — {len(watch)} pares SPOT — {now_br()}")
+        await send_alert(session,f"💻 v3.1_debug_exclude — {len(watch)} pares SPOT — {now_br()}")
 
         while True:
             tasks=[]
@@ -191,7 +186,6 @@ async def main_loop():
 
             await asyncio.sleep(60)
 
-# ---------------- FLASK ----------------
 def start_bot():
     try:
         asyncio.run(main_loop())
@@ -204,5 +198,5 @@ if __name__=="__main__":
     app=Flask(__name__)
     @app.route("/")
     def home():
-        return "✅ Binance Alerts Bot v3.1_debug rodando 🇧🇷"
+        return "✅ Binance Alerts Bot v3.1_debug_exclude rodando 🇧🇷"
     app.run(host="0.0.0.0",port=int(os.environ.get("PORT",10000)))
