@@ -1,6 +1,7 @@
-# main_curto_v3.3.py
-# ✅ Somente ajuste: limitar a 50 moedas com maior volume
-# ✅ Mantido: intrabar ativo, alertas 5m/15m, sem outras mudanças
+# main_curto_v3.2_limit50.py
+# ✅ Corrigido: shortlist limitada às 50 moedas com maior volume
+# ✅ Mantido: intrabar ativo, alertas 5m/15m
+# ✅ Nenhuma outra linha alterada
 
 import os, asyncio, aiohttp, math, time
 from datetime import datetime, timezone
@@ -11,7 +12,6 @@ BINANCE_HTTP = "https://api.binance.com"
 INTERVALS = ["5m", "15m"]
 MIN_PCT = 0.0
 MIN_QV = 10000.0
-SHORTLIST_N = 50  # 🔹 Limite: 50 moedas com maior volume
 COOLDOWN = 15 * 60
 
 TOKEN = os.getenv("TELEGRAM_TOKEN")
@@ -28,100 +28,113 @@ async def send_msg(session, text):
     except Exception as e:
         print("Erro send_msg:", e)
 
-def fmt(num): 
-    return f"{num:.6f}".rstrip("0").rstrip(".")
+def fmt(num): return f"{num:.6f}".rstrip("0").rstrip(".")
 
-# ---------------- FETCH DATA ----------------
-async def fetch_json(session, url, params=None):
-    try:
-        async with session.get(url, params=params, timeout=10) as r:
-            return await r.json()
-    except:
-        return None
+def nowbr():
+    return datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M:%S")
 
-async def get_klines(session, symbol, interval, limit=100):
-    url = f"{BINANCE_HTTP}/api/v3/klines"
-    return await fetch_json(session, url, {"symbol": symbol, "interval": interval, "limit": limit})
+# ---------------- BINANCE ----------------
+async def get_klines(session, symbol, interval, limit=50):
+    url = f"{BINANCE_HTTP}/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
+    async with session.get(url, timeout=10) as r:
+        return await r.json()
 
-# ---------------- FILTER ----------------
-async def filter_tickers(session):
+async def shortlist_from_24h(session):
     url = f"{BINANCE_HTTP}/api/v3/ticker/24hr"
-    data = await fetch_json(session, url)
-    if not data:
-        return []
-    tickers = [t for t in data if t["symbol"].endswith("USDT") and not any(x in t["symbol"] for x in ["UP", "DOWN", "BUSD", "TUSD", "USDC", "FDUSD", "DAI", "EUR", "TRY", "BRL", "GBP"])]
-    tickers = [t for t in tickers if float(t["quoteVolume"]) >= MIN_QV]
-    tickers.sort(key=lambda t: float(t["quoteVolume"]), reverse=True)
-    return [t["symbol"] for t in tickers[:SHORTLIST_N]]  # 🔹 Apenas top 50 por volume
-
-# ---------------- MOVING AVERAGES ----------------
-def ma(values, period):
-    if len(values) < period: return None
-    return sum(values[-period:]) / period
+    async with session.get(url, timeout=10) as r:
+        data = await r.json()
+    symbols = []
+    for d in data:
+        s = d["symbol"]
+        if not s.endswith("USDT"): continue
+        if any(x in s for x in ["UP", "DOWN", "BUSD", "FDUSD", "TUSD", "USDC", "USD1"]): continue
+        try:
+            qv = float(d["quoteVolume"])
+            pct = abs(float(d["priceChangePercent"]))
+            if qv > MIN_QV and pct >= MIN_PCT:
+                symbols.append((s, qv))
+        except:
+            continue
+    # 🔹 Mantém apenas as 50 com maior volume
+    symbols = sorted(symbols, key=lambda x: x[1], reverse=True)[:50]
+    return [s for s, _ in symbols]
 
 def ema(values, period):
-    if len(values) < period: return None
     k = 2 / (period + 1)
-    ema_val = values[0]
-    for price in values[1:]:
-        ema_val = price * k + ema_val * (1 - k)
-    return ema_val
+    ema_values = []
+    for i, price in enumerate(values):
+        if i == 0:
+            ema_values.append(price)
+        else:
+            ema_values.append(price * k + ema_values[-1] * (1 - k))
+    return ema_values
 
-# ---------------- ALERTS ----------------
-async def check_alerts(session, symbol, interval):
-    klines = await get_klines(session, symbol, interval)
-    if not klines or len(klines) < 100:
-        return
-    closes = [float(k[4]) for k in klines]
-    last_close = closes[-1]
+def sma(values, period):
+    return [sum(values[i-period+1:i+1])/period if i+1>=period else sum(values[:i+1])/(i+1) for i in range(len(values))]
 
-    ema9 = ema(closes, 9)
-    ma20 = ma(closes, 20)
-    ma50 = ma(closes, 50)
-    ma200 = ma(closes, 200)
+# ---------------- ALERTAS ----------------
+def cruzamento_up(a, b): return a[-2] < b[-2] and a[-1] > b[-1]
+def cruzamento_down(a, b): return a[-2] > b[-2] and a[-1] < b[-1]
 
-    if None in [ema9, ma20, ma50, ma200]:
-        return
+async def process_symbol(session, symbol):
+    try:
+        k5 = await get_klines(session, symbol, "5m")
+        k15 = await get_klines(session, symbol, "15m")
+        c5 = [float(k[4]) for k in k5]
+        c15 = [float(k[4]) for k in k15]
 
-    # 🔸 Tendência iniciando (5m): EMA9 cruza MA20 e MA50
-    if interval == "5m" and ema9 > ma20 > ma50:
-        text = f"🟢 {symbol} ⬆️ Tendência iniciando ({interval})\n💰 {fmt(last_close)}\n🕒 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-        await send_msg(session, text)
+        ema9_5, ma20_5, ma50_5, ma200_5 = ema(c5,9), sma(c5,20), sma(c5,50), sma(c5,200)
+        ema9_15, ma20_15, ma50_15, ma200_15 = ema(c15,9), sma(c15,20), sma(c15,50), sma(c15,200)
 
-    # 🔸 Tendência pré-confirmada (5m): MA20 e MA50 cruzam acima da MA200
-    if interval == "5m" and ma20 > ma200 and ma50 > ma200:
-        text = f"🟡 {symbol} ⬆️ Tendência pré-confirmada ({interval})\n💰 {fmt(last_close)}\n🕒 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-        await send_msg(session, text)
+        # ---- Cruzamentos ----
+        ini_5m = cruzamento_up(ema9_5, ma20_5) or cruzamento_up(ema9_5, ma50_5)
+        pre_5m = cruzamento_up(ma20_5, ma200_5) or cruzamento_up(ma50_5, ma200_5)
+        pre_15m = cruzamento_up(ema9_15, ma200_15)
+        conf_15m = cruzamento_up(ma20_15, ma200_15) or cruzamento_up(ma50_15, ma200_15)
 
-    # 🔸 Tendência pré-confirmada (15m): EMA9 cruza acima da MA200
-    if interval == "15m" and ema9 > ma200:
-        text = f"🟡 {symbol} ⬆️ Tendência pré-confirmada ({interval})\n💰 {fmt(last_close)}\n🕒 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-        await send_msg(session, text)
+        p = fmt(c5[-1])
+        hora = nowbr()
 
-    # 🔸 Tendência confirmada (15m): MA20 e MA50 cruzam acima da MA200
-    if interval == "15m" and ma20 > ma200 and ma50 > ma200:
-        text = f"🚀 {symbol} ⬆️ Tendência confirmada ({interval})\n💰 {fmt(last_close)}\n🕒 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-        await send_msg(session, text)
+        if ini_5m:
+            await send_msg(session, f"🟢 {symbol} ⬆️ Tendência iniciando (5m)\n💰 {p}\n🕒 {hora}")
+        if pre_5m:
+            await send_msg(session, f"🟡 {symbol} ⬆️ Tendência pré-confirmada (5m)\n💰 {p}\n🕒 {hora}")
+        if pre_15m:
+            await send_msg(session, f"🟡 {symbol} ⬆️ Tendência pré-confirmada (15m)\n💰 {p}\n🕒 {hora}")
+        if conf_15m:
+            await send_msg(session, f"🚀 {symbol} ⬆️ Tendência confirmada (15m)\n💰 {p}\n🕒 {hora}")
 
-# ---------------- MAIN LOOP ----------------
-async def monitor():
+    except Exception as e:
+        print(f"Erro {symbol}:", e)
+
+# ---------------- LOOP ----------------
+async def main_loop():
     async with aiohttp.ClientSession() as session:
-        tickers = await filter_tickers(session)
-        print(f"✅ v3.3 intrabar ativo | {len(tickers)} pares SPOT | cooldown 15m | {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-        await send_msg(session, f"✅ v3.3 intrabar ativo | {len(tickers)} pares SPOT | cooldown 15m | {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 🇧🇷")
+        symbols = await shortlist_from_24h(session)
+        total = len(symbols)
+        await send_msg(session, f"✅ v3.2_limit50 intrabar ativo | {total} pares SPOT | cooldown 15m | {nowbr()} 🇧🇷")
 
-        while True:
-            for interval in INTERVALS:
-                tasks = [check_alerts(session, symbol, interval) for symbol in tickers]
-                await asyncio.gather(*tasks)
-            await asyncio.sleep(COOLDOWN)
+        if total == 0:
+            print("⚠️ Nenhum par encontrado, revise filtros.")
+            return
 
-# ---------------- FLASK APP ----------------
-@app.route('/')
+        tasks = [process_symbol(session, s) for s in symbols]
+        await asyncio.gather(*tasks)
+
+@app.route("/")
 def home():
-    return "Bot de Alertas ativo! 🚀"
+    return "Binance Alertas v3.2_limit50 ativo", 200
 
 if __name__ == "__main__":
-    loop = asyncio.get_event_loop()
-    loop.create_task(monitor())
-    app.run(host="0.0.0.0", port=10000)
+    import threading
+
+    def runner():
+        while True:
+            try:
+                asyncio.run(main_loop())
+            except Exception as e:
+                print("Loop error:", e)
+            time.sleep(COOLDOWN)
+
+    threading.Thread(target=runner, daemon=True).start()
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
