@@ -1,4 +1,4 @@
-# main.py — v3.1 (intrabar + Flask + correções de entrega)
+# main.py — v3.1-fix (intrabar + Flask + correção de histórico)
 # FUNCIONAL e SEM ERROS — apenas 4 alertas de cruzamento (5m e 15m)
 
 import os, asyncio, time
@@ -88,21 +88,21 @@ def ema(seq, span):
     return out
 
 # =========================
-# Binance
+# Binance (INTRABAR)
 # =========================
-async def get_klines(session, symbol, interval="5m", limit=200):
+async def get_klines(session, symbol, interval="5m", limit=300):
     """
     INTRABAR: inclui a ÚLTIMA vela em formação (data[:] em vez de data[:-1]).
     """
     params={"symbol":symbol, "interval":interval, "limit":limit}
     url=f"{BINANCE_HTTP}/api/v3/klines?{urlencode(params)}"
     async with session.get(url, timeout=12) as r:
-        r.raise_for_status()
-        data=await r.json()
+      r.raise_for_status()
+      data=await r.json()
     o,h,l,c,v=[],[],[],[],[]
     for k in data[:]:  # <- intrabar real
-        o.append(float(k[1])); h.append(float(k[2])); l.append(float(k[3]))
-        c.append(float(k[4])); v.append(float(k[5]))
+      o.append(float(k[1])); h.append(float(k[2])); l.append(float(k[3]))
+      c.append(float(k[4])); v.append(float(k[5]))
     return o,h,l,c,v
 
 async def get_24h(session):
@@ -174,8 +174,10 @@ def crossed_up(a_prev, a_now, b_prev, b_now):
 async def worker_tf(session, sem, symbol, interval, drop_map):
     async with sem:
         try:
-            o,h,l,c,v = await get_klines(session, symbol, interval=interval, limit=200)
-            if len(c) < MA_200+5: return
+            # usa 300 velas para garantir MA200 + intrabar estável
+            o,h,l,c,v = await get_klines(session, symbol, interval=interval, limit=300)
+            if len(c) < MA_200:  # (corrigido) 200 já é suficiente
+                return
             last = len(c)-1; prev = last-1
 
             ema9  = ema(c, EMA_FAST)
@@ -240,7 +242,7 @@ async def main_loop():
                 except:
                     drop_map[s] = False
 
-        hello = f"💻 v3.1 — cruzamentos intrabar 5m/15m | {len(watch)} pares SPOT | {now_br()}"
+        hello = f"💻 v3.1-fix — 5m/15m intrabar | {len(watch)} pares SPOT | {now_br()}"
         await send_alert(session, hello)
         print(hello)
 
@@ -279,7 +281,7 @@ app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return "✅ Bot v3.1 — 5m/15m intrabar ativo (Flask para Render)."
+    return "✅ Bot v3.1-fix — 5m/15m intrabar ativo (Flask para Render)."
 
 if __name__ == "__main__":
     import threading
