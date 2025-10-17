@@ -30,12 +30,15 @@ counts = {
     "blocked_cooldown": {"START_5M":0, "PRE_5M":0, "PRE_15M":0, "CONF_15M":0}
 }
 
+
 # ---------------- EXCLUDE FILTER ----------------
-EXCLUDE = ["USDC", "BUSD", "TUSD", "EUR", "GBP", "FDUSD", "DAI", "USDP", "USTC"]
+EXCLUDE = [
+    "USDC", "BUSD", "TUSD", "EUR", "GBP", "FDUSD", "DAI",
+    "USDP", "USTC", "XUSD", "BFUSD", "CEUR", "EUSD", "PYUSD"
+]
 
 def is_excluded(symbol):
     return any(x in symbol for x in EXCLUDE)
-
 # ---------------- UTILS ----------------
 def now_br():
     return (datetime.now(timezone.utc) - timedelta(hours=3)).strftime("%Y-%m-%d %H:%M:%S")
@@ -200,3 +203,4 @@ if __name__=="__main__":
     def home():
         return "✅ Binance Alerts Bot v3.1_debug_exclude rodando 🇧🇷"
     app.run(host="0.0.0.0",port=int(os.environ.get("PORT",10000)))
+
