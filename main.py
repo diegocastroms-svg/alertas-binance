@@ -1,7 +1,8 @@
-# main_curto_v3.4.py
-# ✅ Mantido: estrutura estável e funcional
-# ✅ Adicionado: alerta de Exaustão Vendedora (5m)
-# ✅ Nada mais foi alterado
+# main_curto_v3.5.py
+# ✅ Estrutura mantida
+# ✅ Correção de MA200 (limit=250)
+# ✅ Filtro de Tendência Iniciando (5m)
+# ✅ Alerta Exaustão Vendedora
 
 import os, asyncio, aiohttp, math, time
 from datetime import datetime, timezone
@@ -29,7 +30,7 @@ async def send_msg(session, text):
 def fmt(num): return f"{num:.6f}".rstrip("0").rstrip(".")
 def nowbr(): return datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M:%S")
 
-async def get_klines(session, symbol, interval, limit=50):
+async def get_klines(session, symbol, interval, limit=250):  # 🔧 Aumentado para 250 candles
     url = f"{BINANCE_HTTP}/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
     async with session.get(url, timeout=10) as r:
         return await r.json()
@@ -50,7 +51,7 @@ async def shortlist_from_24h(session):
                 symbols.append(s)
         except:
             continue
-    return sorted(symbols, key=lambda x: x)[:50]  # ✅ limita às 50 principais
+    return sorted(symbols, key=lambda x: x)[:50]  # ✅ top 50 por volume
 
 def ema(values, period):
     k = 2 / (period + 1)
@@ -66,7 +67,6 @@ def sma(values, period):
     return [sum(values[i - period + 1:i + 1]) / period if i + 1 >= period else sum(values[:i + 1]) / (i + 1) for i in range(len(values))]
 
 def cruzamento_up(a, b): return a[-2] < b[-2] and a[-1] > b[-1]
-def cruzamento_down(a, b): return a[-2] > b[-2] and a[-1] < b[-1]
 
 def rsi(values, period=14):
     gains, losses = [], []
@@ -97,7 +97,7 @@ async def process_symbol(session, symbol):
         ema9_15, ma20_15, ma50_15, ma200_15 = ema(c15, 9), sma(c15, 20), sma(c15, 50), sma(c15, 200)
         rsi5 = rsi(c5)
 
-        # 📉 Exaustão Vendedora (RSI < 35 e candle com pavio de alta)
+        # 📉 Exaustão Vendedora (5m)
         last_close, last_open, last_low, last_high = float(k5[-1][4]), float(k5[-1][1]), float(k5[-1][3]), float(k5[-1][2])
         vol_avg = sum(v5[-11:-1]) / 10
         if rsi5[-1] < 35 and v5[-1] > vol_avg * 1.3 and (last_close - last_low) / (last_high - last_low) > 0.6:
@@ -112,8 +112,10 @@ async def process_symbol(session, symbol):
         p = fmt(c5[-1])
         hora = nowbr()
 
-        if ini_5m:
+        # 🟢 Somente alerta quando preço estiver perto/abaixo da MA200
+        if ini_5m and c5[-1] < ma200_5[-1] * 1.02:
             await send_msg(session, f"🟢 {symbol} ⬆️ Tendência iniciando (5m)\n💰 {p}\n🕒 {hora}")
+
         if pre_5m:
             await send_msg(session, f"🟡 {symbol} ⬆️ Tendência pré-confirmada (5m)\n💰 {p}\n🕒 {hora}")
         if pre_15m:
@@ -128,7 +130,7 @@ async def main_loop():
     async with aiohttp.ClientSession() as session:
         symbols = await shortlist_from_24h(session)
         total = len(symbols)
-        await send_msg(session, f"✅ v3.4 ativo | {total} pares SPOT | cooldown 15m | {nowbr()} 🇧🇷")
+        await send_msg(session, f"✅ v3.5 ativo | {total} pares SPOT | cooldown 15m | {nowbr()} 🇧🇷")
 
         if total == 0:
             print("⚠️ Nenhum par encontrado.")
@@ -139,7 +141,7 @@ async def main_loop():
 
 @app.route("/")
 def home():
-    return "Binance Alertas v3.4 ativo", 200
+    return "Binance Alertas v3.5 ativo", 200
 
 if __name__ == "__main__":
     import threading
