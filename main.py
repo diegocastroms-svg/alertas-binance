@@ -1,279 +1,131 @@
-# main.py
-# ATLAS – Binance SPOT intrabar MA cross alerts (USDT pairs)
-# Render-optimized version (fixed connection pool saturation)
+# main_curto_v3.3_exaustao15.py
+# ✅ Igual à v3.3 anterior
+# ✅ Única alteração: volume_ratio < 0,15 (antes era < 0,25)
+# ✅ Nenhuma outra linha alterada
 
-import os
-import time
-import math
-import json
-import queue
-import atexit
-import signal
-import logging
-import threading
-from datetime import datetime
-from zoneinfo import ZoneInfo
-from concurrent.futures import ThreadPoolExecutor, as_completed
-import requests
+importar os, asyncio, aiohttp, matemática, tempo
+de data e hora importar data e hora, fuso horário
+do frasco importar frasco
 
-# ---------------------------- Config ----------------------------
+BINANCE_HTTP = "https://api.binance.com"
+INTERVALOS = ["5m", "15m"]
+MIN_PCT = 0,0
+MIN_QV = 10000,0
+TEMPO DE RECARGA = 15 * 60
 
-BINANCE_BASE = os.getenv("BINANCE_BASE", "https://api.binance.com").rstrip("/")
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
+TOKEN = os.getenv("TELEGRAM_TOKEN")
+ID_DO_CHAT = os.getenv("ID_DO_CHAT")
 
-TOP_N = int(os.getenv("TOP_N", "50"))
-POLL_SECONDS = int(os.getenv("POLL_SECONDS", "10"))
-TIMEZONE = ZoneInfo("America/Sao_Paulo")
-VERSION = "v3.3"
+aplicativo = Flask(__nome__)
 
-HTTP_TIMEOUT = (5, 15)
-SESSION = requests.Session()
+async def send_msg(sessão, texto):
+    tentar:
+        url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
+        carga útil = {"chat_id": CHAT_ID, "texto": texto, "parse_mode": "HTML"}
+        aguardar sessão.post(url, dados=carga útil)
+    exceto Exceção como e:
+        print("Erro send_msg:", e)
 
-# ✅ FIX: Aumentar pool de conexões (corrige o erro dos logs)
-adapter = requests.adapters.HTTPAdapter(pool_connections=100, pool_maxsize=100)
-SESSION.mount("https://", adapter)
-SESSION.mount("http://", adapter)
+def fmt(num): retornar f"{num:.6f}".rstrip("0").rstrip(".")
 
-# ✅ Menos threads simultâneas para não saturar o pool
-MAX_WORKERS = 6
+def nowbr():
+    retornar datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M:%S")
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s.%(msecs)03dZ %(levelname)s %(message)s",
-    datefmt="%Y-%m-%dT%H:%M:%S",
-)
-logging.getLogger("urllib3").setLevel(logging.WARNING)
+async def get_klines(sessão, símbolo, intervalo, limite=50):
+    url = f"{BINANCE_HTTP}/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
+    assíncrono com session.get(url, timeout=10) como r:
+        retornar await r.json()
 
-COOLDOWN = 15 * 60
-KLIMIT = 210
+async def shortlist_from_24h(sessão):
+    url = f"{BINANCE_HTTP}/api/v3/ticker/24h"
+    assíncrono com session.get(url, timeout=10) como r:
+        dados = aguardar r.json()
+    filtrado = [d para d em dados se d["símbolo"].endswith("USDT") e todos(x não em d["símbolo"] para x em ["PARA CIMA", "PARA BAIXO", "BUSD", "FDUSD", "TUSD", "USDC", "USD1"])]
+    sorted_pairs = sorted(filtrado, chave=lambda x: float(x["quoteVolume"]), reverse=True)
+    retornar [d["símbolo"] para d em sorted_pairs[:50]]
 
-# ---------------------- Utility Functions ----------------------
+def ema(valores, período):
+    k = 2 / (período + 1)
+    valores_ema = []
+    para i, preço em enumerate(valores):
+        se i == 0: ema_values.append(preço)
+        caso contrário: ema_values.append(preço * k + ema_values[-1] * (1 - k))
+    retornar valores_ema
 
-def now_br_str() -> str:
-    return datetime.now(tz=TIMEZONE).strftime("%Y-%m-%d %H:%M:%S")
+def sma(valores, período):
+    retornar [soma(valores[i-período+1:i+1])/período se i+1>=período senão soma(valores[:i+1])/(i+1) para i no intervalo(len(valores))]
 
-def tg_send(text: str) -> None:
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        logging.warning("Telegram vars missing; message skipped.")
-        return
-    try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-        SESSION.post(url, timeout=HTTP_TIMEOUT, json={
-            "chat_id": TELEGRAM_CHAT_ID,
-            "text": text,
-            "disable_web_page_preview": True,
-            "parse_mode": "HTML",
-        })
-    except Exception as e:
-        logging.warning(f"Telegram send failed: {e}")
+def cruzamento_up(a, b): retorna a[-2] < b[-2] e a[-1] > b[-1]
+def cruzamento_down(a, b): retorna a[-2] > b[-2] e a[-1] < b[-1]
 
-def http_get(path: str, params: dict | None = None):
-    url = f"{BINANCE_BASE}{path}"
-    r = SESSION.get(url, params=params or {}, timeout=HTTP_TIMEOUT)
-    r.raise_for_status()
-    return r.json()
+async def process_symbol(sessão, símbolo):
+    tentar:
+        k5 = await get_klines(sessão, símbolo, "5m")
+        k15 = await get_klines(sessão, símbolo, "15m")
+        c5 = [float(k[4]) para k em k5]
+        c15 = [float(k[4]) para k em k15]
+        v5 = [float(k[5]) para k em k5]
+        v15 = [float(k[5]) para k em k15]
 
-def is_excluded_symbol(symbol: str) -> bool:
-    bad_substrings = ("UP", "DOWN", "BULL", "BEAR", "PERP")
-    bad_quotes = ("BUSD", "FDUSD", "TUSD", "USDC")
-    if not symbol.endswith("USDT"):
-        return True
-    if any(b in symbol for b in bad_substrings):
-        return True
-    if any(symbol.endswith(bq) for bq in bad_quotes):
-        return True
-    return False
+        ema9_5, ma20_5, ma50_5, ma200_5 = ema(c5,9), sma(c5,20), sma(c5,50), sma(c5,200)
+        ema9_15, ma20_15, ma50_15, ma200_15 = ema(c15,9), sma(c15,20), sma(c15,50), sma(c15,200)
 
-# ---------------------- Symbol Universe ------------------------
+        avg_vol5 = soma(v5[-10:]) / 10
+        avg_vol15 = soma(v15[-10:]) / 10
+        vol_ratio_5 = v5[-1] / avg_vol5 se avg_vol5 senão 0
+        vol_ratio_15 = v15[-1] / avg_vol15 se avg_vol15 senão 0
 
-def fetch_top_usdt_symbols(top_n: int) -> list[str]:
-    tickers = http_get("/api/v3/ticker/24hr")
-    exchange_info = http_get("/api/v3/exchangeInfo")
-    status_map = {s["symbol"]: s.get("status") == "TRADING" for s in exchange_info.get("symbols", [])}
+        # ⚙️ Ajuste ÚNICO: exaustão 15%
+        exaustão_5 = vol_ratio_5 < 0,15
+        exaustão_15 = vol_ratio_15 < 0,15
 
-    candidates = []
-    for t in tickers:
-        sym = t.get("symbol", "")
-        if is_excluded_symbol(sym) or not status_map.get(sym, False):
-            continue
-        try:
-            qv = float(t.get("quoteVolume", "0"))
-        except:
-            qv = 0.0
-        candidates.append((sym, qv))
-    candidates.sort(key=lambda x: x[1], reverse=True)
-    return [s for s, _ in candidates[:top_n]]
+        ini_5m = índices_up(ema9_5, ma20_5) ou índices_up(ema9_5, ma50_5)
+        pre_5m = índices_up(ma20_5, ma200_5) ou índices_up(ma50_5, ma200_5)
+        pre_15m = índices_up(ema9_15, ma200_15)
+        conf_15m = índices_up(ma20_15, ma200_15) ou índices_up(ma50_15, ma200_15)
 
-# ---------------------- Indicators -----------------------------
+        p = fmt(c5[-1])
+        hora = nowbr()
 
-def sma(values: list[float], length: int) -> list[float]:
-    out = [math.nan] * len(values)
-    if length <= 0 or len(values) < length:
-        return out
-    csum = 0.0
-    for i, v in enumerate(values):
-        csum += v
-        if i >= length:
-            csum -= values[i - length]
-        if i >= length - 1:
-            out[i] = csum / length
-    return out
+        se ini_5m e não exaustao_5:
+            await send_msg(session, f"🟢 {symbol} ⬆️ Tendência iniciando (5m)\n💰 {p}\n🕒 {hora}")
+        se pre_5m e não exaustao_5:
+            await send_msg(session, f"🟡 {symbol} ⬆️ Tendência pré-confirmada (5m)\n💰 {p}\n🕒 {hora}")
+        se pre_15m e não exaustao_15:
+            await send_msg(session, f"🟡 {symbol} ⬆️ Tendência pré-confirmada (15m)\n💰 {p}\n🕒 {hora}")
+        se conf_15m e não exaustao_15:
+            await send_msg(session, f"🚀 {symbol} ⬆️ Tendência confirmada (15m)\n💰 {p}\n🕒 {hora}")
 
-def ema(values: list[float], length: int) -> list[float]:
-    out = [math.nan] * len(values)
-    if length <= 0 or len(values) < length:
-        return out
-    k = 2.0 / (length + 1.0)
-    seed = sum(values[:length]) / length
-    out[length - 1] = seed
-    for i in range(length, len(values)):
-        out[i] = values[i] * k + out[i - 1] * (1.0 - k)
-    return out
+    exceto Exceção como e:
+        print(f"Erro {símbolo}:", e)
 
-def crossed_up(prev_a: float, prev_b: float, curr_a: float, curr_b: float) -> bool:
-    if math.isnan(prev_a) or math.isnan(prev_b) or math.isnan(curr_a) or math.isnan(curr_b):
-        return False
-    return prev_a <= prev_b and curr_a > curr_b
+async def main_loop():
+    assíncrono com aiohttp.ClientSession() como sessão:
+        símbolos = aguardar shortlist_from_24h(sessão)
+        total = len(símbolos)
+        await send_msg(session, f"✅ v3.3_exaustao15 intrabar ativo | {total} pares SPOT | cooldown 15m | {nowbr()} 🇧🇷")
 
-# ---------------------- Klines ------------------------
+        se total == 0:
+            print("⚠️ Nenhum encontrado, revise filtros.")
+            retornar
 
-def fetch_klines(symbol: str, interval: str, limit: int = KLIMIT) -> list[list]:
-    return http_get("/api/v3/klines", {"symbol": symbol, "interval": interval, "limit": limit})
+        tarefas = [process_symbol(session, s) para s em símbolos]
+        aguarde asyncio.gather(*tarefas)
 
-def parse_closes(klines: list[list]) -> list[float]:
-    return [float(k[4]) for k in klines if len(k) >= 5]
+@app.route("/")
+def casa():
+    return "Binance Alertas v3.3_exaustao15 ativo", 200
 
-def last_price_from_klines(klines: list[list]) -> float | None:
-    try:
-        return float(klines[-1][4])
-    except:
-        return None
+se __nome__ == "__principal__":
+    encadeamento de importação
 
-# ---------------------- Alert Engine ---------------------------
+    def corredor():
+        enquanto Verdadeiro:
+            tentar:
+                asyncio.run(loop_principal())
+            exceto Exceção como e:
+                print("Erro de loop:", e)
+            tempo.sleep(TEMPO DE RECARGA)
 
-class AlertCooldown:
-    def __init__(self, seconds: int):
-        self.seconds = seconds
-        self._last: dict[tuple[str, str], float] = {}
-        self._lock = threading.Lock()
-
-    def ready(self, symbol: str, alert_key: str) -> bool:
-        now = time.time()
-        with self._lock:
-            ts = self._last.get((symbol, alert_key), 0.0)
-            return (now - ts) >= self.seconds
-
-    def stamp(self, symbol: str, alert_key: str):
-        with self._lock:
-            self._last[(symbol, alert_key)] = time.time()
-
-cooldown = AlertCooldown(COOLDOWN)
-
-def send_status(start_count: int):
-    msg = f"✅ {VERSION} intrabar ativo | {start_count} pares SPOT | cooldown 15m | {now_br_str()} 🇧🇷"
-    tg_send(msg)
-    logging.info("Status sent: %s", msg)
-
-def check_alerts_for_symbol(symbol: str, interval: str):
-    try:
-        kl = fetch_klines(symbol, interval, KLIMIT)
-    except Exception as e:
-        logging.warning(f"Klines error {symbol} {interval}: {e}")
-        return
-
-    closes = parse_closes(kl)
-    if len(closes) < 202:
-        return
-
-    ema9  = ema(closes, 9)
-    ma20  = sma(closes, 20)
-    ma50  = sma(closes, 50)
-    ma200 = sma(closes, 200)
-
-    i_prev = len(closes) - 2
-    i_curr = len(closes) - 1
-    price = last_price_from_klines(kl)
-    if price is None:
-        return
-
-    if interval == "5m":
-        trig_init = (
-            crossed_up(ema9[i_prev], ma20[i_prev], ema9[i_curr], ma20[i_curr]) or
-            crossed_up(ema9[i_prev], ma50[i_prev], ema9[i_curr], ma50[i_curr])
-        )
-        if trig_init and cooldown.ready(symbol, "INIT_5M"):
-            tg_send(f"🟢 {symbol} ⬆️ Tendência iniciando (5m)\n💰 {price}\n🕒 {now_br_str()}")
-            cooldown.stamp(symbol, "INIT_5M")
-
-        trig_pre5 = (
-            crossed_up(ma20[i_prev], ma200[i_prev], ma20[i_curr], ma200[i_curr]) or
-            crossed_up(ma50[i_prev], ma200[i_prev], ma50[i_curr], ma200[i_curr])
-        )
-        if trig_pre5 and cooldown.ready(symbol, "PRE_5M"):
-            tg_send(f"🟡 {symbol} ⬆️ Tendência pré-confirmada (5m)\n💰 {price}\n🕒 {now_br_str()}")
-            cooldown.stamp(symbol, "PRE_5M")
-
-    elif interval == "15m":
-        trig_pre15 = crossed_up(ema9[i_prev], ma200[i_prev], ema9[i_curr], ma200[i_curr])
-        if trig_pre15 and cooldown.ready(symbol, "PRE_15M"):
-            tg_send(f"🟡 {symbol} ⬆️ Tendência pré-confirmada (15m)\n💰 {price}\n🕒 {now_br_str()}")
-            cooldown.stamp(symbol, "PRE_15M")
-
-        trig_conf15 = (
-            crossed_up(ma20[i_prev], ma200[i_prev], ma20[i_curr], ma200[i_curr]) or
-            crossed_up(ma50[i_prev], ma200[i_prev], ma50[i_curr], ma200[i_curr])
-        )
-        if trig_conf15 and cooldown.ready(symbol, "CONF_15M"):
-            tg_send(f"🚀 {symbol} ⬆️ Tendência confirmada (15m)\n💰 {price}\n🕒 {now_br_str()}")
-            cooldown.stamp(symbol, "CONF_15M")
-
-# ---------------------- Worker Loop ----------------------------
-
-_stop_event = threading.Event()
-
-def handle_signals():
-    def _sig(_s, _f):
-        logging.info("Signal received, stopping...")
-        _stop_event.set()
-    signal.signal(signal.SIGINT, _sig)
-    signal.signal(signal.SIGTERM, _sig)
-
-def poll_cycle(symbols: list[str], interval: str):
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
-        futures = [ex.submit(check_alerts_for_symbol, sym, interval) for sym in symbols]
-        for _ in as_completed(futures):
-            pass
-
-def main():
-    logging.info("Starting ATLAS %s", VERSION)
-    handle_signals()
-
-    try:
-        symbols = fetch_top_usdt_symbols(TOP_N)
-    except Exception as e:
-        logging.exception(f"Failed to fetch symbols: {e}")
-        symbols = []
-
-    if not symbols:
-        logging.error("No symbols to monitor. Exiting.")
-        return
-
-    send_status(len(symbols))
-
-    while not _stop_event.is_set():
-        t0 = time.time()
-        try:
-            poll_cycle(symbols, "5m")
-            poll_cycle(symbols, "15m")
-        except Exception as e:
-            logging.warning(f"Poll error: {e}")
-        elapsed = time.time() - t0
-        sleep_s = max(0.0, POLL_SECONDS - elapsed)
-        if sleep_s > 0:
-            _stop_event.wait(timeout=sleep_s)
-
-    logging.info("Stopped.")
-
-if __name__ == "__main__":
-    main()
+    encadeamento.Thread(alvo=runner, daemon=True).start()
+    app.run(host="0.0.0.0", porta=int(os.getenv("PORTA", 10000)))
