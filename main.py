@@ -1,139 +1,114 @@
 import os, asyncio, time, math
 from urllib.parse import urlencode
-from collections import defaultdict, deque
 from datetime import datetime, timezone, timedelta
 import aiohttp
 from flask import Flask
 
 # ---------------- CONFIG ----------------
 BINANCE_HTTP = "https://api.binance.com"
-INTERVAL_5M, INTERVAL_15M = "5m", "15m"
-COOLDOWN = 15 * 60  # 15 minutos
-TOP_PAIRS_LIMIT = 50
-
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-CHAT_ID = os.getenv("CHAT_ID")
-
-app = Flask(__name__)
+INTERVALOS = ["5m", "15m"]
+LIMIT = 100
+COOLDOWN = 15 * 60
+TOP_PAIRS = 50  # 50 maiores volumes
 cooldowns = {}
-precos = defaultdict(lambda: deque(maxlen=200))
-volumes = defaultdict(lambda: deque(maxlen=200))
+
+# ---------------- FLASK ----------------
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return "Bot de alertas Binance ativo!"
 
 # ---------------- FUNÇÕES ----------------
-async def enviar_alerta(msg):
-    if not TELEGRAM_TOKEN or not CHAT_ID:
-        return
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    params = {"chat_id": CHAT_ID, "text": msg, "parse_mode": "HTML"}
-    async with aiohttp.ClientSession() as session:
-        await session.post(url, params=params)
+async def pegar_pares_spot(sessao):
+    async with sessao.get(f"{BINANCE_HTTP}/api/v3/exchangeInfo") as r:
+        data = await r.json()
+    return [s["symbol"] for s in data["symbols"] if s["quoteAsset"] == "USDT" and s["status"] == "TRADING"]
 
-async def pegar_pares_spot():
-    async with aiohttp.ClientSession() as session:
-        async with session.get(f"{BINANCE_HTTP}/api/v3/ticker/24hr") as r:
-            dados = await r.json()
-            filtrados = [d for d in dados if d["symbol"].endswith("USDT")]
-            ordenados = sorted(filtrados, key=lambda x: float(x["quoteVolume"]), reverse=True)
-            return [d["symbol"] for d in ordenados[:TOP_PAIRS_LIMIT]]
-
-async def pegar_klines(session, symbol, interval):
-    try:
-        async with session.get(f"{BINANCE_HTTP}/api/v3/klines?symbol={symbol}&interval={interval}&limit=100") as r:
-            return await r.json()
-    except:
-        return []
+async def pegar_klines(sessao, symbol, interval):
+    url = f"{BINANCE_HTTP}/api/v3/klines?symbol={symbol}&interval={interval}&limit={LIMIT}"
+    async with sessao.get(url) as r:
+        return await r.json()
 
 def calcular_ma(valores, periodo):
     if len(valores) < periodo:
         return None
     return sum(valores[-periodo:]) / periodo
 
-def calcular_rsi(valores, periodo=14):
-    if len(valores) < periodo + 1:
-        return 0
-    ganhos, perdas = 0, 0
-    for i in range(-periodo, -1):
-        diff = valores[i + 1] - valores[i]
-        if diff > 0:
-            ganhos += diff
-        else:
-            perdas -= diff
-    if perdas == 0:
+def calcular_rsi(precos, periodo=14):
+    if len(precos) < periodo + 1:
+        return None
+    ganhos = [max(precos[i] - precos[i - 1], 0) for i in range(1, len(precos))]
+    perdas = [max(precos[i - 1] - precos[i], 0) for i in range(1, len(precos))]
+    ganho_medio = sum(ganhos[-periodo:]) / periodo
+    perda_media = sum(perdas[-periodo:]) / periodo
+    if perda_media == 0:
         return 100
-    rs = ganhos / perdas
+    rs = ganho_medio / perda_media
     return 100 - (100 / (1 + rs))
 
-# ---------------- LÓGICA PRINCIPAL ----------------
-async def analisar_moeda(session, symbol, interval):
-    klines = await pegar_klines(session, symbol, interval)
-    if not klines or len(klines) < 50:
+async def enviar_alerta(mensagem):
+    token = os.getenv("TELEGRAM_TOKEN")
+    chat_id = os.getenv("CHAT_ID")
+    if not token or not chat_id:
+        print("⚠️ TOKEN ou CHAT_ID não configurados.")
+        return
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    payload = {"chat_id": chat_id, "text": mensagem, "parse_mode": "HTML"}
+    async with aiohttp.ClientSession() as sessao:
+        await sessao.post(url, data=payload)
+
+async def analisar_moeda(sessao, symbol, interval):
+    global cooldowns
+    if symbol in cooldowns and time.time() - cooldowns[symbol] < COOLDOWN:
         return
 
+    klines = await pegar_klines(sessao, symbol, interval)
     closes = [float(k[4]) for k in klines]
-    volumes_lista = [float(k[5]) for k in klines]
-    preco_atual = closes[-1]
-    volume = volumes_lista[-1]
-    volume_media = calcular_ma(volumes_lista, 20)
+    volumes = [float(k[5]) for k in klines]
 
+    preco_atual = closes[-1]
     ema9 = calcular_ma(closes, 9)
     ma20 = calcular_ma(closes, 20)
     ma50 = calcular_ma(closes, 50)
     ma200 = calcular_ma(closes, 200)
     rsi = calcular_rsi(closes, 14)
-    agora = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    volume = volumes[-1]
+    volume_media = calcular_ma(volumes, 20)
 
-    if symbol not in cooldowns:
-        cooldowns[symbol] = 0
+    # 🔒 Correção adicionada: evita erro de comparação com NoneType
+    if None in (ema9, ma20, ma50, ma200, rsi, volume, volume_media):
+        return
 
-    # --- TENDÊNCIA INICIANDO (5m)
-    if interval == "5m" and ema9 > ma20 and rsi > 50 and preco_atual > ema9:
-        if time.time() > cooldowns[symbol]:
-            msg = f"🚀 {symbol} Tendência iniciando (5m)\n💰 {preco_atual}\n📊 RSI: {rsi:.1f}\n⏱️ {agora}"
-            await enviar_alerta(msg)
-            cooldowns[symbol] = time.time() + COOLDOWN
+    # 🚀 Tendência iniciando (5m)
+    if interval == "5m" and ema9 > ma20 > ma50 and rsi > 55 and volume > volume_media * 1.5:
+        msg = f"🚀 <b>{symbol}</b> | Tendência iniciando (5m)\n💰 {preco_atual}\n⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        await enviar_alerta(msg)
+        cooldowns[symbol] = time.time()
 
-    # --- TENDÊNCIA CONFIRMADA (15m)
+    # ⚡ Entrada explosiva (5m)
+    if interval == "5m" and ema9 > ma20 > ma50 and volume > volume_media * 3 and rsi > 60:
+        msg = f"⚡ <b>{symbol}</b> | Entrada explosiva (5m)\n💥 Volume 3x acima da média\n💰 {preco_atual}\n⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        await enviar_alerta(msg)
+        cooldowns[symbol] = time.time()
+
+    # 🌕 Tendência confirmada (15m)
     if interval == "15m" and ema9 > ma20 > ma50 > ma200 and rsi > 55:
-        if time.time() > cooldowns[symbol]:
-            msg = f"🚀 {symbol} Tendência confirmada (15m)\n💰 {preco_atual}\n📊 RSI: {rsi:.1f}\n⏱️ {agora}"
-            await enviar_alerta(msg)
-            cooldowns[symbol] = time.time() + COOLDOWN
+        msg = f"🌕 <b>{symbol}</b> | Tendência confirmada (15m)\n💰 {preco_atual}\n⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        await enviar_alerta(msg)
+        cooldowns[symbol] = time.time()
 
-    # ---------------------- ALERTA: ENTRADA EXPLOSIVA (5m) ----------------------
-    if interval == "5m":
-        if (
-            ema9 > ma20 > ma50
-            and rsi > 50
-            and volume > volume_media * 1.2  # confirma aumento de volume
-            and preco_atual > ema9  # garante reação de alta
-        ):
-            msg = (
-                f"⚡ {symbol} 🚀 Entrada Explosiva detectada (5m)\n"
-                f"💰 {preco_atual}\n"
-                f"📊 RSI: {rsi:.1f} | Vol: {volume:.1f}\n"
-                f"⏱️ {agora}"
-            )
-            await enviar_alerta(msg)
-            cooldowns[symbol] = time.time() + COOLDOWN
-
-
-# ---------------- LOOP ----------------
 async def main():
-    pares = await pegar_pares_spot()
-    print(f"✅ v3.3 intrabar ativo | {len(pares)} pares SPOT | cooldown 15m | {datetime.now()}")
-    while True:
-        async with aiohttp.ClientSession() as session:
-            tarefas = []
-            for symbol in pares:
-                tarefas.append(analisar_moeda(session, symbol, INTERVAL_5M))
-                tarefas.append(analisar_moeda(session, symbol, INTERVAL_15M))
-            await asyncio.gather(*tarefas)
-        await asyncio.sleep(60)
-
-# ---------------- WEB SERVER ----------------
-@app.route("/")
-def home():
-    return "Bot rodando..."
+    async with aiohttp.ClientSession() as sessao:
+        pares = await pegar_pares_spot(sessao)
+        print(f"✅ Monitorando {len(pares)} pares SPOT")
+        while True:
+            for interval in INTERVALOS:
+                tasks = [analisar_moeda(sessao, s, interval) for s in pares[:TOP_PAIRS]]
+                await asyncio.gather(*tasks)
+            await asyncio.sleep(60)
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    loop = asyncio.get_event_loop()
+    loop.create_task(main())
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
