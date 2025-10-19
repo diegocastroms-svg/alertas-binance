@@ -1,210 +1,139 @@
-# main_curto_v3.3a.py
-# ✅ Base: v3.3 (mantida)
-# ✅ Única mudança: filtro reforçado em shortlist_from_24h
-#    - remove PERP, BULL, BEAR, UP, DOWN, e tokens fora do SPOT
-# ⚙️ Nenhuma outra linha modificada
-
-import os, asyncio, aiohttp, math, time
-from datetime import datetime, timezone
+import os, asyncio, time, math
+from urllib.parse import urlencode
+from collections import defaultdict, deque
+from datetime import datetime, timezone, timedelta
+import aiohttp
 from flask import Flask
 
 # ---------------- CONFIG ----------------
 BINANCE_HTTP = "https://api.binance.com"
-INTERVALS = ["5m", "15m"]
-MIN_PCT = 0.0
-MIN_QV = 10000.0
-COOLDOWN = 15 * 60
+INTERVAL_5M, INTERVAL_15M = "5m", "15m"
+COOLDOWN = 15 * 60  # 15 minutos
+TOP_PAIRS_LIMIT = 50
 
-TOKEN = os.getenv("TELEGRAM_TOKEN")
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
 app = Flask(__name__)
+cooldowns = {}
+precos = defaultdict(lambda: deque(maxlen=200))
+volumes = defaultdict(lambda: deque(maxlen=200))
 
-# ---------------- UTILS ----------------
-async def send_msg(session, text):
+# ---------------- FUNÇÕES ----------------
+async def enviar_alerta(msg):
+    if not TELEGRAM_TOKEN or not CHAT_ID:
+        return
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    params = {"chat_id": CHAT_ID, "text": msg, "parse_mode": "HTML"}
+    async with aiohttp.ClientSession() as session:
+        await session.post(url, params=params)
+
+async def pegar_pares_spot():
+    async with aiohttp.ClientSession() as session:
+        async with session.get(f"{BINANCE_HTTP}/api/v3/ticker/24hr") as r:
+            dados = await r.json()
+            filtrados = [d for d in dados if d["symbol"].endswith("USDT")]
+            ordenados = sorted(filtrados, key=lambda x: float(x["quoteVolume"]), reverse=True)
+            return [d["symbol"] for d in ordenados[:TOP_PAIRS_LIMIT]]
+
+async def pegar_klines(session, symbol, interval):
     try:
-        url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
-        payload = {"chat_id": CHAT_ID, "text": text, "parse_mode": "HTML"}
-        await session.post(url, data=payload)
-    except Exception as e:
-        print("Erro send_msg:", e)
+        async with session.get(f"{BINANCE_HTTP}/api/v3/klines?symbol={symbol}&interval={interval}&limit=100") as r:
+            return await r.json()
+    except:
+        return []
 
-def fmt(num): return f"{num:.6f}".rstrip("0").rstrip(".")
+def calcular_ma(valores, periodo):
+    if len(valores) < periodo:
+        return None
+    return sum(valores[-periodo:]) / periodo
 
-def nowbr():
-    return datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M:%S")
-
-# ---------------- INDICADORES ----------------
-def ema(values, period):
-    k = 2 / (period + 1)
-    ema_values = []
-    for i, price in enumerate(values):
-        if i == 0:
-            ema_values.append(price)
+def calcular_rsi(valores, periodo=14):
+    if len(valores) < periodo + 1:
+        return 0
+    ganhos, perdas = 0, 0
+    for i in range(-periodo, -1):
+        diff = valores[i + 1] - valores[i]
+        if diff > 0:
+            ganhos += diff
         else:
-            ema_values.append(price * k + ema_values[-1] * (1 - k))
-    return ema_values
+            perdas -= diff
+    if perdas == 0:
+        return 100
+    rs = ganhos / perdas
+    return 100 - (100 / (1 + rs))
 
-def sma(values, period):
-    return [sum(values[i-period+1:i+1])/period if i+1>=period else sum(values[:i+1])/(i+1) for i in range(len(values))]
+# ---------------- LÓGICA PRINCIPAL ----------------
+async def analisar_moeda(session, symbol, interval):
+    klines = await pegar_klines(session, symbol, interval)
+    if not klines or len(klines) < 50:
+        return
 
-def rsi(values, period=14):
-    if len(values) < period + 1: return [50.0]*len(values)
-    gains, losses = [], []
-    for i in range(1, len(values)):
-        diff = values[i] - values[i-1]
-        gains.append(max(diff, 0))
-        losses.append(max(-diff, 0))
-    avg_gain = sum(gains[:period]) / period
-    avg_loss = sum(losses[:period]) / period
-    rsi_vals = [50.0]*len(values)
-    for i in range(period, len(values)-1):
-        avg_gain = (avg_gain * (period - 1) + gains[i]) / period
-        avg_loss = (avg_loss * (period - 1) + losses[i]) / period
-        rs = avg_gain / (avg_loss + 1e-10)
-        rsi_vals[i+1] = 100 - (100 / (1 + rs))
-    return rsi_vals
+    closes = [float(k[4]) for k in klines]
+    volumes_lista = [float(k[5]) for k in klines]
+    preco_atual = closes[-1]
+    volume = volumes_lista[-1]
+    volume_media = calcular_ma(volumes_lista, 20)
 
-def adx(high, low, close, period=14):
-    tr, plus_dm, minus_dm = [0.0], [0.0], [0.0]
-    for i in range(1, len(close)):
-        tr.append(max(high[i]-low[i], abs(high[i]-close[i-1]), abs(low[i]-close[i-1])))
-        up_move = high[i]-high[i-1]
-        down_move = low[i-1]-low[i]
-        plus_dm.append(up_move if (up_move>down_move and up_move>0) else 0.0)
-        minus_dm.append(down_move if (down_move>up_move and down_move>0) else 0.0)
-    atr = [sum(tr[1:period+1])]
-    for i in range(period+1, len(tr)):
-        atr.append((atr[-1]*(period-1)+tr[i])/period)
-    plus_di, minus_di, dx, adx_vals = [], [], [], []
-    for i in range(period, len(atr)):
-        plus = 100*(sum(plus_dm[i-period+1:i+1])/atr[i-period])
-        minus = 100*(sum(minus_dm[i-period+1:i+1])/atr[i-period])
-        plus_di.append(plus)
-        minus_di.append(minus)
-        dx.append(100*abs(plus-minus)/(plus+minus+1e-10))
-    adx_val = sum(dx[:period])/period
-    adx_vals = [adx_val]*(period*2)
-    for i in range(period, len(dx)):
-        adx_val = (adx_val*(period-1)+dx[i])/period
-        adx_vals.append(adx_val)
-    return adx_vals
+    ema9 = calcular_ma(closes, 9)
+    ma20 = calcular_ma(closes, 20)
+    ma50 = calcular_ma(closes, 50)
+    ma200 = calcular_ma(closes, 200)
+    rsi = calcular_rsi(closes, 14)
+    agora = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-# ---------------- BINANCE ----------------
-async def get_klines(session, symbol, interval, limit=200):
-    url = f"{BINANCE_HTTP}/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
-    async with session.get(url, timeout=10) as r:
-        return await r.json()
+    if symbol not in cooldowns:
+        cooldowns[symbol] = 0
 
-# ✅ Filtro reforçado — somente moedas SPOT reais
-async def shortlist_from_24h(session):
-    url = f"{BINANCE_HTTP}/api/v3/ticker/24hr"
-    async with session.get(url, timeout=10) as r:
-        data = await r.json()
-    symbols = []
-    blocked = ["UP", "DOWN", "BULL", "BEAR", "PERP", "_", "USD_", "_USD",
-               "BUSD", "FDUSD", "TUSD", "USDC", "DAI", "EUR", "TRY", "BTC", "ETH", "BNB"]
-    for d in data:
-        s = d["symbol"]
-        if not s.endswith("USDT"):
-            continue
-        if any(x in s for x in blocked):
-            continue
-        try:
-            qv = float(d["quoteVolume"])
-            pct = abs(float(d["priceChangePercent"]))
-            if qv > MIN_QV and pct >= MIN_PCT:
-                symbols.append((s, qv))
-        except:
-            continue
-    symbols.sort(key=lambda x: x[1], reverse=True)
-    return [s for s, _ in symbols[:50]]
+    # --- TENDÊNCIA INICIANDO (5m)
+    if interval == "5m" and ema9 > ma20 and rsi > 50 and preco_atual > ema9:
+        if time.time() > cooldowns[symbol]:
+            msg = f"🚀 {symbol} Tendência iniciando (5m)\n💰 {preco_atual}\n📊 RSI: {rsi:.1f}\n⏱️ {agora}"
+            await enviar_alerta(msg)
+            cooldowns[symbol] = time.time() + COOLDOWN
 
-# ---------------- LÓGICA ----------------
-def cruzamento_up(a, b): return a[-2] < b[-2] and a[-1] > b[-1]
+    # --- TENDÊNCIA CONFIRMADA (15m)
+    if interval == "15m" and ema9 > ma20 > ma50 > ma200 and rsi > 55:
+        if time.time() > cooldowns[symbol]:
+            msg = f"🚀 {symbol} Tendência confirmada (15m)\n💰 {preco_atual}\n📊 RSI: {rsi:.1f}\n⏱️ {agora}"
+            await enviar_alerta(msg)
+            cooldowns[symbol] = time.time() + COOLDOWN
 
-async def process_symbol(session, symbol):
-    try:
-        k5 = await get_klines(session, symbol, "5m")
-        k15 = await get_klines(session, symbol, "15m")
-        c5 = [float(k[4]) for k in k5]
-        c15 = [float(k[4]) for k in k15]
-        h5 = [float(k[2]) for k in k5]
-        l5 = [float(k[3]) for k in k5]
-        v5 = [float(k[5]) for k in k5]
-        h15 = [float(k[2]) for k in k15]
-        l15 = [float(k[3]) for k in k15]
-        v15 = [float(k[5]) for k in k15]
+    # ---------------------- ALERTA: ENTRADA EXPLOSIVA (5m) ----------------------
+    if interval == "5m":
+        if (
+            ema9 > ma20 > ma50
+            and rsi > 50
+            and volume > volume_media * 1.2  # confirma aumento de volume
+            and preco_atual > ema9  # garante reação de alta
+        ):
+            msg = (
+                f"⚡ {symbol} 🚀 Entrada Explosiva detectada (5m)\n"
+                f"💰 {preco_atual}\n"
+                f"📊 RSI: {rsi:.1f} | Vol: {volume:.1f}\n"
+                f"⏱️ {agora}"
+            )
+            await enviar_alerta(msg)
+            cooldowns[symbol] = time.time() + COOLDOWN
 
-        ema9_5, ma20_5, ma50_5, ma200_5 = ema(c5,9), sma(c5,20), sma(c5,50), sma(c5,200)
-        ema9_15, ma20_15, ma50_15, ma200_15 = ema(c15,9), sma(c15,20), sma(c15,50), sma(c15,200)
-
-        rsi5, adx5 = rsi(c5), adx(h5, l5, c5)
-        rsi15, adx15 = rsi(c15), adx(h15, l15, c15)
-
-        p = fmt(c5[-1])
-        hora = nowbr()
-
-        # ----- ALERTAS ORIGINAIS -----
-        ini_5m = cruzamento_up(ema9_5, ma20_5) or cruzamento_up(ema9_5, ma50_5)
-        pre_5m = cruzamento_up(ma20_5, ma200_5) or cruzamento_up(ma50_5, ma200_5)
-        pre_15m = cruzamento_up(ema9_15, ma200_15)
-        conf_15m = cruzamento_up(ma20_15, ma200_15) or cruzamento_up(ma50_15, ma200_15)
-
-        # ----- NOVOS ALERTAS -----
-        vol_med_5 = sum(v5[-20:]) / 20
-        vol_med_15 = sum(v15[-20:]) / 20
-
-        # ⚡ Entrada Explosiva (5m)
-        if cruzamento_up(ema9_5, ma20_5) and v5[-1] > vol_med_5 and rsi5[-1] > 52 and adx5[-1] > 22:
-            await send_msg(session, f"⚡ {symbol} — ENTRADA EXPLOSIVA (5m)\n💰 {p}\n🧠 EMA9 cruzou MA20 + volume alto + RSI>52 + ADX>22\n🕒 {hora}")
-
-        # 💚 Entrada Segura (15m)
-        low = float(k15[-1][3])
-        if (low <= ema9_15[-1] or low <= ma20_15[-1]) and rsi15[-1] > 45 and v15[-1] > vol_med_15:
-            await send_msg(session, f"💚 {symbol} — ENTRADA SEGURA — RETESTE (15m)\n💰 {p}\n🧠 Toque EMA9/MA20 + RSI 45–55 + volume acima da média\n🕒 {hora}")
-
-        # ----- EXISTENTES -----
-        if ini_5m:
-            await send_msg(session, f"🟢 {symbol} ⬆️ Tendência iniciando (5m)\n💰 {p}\n🕒 {hora}")
-        if pre_5m:
-            await send_msg(session, f"🟡 {symbol} ⬆️ Tendência pré-confirmada (5m)\n💰 {p}\n🕒 {hora}")
-        if pre_15m:
-            await send_msg(session, f"🟡 {symbol} ⬆️ Tendência pré-confirmada (15m)\n💰 {p}\n🕒 {hora}")
-        if conf_15m:
-            await send_msg(session, f"🚀 {symbol} ⬆️ Tendência confirmada (15m)\n💰 {p}\n🕒 {hora}")
-
-    except Exception as e:
-        print(f"Erro {symbol}:", e)
 
 # ---------------- LOOP ----------------
-async def main_loop():
-    async with aiohttp.ClientSession() as session:
-        symbols = await shortlist_from_24h(session)
-        total = len(symbols)
-        await send_msg(session, f"✅ v3.3a ativo | {total} pares SPOT | cooldown 15m | {nowbr()} 🇧🇷")
+async def main():
+    pares = await pegar_pares_spot()
+    print(f"✅ v3.3 intrabar ativo | {len(pares)} pares SPOT | cooldown 15m | {datetime.now()}")
+    while True:
+        async with aiohttp.ClientSession() as session:
+            tarefas = []
+            for symbol in pares:
+                tarefas.append(analisar_moeda(session, symbol, INTERVAL_5M))
+                tarefas.append(analisar_moeda(session, symbol, INTERVAL_15M))
+            await asyncio.gather(*tarefas)
+        await asyncio.sleep(60)
 
-        if total == 0:
-            print("⚠️ Nenhum par encontrado.")
-            return
-
-        tasks = [process_symbol(session, s) for s in symbols]
-        await asyncio.gather(*tasks)
-
+# ---------------- WEB SERVER ----------------
 @app.route("/")
 def home():
-    return "Binance Alertas v3.3a ativo", 200
+    return "Bot rodando..."
 
 if __name__ == "__main__":
-    import threading
-
-    def runner():
-        while True:
-            try:
-                asyncio.run(main_loop())
-            except Exception as e:
-                print("Loop error:", e)
-            time.sleep(COOLDOWN)
-
-    threading.Thread(target=runner, daemon=True).start()
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
+    asyncio.run(main())
