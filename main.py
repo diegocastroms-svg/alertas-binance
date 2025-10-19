@@ -98,7 +98,7 @@ def atr(h,l,c,n=14):
     return out
 
 def crossed_up(a_prev,a_now,b_prev,b_now): 
-    return a_prev<=b_prev and a_now>b_now
+    return a_prev is not None and b_prev is not None and a_now is not None and b_now is not None and a_prev<=b_prev and a_now>b_now
 
 # ===================== BINANCE =====================
 async def fetch_top(session):
@@ -107,57 +107,52 @@ async def fetch_top(session):
     data = await http_get_json(session, url)
     if not data:
         return []
-
     ranked = []
     for d in data:
         sym = d.get("symbol", "")
-        if not sym.endswith("USDT"):
-            continue
-        if any(x in sym for x in EXCLUDE):
-            continue
+        if not sym.endswith("USDT"): continue
+        if any(x in sym for x in EXCLUDE): continue
         try:
             p = float(d.get("lastPrice", 0))
             qv = float(d.get("quoteVolume", 0))
-            if p < PRICE_MIN:
-                continue
+            if p < PRICE_MIN: continue
             ranked.append((sym, qv))
-        except:
-            continue
-
-    # Ordena por volume e pega as 50 principais
+        except: continue
     return [s for s, _ in sorted(ranked, key=lambda x: x[1], reverse=True)[:TOP_COUNT]]
 
 async def fetch_klines(session, symbol):
     """Busca candles da Binance de forma correta (sem erro de tipo)."""
     url = f"{BINANCE}/api/v3/klines"
-    params = {
-        "symbol": symbol,
-        "interval": INTERVAL,
-        "limit": 250
-    }
+    params = {"symbol": symbol, "interval": INTERVAL, "limit": 250}
     return await http_get_json(session, url, params=params)
 
 # ===================== DETECÇÃO =====================
 def detect(symbol,o,h,l,c,v):
-    if len(c)<60: return ""
-    rsi14=rsi(c,14); ema9=ema(c,9); ma20=sma(c,20); ma50=sma(c,50); atr14=atr(h,l,c,14)
-    if not (rsi14 and ema9 and ma20 and ma50 and atr14): return ""
-    i,ip=len(c)-1,len(c)-2
-    body=abs(c[i]-o[i]); atrv=atr14[i] or 1
-    vol_m20=statistics.mean(v[-20:])
-    vol_dec=all(v[-j]>v[-j+1] for j in range(6,1,-1)) if len(v)>=6 else False
-    lateral=body<ATR_FACTOR*atrv
-    exaustao=rsi14[i]<RSI_EXHAUSTION and lateral and c[i]<ma50[i] and vol_dec
-    cruz20=crossed_up(ema9[ip],ema9[i],ma20[ip],ma20[i])
-    cruz50=crossed_up(ema9[ip],ema9[i],ma50[ip],ma50[i])
-    reversao=cruz20 and cruz50 and rsi14[i]>RSI_REVERSAL and v[i]>VOLUME_RATIO*vol_m20
-    prev=_last_state.get(symbol,"")
-    if exaustao and prev!="exaustao":
-        _last_state[symbol]="exaustao"
-        return f"⚠️ Exaustão vendedora {symbol} | RSI={rsi14[i]:.1f}"
-    if reversao and prev=="exaustao":
-        _last_state[symbol]="reversao"
-        return f"📈 Reversão confirmada {symbol} | RSI={rsi14[i]:.1f}"
+    if len(c)<60: 
+        return ""
+    try:
+        rsi14=rsi(c,14); ema9=ema(c,9); ma20=sma(c,20); ma50=sma(c,50); atr14=atr(h,l,c,14)
+        if not (rsi14 and ema9 and ma20 and ma50 and atr14): return ""
+        i,ip=len(c)-1,len(c)-2
+        if i>=len(rsi14) or i>=len(ema9) or i>=len(ma20) or i>=len(ma50) or i>=len(atr14):
+            return ""
+        body=abs(c[i]-o[i]); atrv=atr14[i] or 1
+        vol_m20=statistics.mean(v[-20:])
+        vol_dec=all(v[-j]>v[-j+1] for j in range(6,1,-1)) if len(v)>=6 else False
+        lateral=body<ATR_FACTOR*atrv
+        exaustao=rsi14[i]<RSI_EXHAUSTION and lateral and c[i]<ma50[i] and vol_dec
+        cruz20=crossed_up(ema9[ip],ema9[i],ma20[ip],ma20[i])
+        cruz50=crossed_up(ema9[ip],ema9[i],ma50[ip],ma50[i])
+        reversao=cruz20 and cruz50 and rsi14[i]>RSI_REVERSAL and v[i]>VOLUME_RATIO*vol_m20
+        prev=_last_state.get(symbol,"")
+        if exaustao and prev!="exaustao":
+            _last_state[symbol]="exaustao"
+            return f"⚠️ Exaustão vendedora {symbol} | RSI={rsi14[i]:.1f}"
+        if reversao and prev=="exaustao":
+            _last_state[symbol]="reversao"
+            return f"📈 Reversão confirmada {symbol} | RSI={rsi14[i]:.1f}"
+    except Exception as e:
+        log.warning(f"Erro detect({symbol}): {e}")
     return ""
 
 # ===================== LOOP =====================
@@ -173,12 +168,15 @@ async def loop():
             res=await asyncio.gather(*tasks,return_exceptions=True)
             for sym,data in zip(_symbols,res):
                 if not data or isinstance(data,Exception): continue
-                o=[float(k[1]) for k in data]; h=[float(k[2]) for k in data]
-                l=[float(k[3]) for k in data]; c=[float(k[4]) for k in data]; v=[float(k[5]) for k in data]
-                msg=detect(sym,o,h,l,c,v)
-                if msg:
-                    log.info(msg)
-                    await send_telegram(msg)
+                try:
+                    o=[float(k[1]) for k in data]; h=[float(k[2]) for k in data]
+                    l=[float(k[3]) for k in data]; c=[float(k[4]) for k in data]; v=[float(k[5]) for k in data]
+                    msg=detect(sym,o,h,l,c,v)
+                    if msg:
+                        log.info(msg)
+                        await send_telegram(msg)
+                except Exception as e:
+                    log.warning(f"Erro em {sym}: {e}")
             await asyncio.sleep(SLEEP_SECONDS)
 
 # ===================== FLASK =====================
