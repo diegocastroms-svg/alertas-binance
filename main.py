@@ -1,162 +1,292 @@
-# main_v4_0.py
-# ✅ Intrabar real
-# ✅ Flask ativo
-# ✅ Top 50 pares SPOT (sem UP/DOWN/Perp)
-# ✅ Alertas 5m e 15m completos
-# ✅ Cooldown 15 min
-# ✅ Mensagens Telegram completas
+# main_reversao_v5.py
+# Esqueleto funcional + alertas EXACTOS pedidos:
+# 5m (abaixo da MA200): Exaustão vendedora, Tendência iniciando, Tendência pré-confirmada (3 MAs > MA200 por cruzamento)
+# 15m: Pré-confirmada (EMA9 x MA200), Confirmada (todas > MA200 com cruzamento recente)
+# Só Telegram. Flask ativo. Cooldown 15 min. Top 50 por volume USDT (SPOT).
 
-import os, asyncio, aiohttp, math, time
+import os, asyncio, aiohttp, time, math
 from datetime import datetime, timezone
 from flask import Flask
 
+# ---------------- CONFIG ----------------
 BINANCE_HTTP = "https://api.binance.com"
-COOLDOWN = 15 * 60
-LIMIT = 50
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-CHAT_ID = os.getenv("CHAT_ID")
+COOLDOWN_SEC = 15 * 60
+TOP_N = 50
+REQ_TIMEOUT = 8
 
-ULTIMO_ALERTA = {}
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
+CHAT_ID = os.getenv("CHAT_ID", "").strip()
+
+# ---------------- FLASK ----------------
 app = Flask(__name__)
-
-def agora_br():
-    return datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M:%S 🇧🇷")
-
-async def enviar(session, msg):
-    try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        await session.post(url, data={"chat_id": CHAT_ID, "text": msg, "parse_mode": "HTML"})
-    except Exception as e:
-        print("Erro envio:", e)
-
-def ema(values, period):
-    if len(values) < period: return []
-    k = 2 / (period + 1)
-    e = values[0]
-    out = [e]
-    for v in values[1:]:
-        e = (v * k) + (e * (1 - k))
-        out.append(e)
-    return out
-
-def sma(values, period):
-    return [sum(values[max(0, i-period+1):i+1]) / len(values[max(0, i-period+1):i+1]) for i in range(len(values))]
-
-def rsi(values, period=14):
-    if len(values) < period+1: return [50]*len(values)
-    deltas = [values[i]-values[i-1] for i in range(1,len(values))]
-    gains = [max(d,0) for d in deltas]
-    losses = [max(-d,0) for d in deltas]
-    avg_gain = sum(gains[:period]) / period
-    avg_loss = sum(losses[:period]) / period
-    rsis = [50]*(period+1)
-    for i in range(period+1, len(values)):
-        avg_gain = (avg_gain*(period-1)+gains[i-1])/period
-        avg_loss = (avg_loss*(period-1)+losses[i-1])/period
-        rs = avg_gain / (avg_loss+1e-9)
-        rsis.append(100 - (100/(1+rs)))
-    return rsis
-
-def adx(high, low, close, period=14):
-    if len(close) < period+1: return [20]*len(close)
-    plus_dm, minus_dm, tr = [0],[0],[0]
-    for i in range(1,len(close)):
-        up = high[i]-high[i-1]
-        down = low[i-1]-low[i]
-        plus_dm.append(up if up>down and up>0 else 0)
-        minus_dm.append(down if down>up and down>0 else 0)
-        tr_curr = max(high[i]-low[i], abs(high[i]-close[i-1]), abs(low[i]-close[i-1]))
-        tr.append(tr_curr)
-    atr, pdi, mdi, adx_vals = [0]*len(close), [0]*len(close), [0]*len(close), [0]*len(close)
-    atr[period] = sum(tr[1:period+1])/period
-    pdm = sum(plus_dm[1:period+1])/period
-    mdm = sum(minus_dm[1:period+1])/period
-    for i in range(period+1,len(close)):
-        atr[i]=(atr[i-1]*(period-1)+tr[i])/period
-        pdm=(pdm*(period-1)+plus_dm[i])/period
-        mdm=(mdm*(period-1)+minus_dm[i])/period
-        pdi[i]=100*(pdm/atr[i])
-        mdi[i]=100*(mdm/atr[i])
-        adx_vals[i]=100*abs(pdi[i]-mdi[i])/(pdi[i]+mdi[i]+1e-9)
-    return adx_vals
-
-async def get_klines(session, symbol, interval):
-    url = f"{BINANCE_HTTP}/api/v3/klines?symbol={symbol}&interval={interval}&limit=200"
-    async with session.get(url, timeout=10) as r:
-        return await r.json()
-
-async def get_top50(session):
-    url = f"{BINANCE_HTTP}/api/v3/ticker/24hr"
-    async with session.get(url, timeout=10) as r:
-        data = await r.json()
-    spots = [d for d in data if d["symbol"].endswith("USDT") and all(x not in d["symbol"] for x in ["UP","DOWN","BULL","BEAR","PERP","BUSD","TUSD","FDUSD","USDC"])]
-    spots.sort(key=lambda x: float(x["quoteVolume"]), reverse=True)
-    return [x["symbol"] for x in spots[:LIMIT]]
-
-async def analisar(session, symbol):
-    global ULTIMO_ALERTA
-    try:
-        for tf in ["5m","15m"]:
-            kl = await get_klines(session, symbol, tf)
-            if not kl or isinstance(kl, dict): continue
-            c = [float(k[4]) for k in kl]
-            h = [float(k[2]) for k in kl]
-            l = [float(k[3]) for k in kl]
-            ema9, ma20, ma50, ma200 = ema(c,9), sma(c,20), sma(c,50), sma(c,200)
-            rsi14, adx14 = rsi(c), adx(h,l,c)
-            last = -1
-            preco = c[last]
-            chave = f"{symbol}-{tf}"
-            if chave in ULTIMO_ALERTA and time.time()-ULTIMO_ALERTA[chave]<COOLDOWN:
-                continue
-
-            # 🚀 Tendência iniciando (5m)
-            if tf=="5m" and ema9[last]>ma20[last] and ema9[last]>ma50[last] and c[last-1]<ma20[last-1]:
-                msg=f"🟢 {symbol} ⬆️ Tendência iniciando (5m)\n💰 {preco:.6f}\n⏰ {agora_br()}"
-                await enviar(session,msg); ULTIMO_ALERTA[chave]=time.time()
-
-            # 🌕 Pré-confirmada (5m)
-            if tf=="5m" and ema9[last]>ma20[last]>ma50[last]>ma200[last]:
-                msg=f"🌕 {symbol} ⚡ Tendência pré-confirmada (5m)\n💰 {preco:.6f}\n⏰ {agora_br()}"
-                await enviar(session,msg); ULTIMO_ALERTA[chave]=time.time()
-
-            # 🌕 Pré-confirmada (15m)
-            if tf=="15m" and ema9[last]>ma200[last]:
-                msg=f"🌕 {symbol} ⚡ Tendência pré-confirmada (15m)\n💰 {preco:.6f}\n⏰ {agora_br()}"
-                await enviar(session,msg); ULTIMO_ALERTA[chave]=time.time()
-
-            # 🚀 Confirmada (15m)
-            if tf=="15m" and ema9[last]>ma20[last]>ma50[last]>ma200[last] and rsi14[last]>55 and adx14[last]>25:
-                msg=f"🚀 {symbol} 🔥 Tendência confirmada (15m)\n💰 {preco:.6f}\n⏰ {agora_br()}"
-                await enviar(session,msg); ULTIMO_ALERTA[chave]=time.time()
-
-            # 📈 Rompimento (15m)
-            if tf=="15m" and preco>max(c[-21:-1]):
-                msg=f"📈 {symbol} 💥 Rompimento da resistência (15m)\n💰 {preco:.6f}\n⏰ {agora_br()}"
-                await enviar(session,msg); ULTIMO_ALERTA[chave]=time.time()
-
-            # ♻️ Retestes (15m)
-            if tf=="15m" and (abs(c[last]-ema9[last])/ema9[last]<0.002 or abs(c[last]-ma20[last])/ma20[last]<0.002):
-                msg=f"♻️ {symbol} 💚 Reteste (15m)\n💰 {preco:.6f}\n⏰ {agora_br()}"
-                await enviar(session,msg); ULTIMO_ALERTA[chave]=time.time()
-    except Exception as e:
-        print("Erro",symbol,e)
-
-async def principal():
-    async with aiohttp.ClientSession() as session:
-        pares = await get_top50(session)
-        await enviar(session,f"✅ Bot ativo | {len(pares)} pares SPOT | cooldown 15m | {agora_br()}")
-        while True:
-            tarefas = [analisar(session,p) for p in pares]
-            await asyncio.gather(*tarefas)
-            await asyncio.sleep(60)
 
 @app.route("/")
 def home():
-    return "Bot Binance v4.0 rodando com sucesso 🚀", 200
+    return "✅ Scanner ativo (5m & 15m) — reversão por cruzamentos | 🇧🇷", 200
 
-if __name__=="__main__":
+# ---------------- UTILS ----------------
+def now_br():
+    # horário local do container; se quiser UTC-3 fixo, troque por .utcnow() e subtraia 3h
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S") + " 🇧🇷"
+
+async def tg(session, text: str):
+    if not (TELEGRAM_TOKEN and CHAT_ID):
+        return
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+        payload = {"chat_id": CHAT_ID, "text": text, "parse_mode": "HTML", "disable_web_page_preview": True}
+        await session.post(url, data=payload, timeout=REQ_TIMEOUT)
+    except:
+        pass
+
+def fmt_price(x: float) -> str:
+    s = f"{x:.8f}".rstrip("0").rstrip(".")
+    return s if s else "0"
+
+def cross_up(a_prev, a_now, b_prev, b_now) -> bool:
+    return a_prev <= b_prev and a_now > b_now
+
+def sma(seq, n):
+    out, s = [], 0.0
+    from collections import deque
+    q = deque()
+    for x in seq:
+        q.append(x); s += x
+        if len(q) > n: s -= q.popleft()
+        out.append(s/len(q))
+    return out
+
+def ema(seq, span):
+    if not seq: return []
+    alpha = 2.0/(span+1.0)
+    out = [seq[0]]
+    e = seq[0]
+    for x in seq[1:]:
+        e = alpha*x + (1-alpha)*e
+        out.append(e)
+    return out
+
+# ---------------- BINANCE ----------------
+async def get_klines(session, symbol, interval, limit=210):
+    url = f"{BINANCE_HTTP}/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
+    try:
+        async with session.get(url, timeout=REQ_TIMEOUT) as r:
+            data = await r.json()
+            if isinstance(data, list):
+                # removemos o último candle em formação para evitar "pular" cruzamento
+                if len(data) > 1:
+                    data = data[:-1]
+                return data
+            return []
+    except:
+        return []
+
+async def get_top_usdt_symbols(session):
+    url = f"{BINANCE_HTTP}/api/v3/ticker/24hr"
+    async with session.get(url, timeout=REQ_TIMEOUT) as r:
+        data = await r.json()
+    # filtra apenas USDT spot e remove alavancados/stables secundárias
+    blocked = ("UP","DOWN","BULL","BEAR","BUSD","FDUSD","TUSD","USDC","USD1","PERP","_PERP")
+    pares = []
+    for d in data:
+        s = d.get("symbol","")
+        if not s.endswith("USDT"): 
+            continue
+        if any(x in s for x in blocked):
+            continue
+        try:
+            qv = float(d.get("quoteVolume","0") or 0.0)
+        except:
+            qv = 0.0
+        pares.append((s, qv))
+    pares.sort(key=lambda x: x[1], reverse=True)
+    return [s for s,_ in pares[:TOP_N]]
+
+# ---------------- ALERT STATE ----------------
+# cooldown por (symbol, kind)
+LAST_HIT = {}
+
+def allowed(symbol, kind):
+    ts = LAST_HIT.get((symbol, kind), 0.0)
+    return (time.time() - ts) >= COOLDOWN_SEC
+
+def mark(symbol, kind):
+    LAST_HIT[(symbol, kind)] = time.time()
+
+# ---------------- CORE CHECKS ----------------
+def detect_exhaustion_5m(o, h, l, c, v):
+    """ Exaustão vendedora (5m, abaixo da MA200):
+        - candle tipo martelo: pavio inferior >= 2x corpo, close > open
+        - volume > 1.5x média(20)
+        - queda acumulada recente (últimas 12 velas) <= -4% (opcional, leve)
+    """
+    if len(c) < 30: return False, ""
+    last = len(c)-1
+    open_, high_, low_, close_ = o[last], h[last], l[last], c[last]
+    body = abs(close_ - open_)
+    lower_wick = open_ - low_ if close_ >= open_ else close_ - low_
+    cond_hammer = (close_ > open_) and (lower_wick >= 2.0*body) and (high_ - low_ > 0)
+
+    vol_ma20 = sum(v[-20:]) / 20.0
+    cond_vol = v[last] >= 1.5 * (vol_ma20 + 1e-12)
+
+    base = c[max(0, last-12)]
+    drop_pct = (close_/(base+1e-12)-1.0)*100.0
+    cond_drop = drop_pct <= -4.0
+
+    if cond_hammer and cond_vol and cond_drop:
+        msg = f"🟥 <b>EXAUSTÃO VENDEDORA (5m)</b>\n💰 {fmt_price(close_)}\n🕒 {now_br()}"
+        return True, msg
+    return False, ""
+
+def tendencia_iniciando_5m(ema9, ma20, ma50):
+    if len(ema9) < 2: return False
+    i1 = len(ema9)-1; i0 = i1-1
+    cross_9_20 = cross_up(ema9[i0], ema9[i1], ma20[i0], ma20[i1])
+    cross_9_50 = cross_up(ema9[i0], ema9[i1], ma50[i0], ma50[i1])
+    # aceita cruzar uma e já estar acima da outra
+    ok = (cross_9_20 and ema9[i1] > ma50[i1]) or (cross_9_50 and ema9[i1] > ma20[i1]) or (cross_9_20 and cross_9_50)
+    return ok
+
+def preconf_5m_cross_3_over_200(ema9, ma20, ma50, ma200):
+    if len(ema9) < 2: return False
+    i1 = len(ema9)-1; i0 = i1-1
+    # todas acima da 200
+    all_above = ema9[i1] > ma200[i1] and ma20[i1] > ma200[i1] and ma50[i1] > ma200[i1]
+    # pelo menos uma cruzou NESTA vela para evitar atraso
+    c9  = cross_up(ema9[i0], ema9[i1], ma200[i0], ma200[i1])
+    c20 = cross_up(ma20[i0], ma20[i1], ma200[i0], ma200[i1])
+    c50 = cross_up(ma50[i0], ma50[i1], ma200[i0], ma200[i1])
+    recent_cross = (c9 or c20 or c50)
+    return all_above and recent_cross
+
+def preconf_15m_ema9_over_200(ema9, ma200):
+    if len(ema9) < 2: return False
+    i1 = len(ema9)-1; i0 = i1-1
+    return cross_up(ema9[i0], ema9[i1], ma200[i0], ma200[i1])
+
+def conf_15m_all_over_200_recent(ema9, ma20, ma50, ma200):
+    if len(ema9) < 2: return False
+    i1 = len(ema9)-1; i0 = i1-1
+    structure = (ema9[i1] > ma20[i1] > ma50[i1] > ma200[i1])
+    c20 = cross_up(ma20[i0], ma20[i1], ma200[i0], ma200[i1])
+    c50 = cross_up(ma50[i0], ma50[i1], ma200[i0], ma200[i1])
+    recent = (c20 or c50)
+    return structure and recent
+
+# ---------------- WORKER ----------------
+async def scan_symbol(session, symbol):
+    try:
+        # 5m
+        k5 = await get_klines(session, symbol, "5m", limit=210)
+        if len(k5) < 210: 
+            return
+        o5 = [float(k[1]) for k in k5]
+        h5 = [float(k[2]) for k in k5]
+        l5 = [float(k[3]) for k in k5]
+        c5 = [float(k[4]) for k in k5]
+        v5 = [float(k[5]) for k in k5]
+
+        ma200_5 = sma(c5, 200)
+        ema9_5  = ema(c5, 9)
+        ma20_5  = sma(c5, 20)
+        ma50_5  = sma(c5, 50)
+
+        i5 = len(c5)-1
+        # regra global 5m: só considerar quando o preço está abaixo da MA200 (queda)
+        below_200_context = c5[i5] < ma200_5[i5] if ma200_5[i5] is not None else False
+
+        # (5m) EXAUSTÃO — apenas se abaixo da 200
+        if below_200_context:
+            ok, msg = detect_exhaustion_5m(o5, h5, l5, c5, v5)
+            if ok and allowed(symbol, "EXAUSTAO_5M"):
+                await tg(session, f"⭐ {symbol}\n{msg}\n🔗 https://www.binance.com/en/trade/{symbol.replace('USDT','')}_USDT?type=spot")
+                mark(symbol, "EXAUSTAO_5M")
+
+        # (5m) TENDÊNCIA INICIANDO — EMA9 cruza MA20/MA50 — apenas se abaixo da 200
+        if below_200_context and tendencia_iniciando_5m(ema9_5, ma20_5, ma50_5) and allowed(symbol, "INI_5M"):
+            p = fmt_price(c5[i5])
+            msg = (
+                f"🟢 {symbol} ⬆️ <b>Tendência iniciando (5m)</b>\n"
+                f"💰 {p}\n"
+                f"🕒 {now_br()}\n"
+                f"🔗 https://www.binance.com/en/trade/{symbol.replace('USDT','')}_USDT?type=spot"
+            )
+            await tg(session, msg)
+            mark(symbol, "INI_5M")
+
+        # (5m) PRÉ-CONFIRMADA — 9/20/50 > 200 com cruzamento recente (evita atraso)
+        if preconf_5m_cross_3_over_200(ema9_5, ma20_5, ma50_5, ma200_5) and allowed(symbol, "PRE_5M"):
+            p = fmt_price(c5[i5])
+            msg = (
+                f"🟡 {symbol} ⬆️ <b>Tendência pré-confirmada (5m)</b>\n"
+                f"💰 {p}\n"
+                f"🕒 {now_br()}\n"
+                f"🔗 https://www.binance.com/en/trade/{symbol.replace('USDT','')}_USDT?type=spot"
+            )
+            await tg(session, msg)
+            mark(symbol, "PRE_5M")
+
+        # 15m
+        k15 = await get_klines(session, symbol, "15m", limit=210)
+        if len(k15) < 210:
+            return
+        c15 = [float(k[4]) for k in k15]
+        ema9_15  = ema(c15, 9)
+        ma20_15  = sma(c15, 20)
+        ma50_15  = sma(c15, 50)
+        ma200_15 = sma(c15, 200)
+        j = len(c15)-1
+
+        # (15m) PRÉ-CONFIRMADA — EMA9 cruza MA200
+        if preconf_15m_ema9_over_200(ema9_15, ma200_15) and allowed(symbol, "PRE_15M"):
+            p = fmt_price(c15[j])
+            msg = (
+                f"🟡 {symbol} ⬆️ <b>Tendência pré-confirmada (15m)</b>\n"
+                f"💰 {p}\n"
+                f"🕒 {now_br()}\n"
+                f"🔗 https://www.binance.com/en/trade/{symbol.replace('USDT','')}_USDT?type=spot"
+            )
+            await tg(session, msg)
+            mark(symbol, "PRE_15M")
+
+        # (15m) CONFIRMADA — todas > 200 e cruzamento recente de MA20/MA50 sobre MA200
+        if conf_15m_all_over_200_recent(ema9_15, ma20_15, ma50_15, ma200_15) and allowed(symbol, "CONF_15M"):
+            p = fmt_price(c15[j])
+            msg = (
+                f"🚀 {symbol} ⬆️ <b>Tendência confirmada (15m)</b>\n"
+                f"💰 {p}\n"
+                f"🕒 {now_br()}\n"
+                f"🔗 https://www.binance.com/en/trade/{symbol.replace('USDT','')}_USDT?type=spot"
+            )
+            await tg(session, msg)
+            mark(symbol, "CONF_15M")
+
+    except Exception as e:
+        # Sem prints/logs para não poluir; falhas são simplesmente ignoradas
+        return
+
+# ---------------- MAIN LOOP ----------------
+async def main_loop():
+    async with aiohttp.ClientSession() as session:
+        symbols = await get_top_usdt_symbols(session)
+        await tg(session, f"✅ Scanner reversão (5m/15m) ativo | {len(symbols)} pares | cooldown 15m | {now_br()}")
+        if not symbols:
+            return
+        while True:
+            tasks = [scan_symbol(session, s) for s in symbols]
+            await asyncio.gather(*tasks)
+            await asyncio.sleep(30)  # ciclo rápido para avisar perto do cruzamento
+
+# ---------------- RUN ----------------
+if __name__ == "__main__":
     import threading
-    def loop(): asyncio.run(principal())
-    threading.Thread(target=loop,daemon=True).start()
-    app.run(host="0.0.0.0",port=int(os.getenv("PORT",10000)))
+    def runner():
+        while True:
+            try:
+                asyncio.run(main_loop())
+            except:
+                pass
+            time.sleep(10)
+    threading.Thread(target=runner, daemon=True).start()
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
