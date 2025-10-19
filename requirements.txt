@@ -1,4 +1,4 @@
-aiohttp==3.9.5
-python-dotenv==1.0.1
 flask==3.0.3
 requests==2.31.0
+python-dotenv==1.0.1
+binance-connector==3.10.1
