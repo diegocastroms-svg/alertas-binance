@@ -1,9 +1,8 @@
-# main_curto_v3.3.py
-# ✅ Base: v3.2 mantida
-# ✅ Adicionados apenas:
-#    ⚡ Entrada Explosiva (5m): EMA9 cruza MA20 + Volume alto + RSI>52 + ADX>22
-#    💚 Entrada Segura (15m): Reteste EMA9/MA20 após pré-confirmação
-# ⚙️ Nenhuma outra linha alterada
+# main_curto_v3.3a.py
+# ✅ Base: v3.3 (mantida)
+# ✅ Única mudança: filtro reforçado em shortlist_from_24h
+#    - remove PERP, BULL, BEAR, UP, DOWN, e tokens fora do SPOT
+# ⚙️ Nenhuma outra linha modificada
 
 import os, asyncio, aiohttp, math, time
 from datetime import datetime, timezone
@@ -97,15 +96,20 @@ async def get_klines(session, symbol, interval, limit=200):
     async with session.get(url, timeout=10) as r:
         return await r.json()
 
+# ✅ Filtro reforçado — somente moedas SPOT reais
 async def shortlist_from_24h(session):
     url = f"{BINANCE_HTTP}/api/v3/ticker/24hr"
     async with session.get(url, timeout=10) as r:
         data = await r.json()
     symbols = []
+    blocked = ["UP", "DOWN", "BULL", "BEAR", "PERP", "_", "USD_", "_USD",
+               "BUSD", "FDUSD", "TUSD", "USDC", "DAI", "EUR", "TRY", "BTC", "ETH", "BNB"]
     for d in data:
         s = d["symbol"]
-        if not s.endswith("USDT"): continue
-        if any(x in s for x in ["UP", "DOWN", "BUSD", "FDUSD", "TUSD", "USDC", "USD1"]): continue
+        if not s.endswith("USDT"):
+            continue
+        if any(x in s for x in blocked):
+            continue
         try:
             qv = float(d["quoteVolume"])
             pct = abs(float(d["priceChangePercent"]))
@@ -114,7 +118,7 @@ async def shortlist_from_24h(session):
         except:
             continue
     symbols.sort(key=lambda x: x[1], reverse=True)
-    return [s for s, _ in symbols[:50]]  # 🔹 Apenas 50 moedas com maior volume
+    return [s for s, _ in symbols[:50]]
 
 # ---------------- LÓGICA ----------------
 def cruzamento_up(a, b): return a[-2] < b[-2] and a[-1] > b[-1]
@@ -178,7 +182,7 @@ async def main_loop():
     async with aiohttp.ClientSession() as session:
         symbols = await shortlist_from_24h(session)
         total = len(symbols)
-        await send_msg(session, f"✅ v3.3 ativo | {total} pares SPOT | cooldown 15m | {nowbr()} 🇧🇷")
+        await send_msg(session, f"✅ v3.3a ativo | {total} pares SPOT | cooldown 15m | {nowbr()} 🇧🇷")
 
         if total == 0:
             print("⚠️ Nenhum par encontrado.")
@@ -189,7 +193,7 @@ async def main_loop():
 
 @app.route("/")
 def home():
-    return "Binance Alertas v3.3 ativo", 200
+    return "Binance Alertas v3.3a ativo", 200
 
 if __name__ == "__main__":
     import threading
