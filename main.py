@@ -1,131 +1,140 @@
-# main_curto_v3.3_exaustao15.py
-# ✅ Igual à v3.3 anterior
-# ✅ Única alteração: volume_ratio < 0,15 (antes era < 0,25)
+# main_curto_v3.2_limit50.py
+# ✅ Corrigido: shortlist limitada às 50 moedas com maior volume
+# ✅ Mantido: intrabar ativo, alertas 5m/15m
 # ✅ Nenhuma outra linha alterada
 
-importar os, asyncio, aiohttp, matemática, tempo
-de data e hora importar data e hora, fuso horário
-do frasco importar frasco
+import os, asyncio, aiohttp, math, time
+from datetime import datetime, timezone
+from flask import Flask
 
+# ---------------- CONFIG ----------------
 BINANCE_HTTP = "https://api.binance.com"
-INTERVALOS = ["5m", "15m"]
-MIN_PCT = 0,0
-MIN_QV = 10000,0
-TEMPO DE RECARGA = 15 * 60
+INTERVALS = ["5m", "15m"]
+MIN_PCT = 0.0
+MIN_QV = 10000.0
+COOLDOWN = 15 * 60
 
 TOKEN = os.getenv("TELEGRAM_TOKEN")
-ID_DO_CHAT = os.getenv("ID_DO_CHAT")
+CHAT_ID = os.getenv("CHAT_ID")
 
-aplicativo = Flask(__nome__)
+app = Flask(__name__)
 
-async def send_msg(sessão, texto):
-    tentar:
+# ---------------- UTILS ----------------
+async def send_msg(session, text):
+    try:
         url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
-        carga útil = {"chat_id": CHAT_ID, "texto": texto, "parse_mode": "HTML"}
-        aguardar sessão.post(url, dados=carga útil)
-    exceto Exceção como e:
+        payload = {"chat_id": CHAT_ID, "text": text, "parse_mode": "HTML"}
+        await session.post(url, data=payload)
+    except Exception as e:
         print("Erro send_msg:", e)
 
-def fmt(num): retornar f"{num:.6f}".rstrip("0").rstrip(".")
+def fmt(num): return f"{num:.6f}".rstrip("0").rstrip(".")
 
 def nowbr():
-    retornar datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M:%S")
+    return datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M:%S")
 
-async def get_klines(sessão, símbolo, intervalo, limite=50):
+# ---------------- BINANCE ----------------
+async def get_klines(session, symbol, interval, limit=50):
     url = f"{BINANCE_HTTP}/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
-    assíncrono com session.get(url, timeout=10) como r:
-        retornar await r.json()
+    async with session.get(url, timeout=10) as r:
+        return await r.json()
 
-async def shortlist_from_24h(sessão):
-    url = f"{BINANCE_HTTP}/api/v3/ticker/24h"
-    assíncrono com session.get(url, timeout=10) como r:
-        dados = aguardar r.json()
-    filtrado = [d para d em dados se d["símbolo"].endswith("USDT") e todos(x não em d["símbolo"] para x em ["PARA CIMA", "PARA BAIXO", "BUSD", "FDUSD", "TUSD", "USDC", "USD1"])]
-    sorted_pairs = sorted(filtrado, chave=lambda x: float(x["quoteVolume"]), reverse=True)
-    retornar [d["símbolo"] para d em sorted_pairs[:50]]
+async def shortlist_from_24h(session):
+    url = f"{BINANCE_HTTP}/api/v3/ticker/24hr"
+    async with session.get(url, timeout=10) as r:
+        data = await r.json()
+    symbols = []
+    for d in data:
+        s = d["symbol"]
+        if not s.endswith("USDT"): continue
+        if any(x in s for x in ["UP", "DOWN", "BUSD", "FDUSD", "TUSD", "USDC", "USD1"]): continue
+        try:
+            qv = float(d["quoteVolume"])
+            pct = abs(float(d["priceChangePercent"]))
+            if qv > MIN_QV and pct >= MIN_PCT:
+                symbols.append((s, qv))
+        except:
+            continue
+    # 🔹 Mantém apenas as 50 com maior volume
+    symbols = sorted(symbols, key=lambda x: x[1], reverse=True)[:50]
+    return [s for s, _ in symbols]
 
-def ema(valores, período):
-    k = 2 / (período + 1)
-    valores_ema = []
-    para i, preço em enumerate(valores):
-        se i == 0: ema_values.append(preço)
-        caso contrário: ema_values.append(preço * k + ema_values[-1] * (1 - k))
-    retornar valores_ema
+def ema(values, period):
+    k = 2 / (period + 1)
+    ema_values = []
+    for i, price in enumerate(values):
+        if i == 0:
+            ema_values.append(price)
+        else:
+            ema_values.append(price * k + ema_values[-1] * (1 - k))
+    return ema_values
 
-def sma(valores, período):
-    retornar [soma(valores[i-período+1:i+1])/período se i+1>=período senão soma(valores[:i+1])/(i+1) para i no intervalo(len(valores))]
+def sma(values, period):
+    return [sum(values[i-period+1:i+1])/period if i+1>=period else sum(values[:i+1])/(i+1) for i in range(len(values))]
 
-def cruzamento_up(a, b): retorna a[-2] < b[-2] e a[-1] > b[-1]
-def cruzamento_down(a, b): retorna a[-2] > b[-2] e a[-1] < b[-1]
+# ---------------- ALERTAS ----------------
+def cruzamento_up(a, b): return a[-2] < b[-2] and a[-1] > b[-1]
+def cruzamento_down(a, b): return a[-2] > b[-2] and a[-1] < b[-1]
 
-async def process_symbol(sessão, símbolo):
-    tentar:
-        k5 = await get_klines(sessão, símbolo, "5m")
-        k15 = await get_klines(sessão, símbolo, "15m")
-        c5 = [float(k[4]) para k em k5]
-        c15 = [float(k[4]) para k em k15]
-        v5 = [float(k[5]) para k em k5]
-        v15 = [float(k[5]) para k em k15]
+async def process_symbol(session, symbol):
+    try:
+        k5 = await get_klines(session, symbol, "5m")
+        k15 = await get_klines(session, symbol, "15m")
+        c5 = [float(k[4]) for k in k5]
+        c15 = [float(k[4]) for k in k15]
 
         ema9_5, ma20_5, ma50_5, ma200_5 = ema(c5,9), sma(c5,20), sma(c5,50), sma(c5,200)
         ema9_15, ma20_15, ma50_15, ma200_15 = ema(c15,9), sma(c15,20), sma(c15,50), sma(c15,200)
 
-        avg_vol5 = soma(v5[-10:]) / 10
-        avg_vol15 = soma(v15[-10:]) / 10
-        vol_ratio_5 = v5[-1] / avg_vol5 se avg_vol5 senão 0
-        vol_ratio_15 = v15[-1] / avg_vol15 se avg_vol15 senão 0
-
-        # ⚙️ Ajuste ÚNICO: exaustão 15%
-        exaustão_5 = vol_ratio_5 < 0,15
-        exaustão_15 = vol_ratio_15 < 0,15
-
-        ini_5m = índices_up(ema9_5, ma20_5) ou índices_up(ema9_5, ma50_5)
-        pre_5m = índices_up(ma20_5, ma200_5) ou índices_up(ma50_5, ma200_5)
-        pre_15m = índices_up(ema9_15, ma200_15)
-        conf_15m = índices_up(ma20_15, ma200_15) ou índices_up(ma50_15, ma200_15)
+        # ---- Cruzamentos ----
+        ini_5m = cruzamento_up(ema9_5, ma20_5) or cruzamento_up(ema9_5, ma50_5)
+        pre_5m = cruzamento_up(ma20_5, ma200_5) or cruzamento_up(ma50_5, ma200_5)
+        pre_15m = cruzamento_up(ema9_15, ma200_15)
+        conf_15m = cruzamento_up(ma20_15, ma200_15) or cruzamento_up(ma50_15, ma200_15)
 
         p = fmt(c5[-1])
         hora = nowbr()
 
-        se ini_5m e não exaustao_5:
+        if ini_5m:
             await send_msg(session, f"🟢 {symbol} ⬆️ Tendência iniciando (5m)\n💰 {p}\n🕒 {hora}")
-        se pre_5m e não exaustao_5:
+        if pre_5m:
             await send_msg(session, f"🟡 {symbol} ⬆️ Tendência pré-confirmada (5m)\n💰 {p}\n🕒 {hora}")
-        se pre_15m e não exaustao_15:
+        if pre_15m:
             await send_msg(session, f"🟡 {symbol} ⬆️ Tendência pré-confirmada (15m)\n💰 {p}\n🕒 {hora}")
-        se conf_15m e não exaustao_15:
+        if conf_15m:
             await send_msg(session, f"🚀 {symbol} ⬆️ Tendência confirmada (15m)\n💰 {p}\n🕒 {hora}")
 
-    exceto Exceção como e:
-        print(f"Erro {símbolo}:", e)
+    except Exception as e:
+        print(f"Erro {symbol}:", e)
 
+# ---------------- LOOP ----------------
 async def main_loop():
-    assíncrono com aiohttp.ClientSession() como sessão:
-        símbolos = aguardar shortlist_from_24h(sessão)
-        total = len(símbolos)
-        await send_msg(session, f"✅ v3.3_exaustao15 intrabar ativo | {total} pares SPOT | cooldown 15m | {nowbr()} 🇧🇷")
+    async with aiohttp.ClientSession() as session:
+        symbols = await shortlist_from_24h(session)
+        total = len(symbols)
+        await send_msg(session, f"✅ v3.2_limit50 intrabar ativo | {total} pares SPOT | cooldown 15m | {nowbr()} 🇧🇷")
 
-        se total == 0:
-            print("⚠️ Nenhum encontrado, revise filtros.")
-            retornar
+        if total == 0:
+            print("⚠️ Nenhum par encontrado, revise filtros.")
+            return
 
-        tarefas = [process_symbol(session, s) para s em símbolos]
-        aguarde asyncio.gather(*tarefas)
+        tasks = [process_symbol(session, s) for s in symbols]
+        await asyncio.gather(*tasks)
 
 @app.route("/")
-def casa():
-    return "Binance Alertas v3.3_exaustao15 ativo", 200
+def home():
+    return "Binance Alertas v3.2_limit50 ativo", 200
 
-se __nome__ == "__principal__":
-    encadeamento de importação
+if __name__ == "__main__":
+    import threading
 
-    def corredor():
-        enquanto Verdadeiro:
-            tentar:
-                asyncio.run(loop_principal())
-            exceto Exceção como e:
-                print("Erro de loop:", e)
-            tempo.sleep(TEMPO DE RECARGA)
+    def runner():
+        while True:
+            try:
+                asyncio.run(main_loop())
+            except Exception as e:
+                print("Loop error:", e)
+            time.sleep(COOLDOWN)
 
-    encadeamento.Thread(alvo=runner, daemon=True).start()
-    app.run(host="0.0.0.0", porta=int(os.getenv("PORTA", 10000)))
+    threading.Thread(target=runner, daemon=True).start()
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
