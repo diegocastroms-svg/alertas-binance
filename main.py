@@ -131,32 +131,34 @@ async def analyze_symbol(session, symbol, interval):
             else:
                 vol_mean20.append(sum(volumes[i - 20:i]) / 20)
 
-        # --- REVERSÃO CONFIRMADA (ajustada) ---
+        # --- REVERSÃO CONFIRMADA ---
         cruzou_ma20 = False
         cruzou_ma50 = False
-        for i in range(-3, 0):  # verifica últimas 3 velas
-            if ema9[i] and ma20[i] and ema9[i-1] and ma20[i-1]:
-                if ema9[i] > ma20[i] and ema9[i-1] <= ma20[i-1]:
+        for i in range(-3, 0):
+            if ema9[i] and ma20[i] and ema9[i - 1] and ma20[i - 1]:
+                if ema9[i] > ma20[i] and ema9[i - 1] <= ma20[i - 1]:
                     cruzou_ma20 = True
-            if ema9[i] and ma50[i] and ema9[i-1] and ma50[i-1]:
-                if ema9[i] > ma50[i] and ema9[i-1] <= ma50[i-1]:
+            if ema9[i] and ma50[i] and ema9[i - 1] and ma50[i - 1]:
+                if ema9[i] > ma50[i] and ema9[i - 1] <= ma50[i - 1]:
                     cruzou_ma50 = True
 
         if (
-            (cruzou_ma20 or cruzou_ma50) and
-            rsi14[-1] and rsi14[-1] > 50 and
-            volumes[-1] and vol_mean20[-1] and
-            volumes[-1] > 1.2 * vol_mean20[-1]
+            (cruzou_ma20 or cruzou_ma50)
+            and rsi14[-1]
+            and rsi14[-1] > 50
+            and volumes[-1]
+            and vol_mean20[-1]
+            and volumes[-1] > 1.2 * vol_mean20[-1]
         ):
             await send_alert(session, symbol, interval, "reversal")
 
         # --- EXAUSTÃO VENDEDORA ---
         body = abs(closes[-1] - opens[-1])
         if (
-            rsi14[-1] < 30 and
-            volumes[-1] < vol_mean20[-1] and
-            body < 0.5 * atr14[-1] and
-            closes[-1] < ma50[-1]
+            rsi14[-1] < 30
+            and volumes[-1] < vol_mean20[-1]
+            and body < 0.5 * atr14[-1]
+            and closes[-1] < ma50[-1]
         ):
             await send_alert(session, symbol, interval, "exhaustion")
 
@@ -164,21 +166,35 @@ async def analyze_symbol(session, symbol, interval):
         print(f"[{interval}] Erro em {symbol}: {e}")
 
 # -----------------------------
-# FILTRO DE PARES
+# FILTRO DE PARES (USDT legítimos, spot e fortes)
 # -----------------------------
 async def get_usdt_pairs(session):
     url = "https://api.binance.com/api/v3/ticker/24hr"
     async with session.get(url) as resp:
         data = await resp.json()
         pairs = []
+
         for d in data:
-            symbol = d["symbol"]
+            symbol = d["symbol"].upper()
+
+            # apenas pares spot legítimos terminando exatamente em USDT
             if (
                 symbol.endswith("USDT")
-                and not any(x in symbol for x in ["BUSD", "USDC", "FDUSD", "TUSD", "EUR"])
-                and float(d["quoteVolume"]) > 5000000
+                and symbol.count("USDT") == 1
+                and not any(x in symbol for x in ["BUSD", "USDC", "FDUSD", "TUSD", "EUR", "TRY"])
             ):
-                pairs.append(symbol)
+                try:
+                    volume_usdt = float(d.get("quoteVolume", 0))
+                    last_price = float(d.get("lastPrice", 0))
+
+                    # remove moedas fracas (baixo volume ou preço muito baixo)
+                    if volume_usdt >= 10000000 and last_price >= 0.0005:
+                        pairs.append((symbol, volume_usdt))
+                except Exception:
+                    continue
+
+        # ordena por volume e retorna top 50
+        pairs = [s for s, v in sorted(pairs, key=lambda x: x[1], reverse=True)]
         return pairs[:50]
 
 # -----------------------------
