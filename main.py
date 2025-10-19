@@ -1,13 +1,12 @@
 import os
 import asyncio
 import aiohttp
-import numpy as np
-import pandas as pd
+import math
 from flask import Flask
 from threading import Thread
 
 # -----------------------------
-# CONFIGURAÇÕES GERAIS
+# CONFIGURAÇÕES
 # -----------------------------
 BINANCE_URL = "https://api.binance.com/api/v3/klines"
 TELEGRAM_URL = f"https://api.telegram.org/bot{os.getenv('TELEGRAM_TOKEN')}/sendMessage"
@@ -32,101 +31,135 @@ def run_flask():
     app.run(host="0.0.0.0", port=port)
 
 # -----------------------------
-# FUNÇÕES DE CÁLCULO TÉCNICO
+# FUNÇÕES DE INDICADORES
 # -----------------------------
-def ema(series, period):
-    return series.ewm(span=period, adjust=False).mean()
+def ema(values, period):
+    if len(values) < period:
+        return values
+    k = 2 / (period + 1)
+    ema_values = [sum(values[:period]) / period]
+    for price in values[period:]:
+        ema_values.append(price * k + ema_values[-1] * (1 - k))
+    return [None] * (period - 1) + ema_values
 
-def ma(series, period):
-    return series.rolling(window=period).mean()
+def ma(values, period):
+    if len(values) < period:
+        return [None] * len(values)
+    ma_values = [None] * (period - 1)
+    for i in range(period - 1, len(values)):
+        window = values[i - period + 1:i + 1]
+        ma_values.append(sum(window) / period)
+    return ma_values
 
-def rsi(series, period=14):
-    delta = series.diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.rolling(period).mean()
-    avg_loss = loss.rolling(period).mean()
-    rs = avg_gain / (avg_loss + 1e-10)
-    return 100 - (100 / (1 + rs))
+def rsi(values, period=14):
+    if len(values) < period + 1:
+        return [None] * len(values)
+    rsi_values = [None] * period
+    for i in range(period, len(values)):
+        gains, losses = 0, 0
+        for j in range(i - period + 1, i + 1):
+            diff = values[j] - values[j - 1]
+            if diff > 0:
+                gains += diff
+            else:
+                losses -= diff
+        avg_gain = gains / period
+        avg_loss = losses / period if losses != 0 else 0.000001
+        rs = avg_gain / avg_loss
+        rsi_values.append(100 - (100 / (1 + rs)))
+    return rsi_values
 
-def atr(df, period=14):
-    high_low = df["high"].astype(float) - df["low"].astype(float)
-    high_close = np.abs(df["high"].astype(float) - df["close"].astype(float).shift())
-    low_close = np.abs(df["low"].astype(float) - df["close"].astype(float).shift())
-    tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
-    return tr.rolling(window=period).mean()
+def atr(highs, lows, closes, period=14):
+    trs = []
+    for i in range(1, len(closes)):
+        tr = max(
+            highs[i] - lows[i],
+            abs(highs[i] - closes[i - 1]),
+            abs(lows[i] - closes[i - 1])
+        )
+        trs.append(tr)
+    atr_values = []
+    for i in range(len(trs)):
+        if i < period:
+            atr_values.append(None)
+        else:
+            atr_values.append(sum(trs[i - period + 1:i + 1]) / period)
+    return [None] + atr_values
 
 # -----------------------------
 # TELEGRAM
 # -----------------------------
-async def send_alert(session, symbol, interval, message_type):
+async def send_alert(session, symbol, interval, alert_type):
     icons = {
         "reversal": "📈 Reversão confirmada",
         "exhaustion": "⚠️ Exaustão vendedora"
     }
-    msg = f"{icons[message_type]} ({interval}) detectada em {symbol}"
-    payload = {"chat_id": CHAT_ID, "text": msg}
+    text = f"{icons[alert_type]} ({interval}) detectada em {symbol}"
+    payload = {"chat_id": CHAT_ID, "text": text}
     async with session.post(TELEGRAM_URL, json=payload) as resp:
         await resp.text()
 
 # -----------------------------
-# BINANCE API
+# COLETA DE DADOS
 # -----------------------------
 async def fetch_klines(session, symbol, interval, limit=100):
     params = {"symbol": symbol, "interval": interval, "limit": limit}
     async with session.get(BINANCE_URL, params=params) as resp:
         data = await resp.json()
-        df = pd.DataFrame(data, columns=[
-            "time","open","high","low","close","volume","close_time",
-            "qav","trades","tbbav","tbqav","ignore"
-        ])
-        df["open"] = df["open"].astype(float)
-        df["high"] = df["high"].astype(float)
-        df["low"] = df["low"].astype(float)
-        df["close"] = df["close"].astype(float)
-        df["volume"] = df["volume"].astype(float)
-        return df
+        closes = [float(x[4]) for x in data]
+        opens = [float(x[1]) for x in data]
+        highs = [float(x[2]) for x in data]
+        lows = [float(x[3]) for x in data]
+        volumes = [float(x[5]) for x in data]
+        return opens, highs, lows, closes, volumes
 
 # -----------------------------
-# LÓGICA DE ANÁLISE
+# ANÁLISE DE CONDIÇÕES
 # -----------------------------
 async def analyze_symbol(session, symbol, interval):
     try:
-        df = await fetch_klines(session, symbol, interval)
-        if df is None or len(df) < 50:
+        opens, highs, lows, closes, volumes = await fetch_klines(session, symbol, interval)
+        if len(closes) < 50:
             return
 
-        df["ema9"] = ema(df["close"], 9)
-        df["ma20"] = ma(df["close"], 20)
-        df["ma50"] = ma(df["close"], 50)
-        df["rsi"] = rsi(df["close"], 14)
-        df["vol_mean20"] = df["volume"].rolling(20).mean()
-        df["atr14"] = atr(df, 14)
+        ema9 = ema(closes, 9)
+        ma20 = ma(closes, 20)
+        ma50 = ma(closes, 50)
+        rsi14 = rsi(closes, 14)
+        atr14 = atr(highs, lows, closes, 14)
+
+        vol_mean20 = []
+        for i in range(len(volumes)):
+            if i < 20:
+                vol_mean20.append(None)
+            else:
+                vol_mean20.append(sum(volumes[i - 20:i]) / 20)
 
         # --- REVERSÃO CONFIRMADA ---
-        cond_cross_ma20 = df["ema9"].iloc[-1] > df["ma20"].iloc[-1] and df["ema9"].iloc[-2] <= df["ma20"].iloc[-2]
-        cond_cross_ma50 = df["ema9"].iloc[-1] > df["ma50"].iloc[-1] and df["ema9"].iloc[-2] <= df["ma50"].iloc[-2]
-        cond_rsi = df["rsi"].iloc[-1] > 50
-        cond_vol = df["volume"].iloc[-1] > 1.2 * df["vol_mean20"].iloc[-1]
-
-        if cond_cross_ma20 and cond_cross_ma50 and cond_rsi and cond_vol:
+        if (
+            ema9[-1] and ma20[-1] and ma50[-1] and
+            ema9[-1] > ma20[-1] and ema9[-2] <= ma20[-2] and
+            ema9[-1] > ma50[-1] and ema9[-2] <= ma50[-2] and
+            rsi14[-1] > 50 and
+            volumes[-1] > 1.2 * vol_mean20[-1]
+        ):
             await send_alert(session, symbol, interval, "reversal")
 
         # --- EXAUSTÃO VENDEDORA ---
-        body = abs(df["close"].iloc[-1] - df["open"].iloc[-1])
-        cond_rsi_exh = df["rsi"].iloc[-1] < 30
-        cond_vol_exh = df["volume"].iloc[-1] < df["vol_mean20"].iloc[-1]
-        cond_body_exh = body < 0.5 * df["atr14"].iloc[-1]
-        cond_price_ma50 = df["close"].iloc[-1] < df["ma50"].iloc[-1]
-
-        if cond_rsi_exh and cond_vol_exh and cond_body_exh and cond_price_ma50:
+        body = abs(closes[-1] - opens[-1])
+        if (
+            rsi14[-1] < 30 and
+            volumes[-1] < vol_mean20[-1] and
+            body < 0.5 * atr14[-1] and
+            closes[-1] < ma50[-1]
+        ):
             await send_alert(session, symbol, interval, "exhaustion")
 
     except Exception as e:
         print(f"[{interval}] Erro em {symbol}: {e}")
 
 # -----------------------------
-# FILTRO DE PARES USDT
+# FILTRO DE PARES
 # -----------------------------
 async def get_usdt_pairs(session):
     url = "https://api.binance.com/api/v3/ticker/24hr"
