@@ -1,254 +1,149 @@
-# main.py — Scanner de Tendência por Cruzamentos (5m/15m) + Exaustão Vendedora
-# Foco: entrar cedo após queda -> exaustão -> cruzamentos -> confirmações
+import os
+import time
+import asyncio
+import aiohttp
+import requests
+from dotenv import load_dotenv
+from flask import Flask, request
 
-import os, math, time, asyncio, aiohttp
-from datetime import datetime, timezone
-from flask import Flask
-
-# ---------------- CONFIG ----------------
-BINANCE = "https://api.binance.com"
-INTERVALS = ["5m", "15m"]
-COOLDOWN = 15 * 60
-TOP_N = 50                 # Top-50 por volume (quoteVolume)
-MIN_QV = 1_0000.0          # filtro mínimo de volume em USDT (baixo pra não podar)
-TOKEN = os.getenv("TELEGRAM_TOKEN")
-CHAT_ID = os.getenv("CHAT_ID")
-
+# Inicializa o Flask
 app = Flask(__name__)
 
-# ---------------- UTILS ----------------
-def nowbr():
-    return datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M:%S")
+# Carrega variáveis de ambiente
+load_dotenv()
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+CHAT_ID = os.getenv("CHAT_ID")
+SYMBOL = os.getenv("SYMBOL", "WALUSDT")  # Exemplo: WALUSDT, configure no .env
+INTERVAL_5M = "5m"
+INTERVAL_15M = "15m"
+LIMIT = 50  # Candles suficientes para cálculos manuais
+BINANCE_KLINES_URL = "https://api.binance.com/api/v3/klines"
 
-def fmt(x: float) -> str:
-    return f"{x:.6f}".rstrip("0").rstrip(".")
+# Estados para rastrear fases
+current_phase = None
 
-async def tg(session, text: str):
-    if not TOKEN or not CHAT_ID:
-        print("[AVISO] TELEGRAM_TOKEN/CHAT_ID ausentes.")
-        return
-    url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
-    payload = {"chat_id": CHAT_ID, "text": text, "parse_mode": "HTML", "disable_web_page_preview": True}
-    try:
-        await session.post(url, data=payload, timeout=10)
-    except Exception as e:
-        print("Erro TG:", e)
+def calculate_sma(prices, period):
+    """Calcula a média móvel simples manualmente."""
+    if len(prices) < period:
+        return None
+    return sum(prices[-period:]) / period
 
-# ---------------- INDICADORES ----------------
-def sma(vals, p):
-    out, acc = [], 0.0
-    for i,v in enumerate(vals):
-        acc += v
-        if i >= p: acc -= vals[i-p]
-        out.append(acc / p if i+1>=p else acc/(i+1))
-    return out
+def calculate_rsi(prices, period=14):
+    """Calcula RSI aproximado manualmente (simplificado)."""
+    if len(prices) < period + 1:
+        return None
+    changes = [prices[i] - prices[i-1] for i in range(1, len(prices))]
+    gains = [max(0, x) for x in changes[-period:]]
+    losses = [-min(0, x) for x in changes[-period:]]
+    avg_gain = sum(gains) / period if sum(gains) > 0 else 0.0001
+    avg_loss = sum(losses) / period if sum(losses) > 0 else 0.0001
+    rs = avg_gain / avg_loss
+    return 100 - (100 / (1 + rs))
 
-def ema(vals, p):
-    k = 2/(p+1)
-    out = []
-    for i,v in enumerate(vals):
-        if i == 0: out.append(v)
-        else: out.append(v*k + out[-1]*(1-k))
-    return out
-
-def rsi14(closes, period=14):
-    if len(closes) < period+1: return [None]*len(closes)
-    rsis = [None]*len(closes)
-    gains = [0.0]; losses = [0.0]
-    for i in range(1,len(closes)):
-        ch = closes[i]-closes[i-1]
-        gains.append(max(ch,0.0)); losses.append(max(-ch,0.0))
-    avg_g = sum(gains[1:period+1])/period
-    avg_l = sum(losses[1:period+1])/period
-    rs = (avg_g / avg_l) if avg_l != 0 else 9999.0
-    rsis[period] = 100 - 100/(1+rs)
-    for i in range(period+1,len(closes)):
-        avg_g = (avg_g*(period-1)+gains[i])/period
-        avg_l = (avg_l*(period-1)+losses[i])/period
-        rs = (avg_g/avg_l) if avg_l != 0 else 9999.0
-        rsis[i] = 100 - 100/(1+rs)
-    return rsis
-
-def adx14(high, low, close, period=14):
-    n = len(close)
-    if n < period+1: return [None]*n
-    tr, plus_dm, minus_dm = [0.0], [0.0], [0.0]
-    for i in range(1,n):
-        tr.append(max(high[i]-low[i], abs(high[i]-close[i-1]), abs(low[i]-close[i-1])))
-        up = high[i]-high[i-1]
-        dn = low[i-1]-low[i]
-        plus_dm.append(up if (up>dn and up>0) else 0.0)
-        minus_dm.append(dn if (dn>up and dn>0) else 0.0)
-    # smoothed
-    tr14 = [sum(tr[1:period+1])]
-    pDM14 = [sum(plus_dm[1:period+1])]
-    mDM14 = [sum(minus_dm[1:period+1])]
-    for i in range(period+1,n):
-        tr14.append(tr14[-1]-tr14[-1]/period + tr[i])
-        pDM14.append(pDM14[-1]-pDM14[-1]/period + plus_dm[i])
-        mDM14.append(mDM14[-1]-mDM14[-1]/period + minus_dm[i])
-    dx = [None]*(period)  # índices até period-1
-    adx = [None]*(period*2)
-    for i in range(period+1,n):
-        ti = i-(period+1)
-        pdi = 100*(pDM14[ti]/tr14[ti]) if tr14[ti]!=0 else 0
-        mdi = 100*(mDM14[ti]/tr14[ti]) if tr14[ti]!=0 else 0
-        dx.append(100*abs(pdi-mdi)/(pdi+mdi) if (pdi+mdi)!=0 else 0)
-    if len(dx) < period*2: return [None]*n
-    first_adx = sum([d for d in dx[period:] if d is not None][:period])/period
-    adx[period*2-1] = first_adx
-    for i in range(period*2, n):
-        adx.append((adx[-1]*(period-1)+dx[i])/period if adx[-1] is not None and dx[i] is not None else None)
-    # alinhamento de tamanho
-    while len(adx)<n: adx.append(None)
-    return adx
-
-def crossed_up(a, b):
-    return a[-2] is not None and b[-2] is not None and a[-2] < b[-2] and a[-1] >= b[-1]
-
-def all_above_now(*series):
-    return all(s[-1] is not None for s in series) and all(series[i][-1] > series[i+1][-1] for i in range(len(series)-1))
-
-# ---------------- EXAUSTÃO VENDEDORA (5m) ----------------
-def seller_exhaustion(high, low, open_, close, volume):
-    """Critérios:
-       - Tendência de queda recente (média dos últimos 10 closes < média dos 10 anteriores).
-       - Vela atual bearish OU martelo com grande pavio inferior.
-       - Pavio inferior >= 1.5x corpo; volume atual >= 1.8x média(20)."""
-    n = len(close)
-    if n < 40: return False
-    last = n-1
-    m10a = sum(close[last-20:last-10])/10
-    m10b = sum(close[last-10:last])/10
-    downtrend = m10b < m10a
-    body = abs(close[-1]-open_[-1])
-    range_ = max(high[-1]-low[-1], 1e-9)
-    lower_wick = (min(open_[-1], close[-1]) - low[-1])
-    wick_ok = lower_wick >= 1.5*body and (lower_wick/range_) >= 0.55
-    vol_avg = sum(volume[-20:])/20
-    vol_ok = volume[-1] >= 1.8*vol_avg
-    return downtrend and wick_ok and vol_ok
-
-# ---------------- BINANCE ----------------
-async def get_klines(session, symbol, interval, limit=250):
-    url = f"{BINANCE}/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
-    async with session.get(url, timeout=15) as r:
-        return await r.json()
-
-async def top50_usdt_symbols(session):
-    url = f"{BINANCE}/api/v3/ticker/24hr"
-    async with session.get(url, timeout=15) as r:
-        data = await r.json()
-    rows = []
-    for d in data:
-        s = d.get("symbol","")
-        if not s.endswith("USDT"): continue
-        if any(x in s for x in ["UP","DOWN","BUSD","FDUSD","TUSD","USDC","USD1"]): continue
-        try:
-            qv = float(d["quoteVolume"])
-            rows.append((qv, s))
-        except: pass
-    rows.sort(reverse=True)
-    return [s for _,s in rows[:TOP_N]]
-
-# ---------------- ESTADO (de-dup) ----------------
-LAST_SENT = {}      # (symbol, tag) -> timestamp
-EXHAUST_LAST = {}   # symbol -> timestamp do último sinal de exaustão
-
-def can_send(key, ttl=60*60):  # 1h de proteção por evento
-    t = time.time()
-    last = LAST_SENT.get(key, 0)
-    if t - last >= ttl:
-        LAST_SENT[key] = t
-        return True
-    return False
-
-# ---------------- PROCESSAMENTO ----------------
-async def scan_symbol(session, symbol):
-    try:
-        k5  = await get_klines(session, symbol, "5m")
-        k15 = await get_klines(session, symbol, "15m")
-        if not isinstance(k5, list) or not isinstance(k15, list): return
-
-        o5  = [float(k[1]) for k in k5]
-        h5  = [float(k[2]) for k in k5]
-        l5  = [float(k[3]) for k in k5]
-        c5  = [float(k[4]) for k in k5]
-        v5  = [float(k[5]) for k in k5]
-
-        o15 = [float(k[1]) for k in k15]
-        h15 = [float(k[2]) for k in k15]
-        l15 = [float(k[3]) for k in k15]
-        c15 = [float(k[4]) for k in k15]
-        v15 = [float(k[5]) for k in k15]
-
-        # MAs
-        ema9_5   = ema(c5, 9);   ma20_5 = sma(c5,20); ma50_5 = sma(c5,50); ma200_5 = sma(c5,200)
-        ema9_15  = ema(c15,9);   ma20_15 = sma(c15,20); ma50_15 = sma(c15,50); ma200_15 = sma(c15,200)
-
-        # RSI/ADX 15m (para confirmação)
-        rsi15 = rsi14(c15,14)
-        adx15 = adx14(h15,l15,c15,14)
-
-        price = fmt(c5[-1]); hora = nowbr()
-
-        # 1) EXAUSTÃO (5m)
-        if seller_exhaustion(h5,l5,o5,c5,v5):
-            if can_send((symbol,"exaust5"), ttl=30*60):  # 30 min
-                EXHAUST_LAST[symbol] = time.time()
-                await tg(session, f"🔻 {symbol} — <b>Exaustão vendedora</b> (5m)\n💰 {price}\n🕒 {hora}")
-
-        # 2) TENDÊNCIA INICIANDO (5m): EMA9 cruza MA20/50 após exaustão/lateralização
-        ini = crossed_up(ema9_5, ma20_5) or crossed_up(ema9_5, ma50_5)
-        recently_exhausted = (time.time() - EXHAUST_LAST.get(symbol, 0) <= 60*60)  # até 1h após exaustão
-        if ini and recently_exhausted and can_send((symbol,"ini5"), ttl=60*60):
-            await tg(session, f"🟢 {symbol} ⬆️ <b>Tendência iniciando</b> (5m)\nEMA9 cruzou MA20/50 após exaustão/lateralização\n💰 {price}\n🕒 {hora}")
-
-        # 3) PRÉ-CONFIRMADA (5m): 9/20/50 cruzam acima da 200 (evento)
-        pre5_now   = ema9_5[-1] > ma200_5[-1] and ma20_5[-1] > ma200_5[-1] and ma50_5[-1] > ma200_5[-1]
-        pre5_prev  = ema9_5[-2] <= ma200_5[-2] or ma20_5[-2] <= ma200_5[-2] or ma50_5[-2] <= ma200_5[-2]
-        if pre5_now and pre5_prev and can_send((symbol,"pre5"), ttl=2*60*60):
-            await tg(session, f"🟡 {symbol} ⬆️ <b>Tendência pré-confirmada</b> (5m)\nMédias 9/20/50 acima da MA200\n💰 {price}\n🕒 {hora}")
-
-        # 4) PRÉ-CONFIRMADA (15m): EMA9 cruza MA200
-        if crossed_up(ema9_15, ma200_15) and can_send((symbol,"pre15"), ttl=2*60*60):
-            await tg(session, f"🟡 {symbol} ⬆️ <b>Tendência pré-confirmada</b> (15m)\nEMA9 cruzou MA200\n💰 {price}\n🕒 {hora}")
-
-        # 5) CONFIRMADA (15m): 9>20>50>200 + RSI>55 + ADX>25 (evento quando vira verdadeiro)
-        conf_now  = (ema9_15[-1] > ma20_15[-1] > ma50_15[-1] > ma200_15[-1]) and \
-                    (rsi15[-1] is not None and rsi15[-1] > 55) and \
-                    (adx15[-1] is not None and adx15[-1] > 25)
-        conf_prev = not ((ema9_15[-2] > ma20_15[-2] > ma50_15[-2] > ma200_15[-2]) and \
-                         (rsi15[-2] is not None and rsi15[-2] > 55) and \
-                         (adx15[-2] is not None and adx15[-2] > 25))
-        if conf_now and conf_prev and can_send((symbol,"conf15"), ttl=3*60*60):
-            await tg(session, f"🚀 {symbol} ⬆️ <b>Tendência confirmada</b> (15m)\nEMA9>MA20>MA50>MA200 + RSI>55 + ADX>25\n💰 {price}\n🕒 {hora}")
-
-    except Exception as e:
-        print(f"Erro {symbol}:", e)
-
-# ---------------- LOOP ----------------
-async def scanner_loop():
+async def fetch_klines(interval):
+    """Busca dados OHLCV da Binance."""
+    params = {"symbol": SYMBOL, "interval": interval, "limit": LIMIT}
     async with aiohttp.ClientSession() as session:
-        symbols = await top50_usdt_symbols(session)
-        await tg(session, f"✅ scanner ativo | TOP {len(symbols)} SPOT/USDT | cooldown 15m | {nowbr()} 🇧🇷")
-        tasks = [scan_symbol(session, s) for s in symbols]
-        await asyncio.gather(*tasks)
+        async with session.get(BINANCE_KLINES_URL, params=params) as response:
+            data = await response.json()
+            if isinstance(data, list):
+                closes = [float(candle[4]) for candle in data]  # Coluna 4 é o close
+                highs = [float(candle[2]) for candle in data]   # Coluna 2 é o high
+                lows = [float(candle[3]) for candle in data]    # Coluna 3 é o low
+                volumes = [float(candle[5]) for candle in data] # Coluna 5 é o volume
+                return {"closes": closes, "highs": highs, "lows": lows, "volumes": volumes}
+            return None
 
-@app.route("/")
-def home():
-    return "scanner ativo", 200
+def detect_phase(data_5m, data_15m):
+    """Detecta a fase atual com base em cálculos manuais."""
+    last_5m_close = data_5m["closes"][-1]
+    prev_5m_close = data_5m["closes"][-2]
+    last_5m_high = data_5m["highs"][-1]
+    last_5m_low = data_5m["lows"][-1]
+    last_5m_volume = data_5m["volumes"][-1]
+    sma_5m_21 = calculate_sma(data_5m["closes"], 21)
+    rsi_5m = calculate_rsi(data_5m["closes"])
+
+    last_15m_close = data_15m["closes"][-1]
+    prev_15m_close = data_15m["closes"][-2]
+    sma_15m_21 = calculate_sma(data_15m["closes"], 21)
+    rsi_15m = calculate_rsi(data_15m["closes"])
+
+    # Queda: Preço < SMA21, RSI < 40
+    if sma_5m_21 and last_5m_close < sma_5m_21 and rsi_5m and rsi_5m < 40:
+        return "queda"
+
+    # Lateralização: Range pequeno (<1% do close), RSI 40-60, volume baixo
+    range_perc = ((last_5m_high - last_5m_low) / last_5m_close) * 100
+    if range_perc < 1 and rsi_5m and 40 <= rsi_5m <= 60 and last_5m_volume < calculate_sma(data_5m["volumes"], 21):
+        return "lateralizacao"
+
+    # Exaustão vendedora: RSI < 30, close mais baixo mas RSI subindo
+    if rsi_5m and rsi_5m < 30 and last_5m_close < prev_5m_close and (not prev_5m_close or rsi_5m > calculate_rsi(data_5m["closes"][:-1])):
+        return "exaustao_vendedora"
+
+    # Tendência iniciando no 5m: SMA9 > SMA21 crossover, RSI > 50, volume up
+    sma_5m_9 = calculate_sma(data_5m["closes"], 9)
+    prev_sma_5m_9 = calculate_sma(data_5m["closes"][:-1], 9)
+    if sma_5m_9 and sma_5m_21 and prev_sma_5m_9 < sma_5m_21 and sma_5m_9 > sma_5m_21 and rsi_5m > 50 and last_5m_volume > calculate_sma(data_5m["volumes"][:-1], 21):
+        return "tendencia_iniciando_5m"
+
+    # Pré-confirmada no 5m: Close > High anterior por 3 candles
+    if last_5m_close > max(data_5m["highs"][-3:-1]) and rsi_5m > 55:
+        return "tendencia_pre_confirmada_5m"
+
+    # Pré-confirmada no 15m: SMA9 > SMA21 crossover, RSI > 50
+    sma_15m_9 = calculate_sma(data_15m["closes"], 9)
+    prev_sma_15m_9 = calculate_sma(data_15m["closes"][:-1], 9)
+    if sma_15m_9 and sma_15m_21 and prev_sma_15m_9 < sma_15m_21 and sma_15m_9 > sma_15m_21 and rsi_15m > 50:
+        return "tendencia_pre_confirmada_15m"
+
+    # Confirmada no 15m: SMA9 > SMA21, RSI > 60, volume alto
+    if sma_15m_9 and sma_15m_21 and sma_15m_9 > sma_15m_21 and rsi_15m > 60 and last_15m_volume > 1.5 * calculate_sma(data_15m["volumes"], 21):
+        return "tendencia_confirmada_15m"
+
+    return None
+
+def send_alert(phase):
+    """Envia alerta via Telegram."""
+    message = f"Alerta para {SYMBOL}: Fase detectada - {phase.upper()}. Preço atual: {data_5m['closes'][-1]}."
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    payload = {"chat_id": CHAT_ID, "text": message}
+    requests.post(url, json=payload)
+
+@app.route('/webhook', methods=['POST'])
+async def webhook():
+    """Rota para receber webhooks e processar alertas."""
+    global current_phase
+    data_5m = await fetch_klines(INTERVAL_5M)
+    data_15m = await fetch_klines(INTERVAL_15M)
+    if data_5m and data_15m:
+        new_phase = detect_phase(data_5m, data_15m)
+        if new_phase and new_phase != current_phase:
+            current_phase = new_phase
+            send_alert(new_phase)
+            return {"status": "success", "phase": new_phase}, 200
+        return {"status": "no_change", "price": data_5m["closes"][-1]}, 200
+    return {"status": "error", "message": "Dados não disponíveis"}, 500
+
+async def monitor():
+    """Loop principal para monitoramento contínuo (worker)."""
+    global current_phase
+    while True:
+        data_5m = await fetch_klines(INTERVAL_5M)
+        data_15m = await fetch_klines(INTERVAL_15M)
+        if data_5m and data_15m:
+            new_phase = detect_phase(data_5m, data_15m)
+            if new_phase and new_phase != current_phase:
+                current_phase = new_phase
+                send_alert(new_phase)
+                print(f"Alerta enviado: {new_phase}")
+        else:
+            print("Erro ao buscar dados.")
+        await asyncio.sleep(60)  # Checa a cada 1 minuto
 
 if __name__ == "__main__":
+    # Inicia o Flask na porta 1000 e o loop de monitoramento em paralelo
     import threading
-    def runner():
-        while True:
-            try:
-                asyncio.run(scanner_loop())
-            except Exception as e:
-                print("Loop error:", e)
-            time.sleep(COOLDOWN)
-
-    threading.Thread(target=runner, daemon=True).start()
-    port = int(os.getenv("PORT", 10000))
-    app.run(host="0.0.0.0", port=port)
+    threading.Thread(target=lambda: app.run(host='0.0.0.0', port=1000, debug=False), daemon=True).start()
+    asyncio.run(monitor())
