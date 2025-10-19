@@ -10,7 +10,7 @@ from threading import Thread
 # -----------------------------
 BINANCE_URL = "https://api.binance.com/api/v3/klines"
 TELEGRAM_URL = f"https://api.telegram.org/bot{os.getenv('TELEGRAM_TOKEN')}/sendMessage"
-CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+CHAT_ID = os.getenv("CHAT_ID")
 INTERVALS = ["5m", "15m"]
 
 # -----------------------------
@@ -25,10 +25,6 @@ def health():
 @app.route("/status")
 def status():
     return {"status": "running", "intervals": INTERVALS}, 200
-
-def run_flask():
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
 
 # -----------------------------
 # FUNÇÕES DE INDICADORES
@@ -194,8 +190,13 @@ async def monitor():
             await asyncio.sleep(60)
 
 # -----------------------------
-# EXECUÇÃO
+# EXECUÇÃO (corrigido para Render Web Service)
 # -----------------------------
 if __name__ == "__main__":
-    Thread(target=run_flask, daemon=True).start()
-    asyncio.run(monitor())
+    def start_monitor():
+        asyncio.run(monitor())
+
+    Thread(target=start_monitor, daemon=True).start()
+
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
