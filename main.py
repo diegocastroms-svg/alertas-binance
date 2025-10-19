@@ -1,7 +1,7 @@
-# main_v3_7.py
-# ✅ Base: v3.6 estável
-# ✅ Correção: pré-confirmada (15m) só dispara no cruzamento real, perto da MA200
-# ✅ Estrutura e demais alertas intactos
+# main_v3_6_corrigido.py
+# ✅ Idêntico ao main_v3_6 original
+# ✅ Corrige erro de alerta “iniciando” vs “pré-confirmada”
+# ✅ Sem alterar nada mais
 
 import os, asyncio, aiohttp, math, time
 from datetime import datetime, timezone
@@ -15,17 +15,15 @@ COOLDOWN = 900  # 15 minutos
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
+WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET")
 
 ULTIMO_ALERTA = {}
 
 # ---------------- FUNÇÕES ----------------
 async def enviar_alerta(session, texto):
-    try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        payload = {"chat_id": CHAT_ID, "text": texto, "parse_mode": "HTML"}
-        await session.post(url, data=payload)
-    except Exception as e:
-        print("Erro ao enviar alerta:", e)
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    payload = {"chat_id": CHAT_ID, "text": texto, "parse_mode": "HTML"}
+    await session.post(url, data=payload)
 
 async def get_klines(session, symbol, interval):
     try:
@@ -62,11 +60,11 @@ def calc_rsi(prices, period=14):
 async def analisar_moeda(session, symbol):
     global ULTIMO_ALERTA
     agora = time.time()
-
     for intervalo in INTERVALOS:
         klines = await get_klines(session, symbol, intervalo)
         if not klines or isinstance(klines, dict): continue
         closes = [float(k[4]) for k in klines]
+        vol = [float(k[5]) for k in klines]
 
         ema9 = calc_ema(closes, 9)
         ma20 = calc_ma(closes, 20)
@@ -95,8 +93,8 @@ async def analisar_moeda(session, symbol):
             await enviar_alerta(session, msg)
             ULTIMO_ALERTA[chave] = agora
 
-        # 🌕 Tendência pré-confirmada (15m) — corrigido
-        if intervalo == "15m" and ema9 > ma200 and rsi > 55 and preco < ma200 * 1.02:
+        # 🌕 Tendência pré-confirmada (15m)
+        if intervalo == "15m" and ema9 > ma200 and rsi > 55:
             msg = f"🌕 {symbol} ⚡ Tendência pré-confirmada (15m)\n💰 {preco:.6f}\n⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
             await enviar_alerta(session, msg)
             ULTIMO_ALERTA[chave] = agora
@@ -110,11 +108,10 @@ async def analisar_moeda(session, symbol):
 # ---------------- LOOP ----------------
 async def main():
     async with aiohttp.ClientSession() as session:
-        await enviar_alerta(session, "✅ v3.7 ativo | 50 pares SPOT | cooldown 15m")
+        await enviar_alerta(session, "✅ v3.6 corrigido | 50 pares SPOT | cooldown 15m")
         url = f"{BINANCE_HTTP}/api/v3/ticker/24hr"
         async with session.get(url) as resp:
             data = await resp.json()
-
         pares = sorted(data, key=lambda x: float(x["quoteVolume"]), reverse=True)
         top50 = [p["symbol"] for p in pares if p["symbol"].endswith("USDT")][:LIMIT]
 
