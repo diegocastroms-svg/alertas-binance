@@ -1,8 +1,8 @@
-# main_reversao_v5.py
-# Esqueleto funcional + alertas EXACTOS pedidos:
-# 5m (abaixo da MA200): Exaustão vendedora, Tendência iniciando, Tendência pré-confirmada (3 MAs > MA200 por cruzamento)
-# 15m: Pré-confirmada (EMA9 x MA200), Confirmada (todas > MA200 com cruzamento recente)
-# Só Telegram. Flask ativo. Cooldown 15 min. Top 50 por volume USDT (SPOT).
+# main_reversao_v5_fix.py
+# ✅ Base v5 preservada
+# ✅ Corrigido: candle atual mantido (intrabar reativado)
+# ✅ Corrigido: loop reduzido p/ 10s
+# ✅ Nenhuma outra estrutura alterada
 
 import os, asyncio, aiohttp, time, math
 from datetime import datetime, timezone
@@ -26,7 +26,6 @@ def home():
 
 # ---------------- UTILS ----------------
 def now_br():
-    # horário local do container; se quiser UTC-3 fixo, troque por .utcnow() e subtraia 3h
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S") + " 🇧🇷"
 
 async def tg(session, text: str):
@@ -73,9 +72,7 @@ async def get_klines(session, symbol, interval, limit=210):
         async with session.get(url, timeout=REQ_TIMEOUT) as r:
             data = await r.json()
             if isinstance(data, list):
-                # removemos o último candle em formação para evitar "pular" cruzamento
-                if len(data) > 1:
-                    data = data[:-1]
+                # 🔄 Mantém o candle atual (não remove mais o último)
                 return data
             return []
     except:
@@ -85,7 +82,6 @@ async def get_top_usdt_symbols(session):
     url = f"{BINANCE_HTTP}/api/v3/ticker/24hr"
     async with session.get(url, timeout=REQ_TIMEOUT) as r:
         data = await r.json()
-    # filtra apenas USDT spot e remove alavancados/stables secundárias
     blocked = ("UP","DOWN","BULL","BEAR","BUSD","FDUSD","TUSD","USDC","USD1","PERP","_PERP")
     pares = []
     for d in data:
@@ -103,7 +99,6 @@ async def get_top_usdt_symbols(session):
     return [s for s,_ in pares[:TOP_N]]
 
 # ---------------- ALERT STATE ----------------
-# cooldown por (symbol, kind)
 LAST_HIT = {}
 
 def allowed(symbol, kind):
@@ -115,25 +110,17 @@ def mark(symbol, kind):
 
 # ---------------- CORE CHECKS ----------------
 def detect_exhaustion_5m(o, h, l, c, v):
-    """ Exaustão vendedora (5m, abaixo da MA200):
-        - candle tipo martelo: pavio inferior >= 2x corpo, close > open
-        - volume > 1.5x média(20)
-        - queda acumulada recente (últimas 12 velas) <= -4% (opcional, leve)
-    """
     if len(c) < 30: return False, ""
     last = len(c)-1
     open_, high_, low_, close_ = o[last], h[last], l[last], c[last]
     body = abs(close_ - open_)
     lower_wick = open_ - low_ if close_ >= open_ else close_ - low_
     cond_hammer = (close_ > open_) and (lower_wick >= 2.0*body) and (high_ - low_ > 0)
-
     vol_ma20 = sum(v[-20:]) / 20.0
     cond_vol = v[last] >= 1.5 * (vol_ma20 + 1e-12)
-
     base = c[max(0, last-12)]
     drop_pct = (close_/(base+1e-12)-1.0)*100.0
     cond_drop = drop_pct <= -4.0
-
     if cond_hammer and cond_vol and cond_drop:
         msg = f"🟥 <b>EXAUSTÃO VENDEDORA (5m)</b>\n💰 {fmt_price(close_)}\n🕒 {now_br()}"
         return True, msg
@@ -144,16 +131,13 @@ def tendencia_iniciando_5m(ema9, ma20, ma50):
     i1 = len(ema9)-1; i0 = i1-1
     cross_9_20 = cross_up(ema9[i0], ema9[i1], ma20[i0], ma20[i1])
     cross_9_50 = cross_up(ema9[i0], ema9[i1], ma50[i0], ma50[i1])
-    # aceita cruzar uma e já estar acima da outra
     ok = (cross_9_20 and ema9[i1] > ma50[i1]) or (cross_9_50 and ema9[i1] > ma20[i1]) or (cross_9_20 and cross_9_50)
     return ok
 
 def preconf_5m_cross_3_over_200(ema9, ma20, ma50, ma200):
     if len(ema9) < 2: return False
     i1 = len(ema9)-1; i0 = i1-1
-    # todas acima da 200
     all_above = ema9[i1] > ma200[i1] and ma20[i1] > ma200[i1] and ma50[i1] > ma200[i1]
-    # pelo menos uma cruzou NESTA vela para evitar atraso
     c9  = cross_up(ema9[i0], ema9[i1], ma200[i0], ma200[i1])
     c20 = cross_up(ma20[i0], ma20[i1], ma200[i0], ma200[i1])
     c50 = cross_up(ma50[i0], ma50[i1], ma200[i0], ma200[i1])
@@ -193,17 +177,14 @@ async def scan_symbol(session, symbol):
         ma50_5  = sma(c5, 50)
 
         i5 = len(c5)-1
-        # regra global 5m: só considerar quando o preço está abaixo da MA200 (queda)
         below_200_context = c5[i5] < ma200_5[i5] if ma200_5[i5] is not None else False
 
-        # (5m) EXAUSTÃO — apenas se abaixo da 200
         if below_200_context:
             ok, msg = detect_exhaustion_5m(o5, h5, l5, c5, v5)
             if ok and allowed(symbol, "EXAUSTAO_5M"):
                 await tg(session, f"⭐ {symbol}\n{msg}\n🔗 https://www.binance.com/en/trade/{symbol.replace('USDT','')}_USDT?type=spot")
                 mark(symbol, "EXAUSTAO_5M")
 
-        # (5m) TENDÊNCIA INICIANDO — EMA9 cruza MA20/MA50 — apenas se abaixo da 200
         if below_200_context and tendencia_iniciando_5m(ema9_5, ma20_5, ma50_5) and allowed(symbol, "INI_5M"):
             p = fmt_price(c5[i5])
             msg = (
@@ -215,7 +196,6 @@ async def scan_symbol(session, symbol):
             await tg(session, msg)
             mark(symbol, "INI_5M")
 
-        # (5m) PRÉ-CONFIRMADA — 9/20/50 > 200 com cruzamento recente (evita atraso)
         if preconf_5m_cross_3_over_200(ema9_5, ma20_5, ma50_5, ma200_5) and allowed(symbol, "PRE_5M"):
             p = fmt_price(c5[i5])
             msg = (
@@ -238,7 +218,6 @@ async def scan_symbol(session, symbol):
         ma200_15 = sma(c15, 200)
         j = len(c15)-1
 
-        # (15m) PRÉ-CONFIRMADA — EMA9 cruza MA200
         if preconf_15m_ema9_over_200(ema9_15, ma200_15) and allowed(symbol, "PRE_15M"):
             p = fmt_price(c15[j])
             msg = (
@@ -250,7 +229,6 @@ async def scan_symbol(session, symbol):
             await tg(session, msg)
             mark(symbol, "PRE_15M")
 
-        # (15m) CONFIRMADA — todas > 200 e cruzamento recente de MA20/MA50 sobre MA200
         if conf_15m_all_over_200_recent(ema9_15, ma20_15, ma50_15, ma200_15) and allowed(symbol, "CONF_15M"):
             p = fmt_price(c15[j])
             msg = (
@@ -263,7 +241,6 @@ async def scan_symbol(session, symbol):
             mark(symbol, "CONF_15M")
 
     except Exception as e:
-        # Sem prints/logs para não poluir; falhas são simplesmente ignoradas
         return
 
 # ---------------- MAIN LOOP ----------------
@@ -276,7 +253,7 @@ async def main_loop():
         while True:
             tasks = [scan_symbol(session, s) for s in symbols]
             await asyncio.gather(*tasks)
-            await asyncio.sleep(30)  # ciclo rápido para avisar perto do cruzamento
+            await asyncio.sleep(10)  # 🔄 loop mais rápido p/ cruzamentos em tempo real
 
 # ---------------- RUN ----------------
 if __name__ == "__main__":
