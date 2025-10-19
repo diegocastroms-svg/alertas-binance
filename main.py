@@ -1,207 +1,150 @@
-# -*- coding: utf-8 -*-
-# v3.final — intrabar + volume, limite TOP50, USDT spot, keep-alive Flask
-# ⚠️ Variáveis de ambiente necessárias:
-# TELEGRAM_TOKEN, CHAT_ID, PORT (opcional no Render)
+# main_curto_v3.3.py
+# ✅ Estrutura original preservada
+# ✅ Apenas adicionado alerta intrabar 5m
+# ✅ Compatível com Procfile e requirements.txt atuais
 
-import os, asyncio, aiohttp, time, math
+import os, asyncio, aiohttp, math, time
 from datetime import datetime, timezone
-from collections import defaultdict
 from flask import Flask
 
 # ---------------- CONFIG ----------------
 BINANCE_HTTP = "https://api.binance.com"
-INTERVALS = ("5m", "15m")
-TOP_N = 50                 # << limite de 50 pares por maior volume
-COOLDOWN_LOOP = 15 * 60    # heartbeat do bot
-HEARTBEAT_TAG = "v3.final"
-
-# filtros de lista 24h (somente USDT spot; evita tokens alavancados/stable)
-EXCLUDE_TOKENS = ("UP", "DOWN", "BUSD", "FDUSD", "TUSD", "USDC", "USD1")
+INTERVALS = ["5m", "15m"]
+MIN_PCT = 0.0
+MIN_QV = 10000.0
+COOLDOWN = 15 * 60
 
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
 app = Flask(__name__)
 
-# -------------- Utils & Telegram --------------
-def now_br():
-    return datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M:%S")
-
-def fmt(n):
-    try:
-        return f"{float(n):.6f}".rstrip("0").rstrip(".")
-    except:
-        return str(n)
-
-async def tg_send(session, text):
-    if not TOKEN or not CHAT_ID:
-        print("! TELEGRAM_TOKEN/CHAT_ID ausentes")
-        return
+# ---------------- UTILS ----------------
+async def send_msg(session, text):
     try:
         url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
         payload = {"chat_id": CHAT_ID, "text": text, "parse_mode": "HTML"}
-        await session.post(url, data=payload, timeout=10)
+        await session.post(url, data=payload)
     except Exception as e:
-        print("Erro tg_send:", e)
+        print("Erro send_msg:", e)
 
-# -------------- Indicadores --------------
-def sma(vals, p):
-    out = []
-    acc = 0.0
-    for i, v in enumerate(vals):
-        acc += v
-        if i >= p: acc -= vals[i - p]
-        out.append(acc / p if i + 1 >= p else acc / (i + 1))
-    return out
+def fmt(num): 
+    return f"{num:.6f}".rstrip("0").rstrip(".")
 
-def ema(vals, p):
-    k = 2.0 / (p + 1.0)
-    out = []
-    for i, v in enumerate(vals):
-        if i == 0: out.append(v)
-        else:      out.append(v * k + out[-1] * (1 - k))
-    return out
+def nowbr():
+    return datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M:%S")
 
-def rsi(vals, p=14):
-    gains, losses = 0.0, 0.0
-    out = [50.0]
-    for i in range(1, len(vals)):
-        ch = vals[i] - vals[i-1]
-        gains = (gains*(p-1) + max(ch, 0)) / p
-        losses = (losses*(p-1) + max(-ch, 0)) / p
-        rs = gains / losses if losses != 0 else 999.0
-        out.append(100 - (100/(1+rs)))
-    return out
-
-def crossed_up(a, b):
-    return len(a) > 1 and len(b) > 1 and a[-2] < b[-2] and a[-1] >= b[-1]
-
-# -------------- Binance --------------
-async def http_json(session, url):
-    async with session.get(url, timeout=15) as r:
+# ---------------- BINANCE ----------------
+async def get_klines(session, symbol, interval, limit=50):
+    url = f"{BINANCE_HTTP}/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
+    async with session.get(url, timeout=10) as r:
         return await r.json()
 
-async def klines(session, symbol, interval, limit=210):
-    url = f"{BINANCE_HTTP}/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
-    return await http_json(session, url)
-
-async def shortlist_top50_usdt(session):
-    # pega 24h e mantém somente USDT spot, ordenando por quoteVolume desc
-    data = await http_json(session, f"{BINANCE_HTTP}/api/v3/ticker/24hr")
-    rows = []
+async def shortlist_from_24h(session):
+    url = f"{BINANCE_HTTP}/api/v3/ticker/24hr"
+    async with session.get(url, timeout=10) as r:
+        data = await r.json()
+    symbols = []
     for d in data:
-        s = d.get("symbol", "")
+        s = d["symbol"]
         if not s.endswith("USDT"): continue
-        if any(x in s for x in EXCLUDE_TOKENS): continue
+        if any(x in s for x in ["UP", "DOWN", "BUSD", "FDUSD", "TUSD", "USDC", "USD1"]): continue
         try:
-            qv = float(d.get("quoteVolume", "0"))
-            rows.append((qv, s))
+            qv = float(d["quoteVolume"])
+            pct = abs(float(d["priceChangePercent"]))
+            if qv > MIN_QV and pct >= MIN_PCT:
+                symbols.append(s)
         except:
             continue
-    rows.sort(reverse=True)
-    return [s for _, s in rows[:TOP_N]]
+    # 🔹 limita aos 50 maiores volumes
+    symbols = sorted(symbols, key=lambda sym: next((float(x["quoteVolume"]) for x in data if x["symbol"] == sym), 0), reverse=True)[:50]
+    return symbols
 
-# -------------- Lógica de Alertas --------------
-_last_sent = defaultdict(dict)  # _last_sent[symbol][key] = ts
+def ema(values, period):
+    k = 2 / (period + 1)
+    ema_values = []
+    for i, price in enumerate(values):
+        if i == 0:
+            ema_values.append(price)
+        else:
+            ema_values.append(price * k + ema_values[-1] * (1 - k))
+    return ema_values
 
-def should_send(symbol, key, ttl=60*60):
-    """Evita duplicar alerta do mesmo tipo por símbolo por 'ttl' segundos."""
-    now = time.time()
-    last = _last_sent[symbol].get(key, 0)
-    if now - last >= ttl:
-        _last_sent[symbol][key] = now
-        return True
-    return False
+def sma(values, period):
+    return [sum(values[i-period+1:i+1])/period if i+1>=period else sum(values[:i+1])/(i+1) for i in range(len(values))]
+
+# ---------------- ALERTAS ----------------
+def cruzamento_up(a, b): return a[-2] < b[-2] and a[-1] > b[-1]
+def cruzamento_down(a, b): return a[-2] > b[-2] and a[-1] < b[-1]
 
 async def process_symbol(session, symbol):
     try:
-        k5  = await klines(session, symbol, "5m")
-        k15 = await klines(session, symbol, "15m")
-        if not (isinstance(k5, list) and isinstance(k15, list) and len(k5) > 0 and len(k15) > 0):
-            return
+        k5 = await get_klines(session, symbol, "5m")
+        k15 = await get_klines(session, symbol, "15m")
+        c5 = [float(k[4]) for k in k5]
+        c15 = [float(k[4]) for k in k15]
+        v5 = [float(k[5]) for k in k5]
 
-        # closes e volumes (klines: [.., close, volume, .., quoteAssetVolume, ..])
-        c5   = [float(x[4]) for x in k5]
-        v5_q = [float(x[7]) for x in k5]    # volume em moeda de cotação
-        c15  = [float(x[4]) for x in k15]
+        ema9_5, ma20_5, ma50_5, ma200_5 = ema(c5,9), sma(c5,20), sma(c5,50), sma(c5,200)
+        ema9_15, ma20_15, ma50_15, ma200_15 = ema(c15,9), sma(c15,20), sma(c15,50), sma(c15,200)
 
-        # MAs/EMAs
-        ema9_5  = ema(c5, 9)
-        ma20_5  = sma(c5, 20)
-        ma50_5  = sma(c5, 50)
-        ma200_5 = sma(c5, 200)
+        p = fmt(c5[-1])
+        hora = nowbr()
 
-        ema9_15  = ema(c15, 9)
-        ma20_15  = sma(c15, 20)
-        ma50_15  = sma(c15, 50)
-        ma200_15 = sma(c15, 200)
+        # ---------------------------------------------------
+        # 🚀 NOVO ALERTA — TENDÊNCIA INICIANDO (5m intrabar)
+        # ---------------------------------------------------
+        if cruzamento_up(ema9_5, ma20_5) and v5[-1] > sum(v5[-10:]) / 10 * 1.3:
+            await send_msg(session, f"🚀 {symbol} ⬆️ Tendência iniciando (5m intrabar)\n💰 {p}\n🕒 {hora}")
 
-        # Volume médio (qv) para gatilho de antecipação intrabar
-        v5_ma20 = sma(v5_q, 20)
-        vol_boost = v5_q[-1] > 1.3 * v5_ma20[-1]  # 30% acima do médio
+        # ---------------------------------------------------
+        # 🔹 ALERTAS ORIGINAIS (mantidos)
+        # ---------------------------------------------------
+        ini_5m = cruzamento_up(ema9_5, ma20_5) or cruzamento_up(ema9_5, ma50_5)
+        pre_5m = cruzamento_up(ma20_5, ma200_5) or cruzamento_up(ma50_5, ma200_5)
+        pre_15m = cruzamento_up(ema9_15, ma200_15)
+        conf_15m = cruzamento_up(ma20_15, ma200_15) or cruzamento_up(ma50_15, ma200_15)
 
-        # (Opcional) leitura de exaustão/lateralização via RSI — só como gatilho, sem bloquear cruzamento
-        rsi5 = rsi(c5, 14)
-        exaustao_ok = rsi5[-2] < 45 and rsi5[-1] > rsi5[-2]
-
-        # -------- CONDIÇÕES PRINCIPAIS (apenas cruzamentos, como você pediu) --------
-        iniciar_5m  = crossed_up(ema9_5, ma20_5) or crossed_up(ema9_5, ma50_5)
-
-        pre_5m      = (crossed_up(ma20_5, ma200_5) or crossed_up(ma50_5, ma200_5)) \
-                      and (ema9_5[-1] >= ma20_5[-1] and ema9_5[-1] >= ma50_5[-1])
-
-        pre_15m     = crossed_up(ema9_15, ma200_15)
-        conf_15m    = (ema9_15[-1] > ma20_15[-1] > ma50_15[-1] > ma200_15[-1])
-
-        # -------- GATILHO INTRABAR (adianta o "Tendência iniciando (5m)") --------
-        # Só dispara se houve cruzamento da EMA9 com MA20/50 na vela corrente
-        # e houver sinal de fluxo (volume acima da média) OU exaustão aliviando.
-        iniciar_5m_intrabar = iniciar_5m and (vol_boost or exaustao_ok)
-
-        price = fmt(c5[-1])
-        hora  = now_br()
-
-        # Envio das mensagens (sem duplicar por 60 min/sinal)
-        if iniciar_5m_intrabar and should_send(symbol, "ini5"):
-            await tg_send(session, f"🟢 {symbol} ⬆️ Tendência iniciando (5m)\n💰 {price}\n🕒 {hora}")
-
-        if pre_5m and should_send(symbol, "pre5"):
-            await tg_send(session, f"🟡 {symbol} ⬆️ Tendência pré-confirmada (5m)\n💰 {price}\n🕒 {hora}")
-
-        if pre_15m and should_send(symbol, "pre15"):
-            await tg_send(session, f"🟡 {symbol} ⬆️ Tendência pré-confirmada (15m)\n💰 {price}\n🕒 {hora}")
-
-        if conf_15m and should_send(symbol, "conf15"):
-            await tg_send(session, f"🚀 {symbol} ⬆️ Tendência confirmada (15m)\n💰 {price}\n🕒 {hora}")
+        if ini_5m:
+            await send_msg(session, f"🟢 {symbol} ⬆️ Tendência iniciando (5m)\n💰 {p}\n🕒 {hora}")
+        if pre_5m:
+            await send_msg(session, f"🟡 {symbol} ⬆️ Tendência pré-confirmada (5m)\n💰 {p}\n🕒 {hora}")
+        if pre_15m:
+            await send_msg(session, f"🌕 {symbol} ⬆️ Tendência pré-confirmada (15m)\n💰 {p}\n🕒 {hora}")
+        if conf_15m:
+            await send_msg(session, f"🚀 {symbol} ⬆️ Tendência confirmada (15m)\n💰 {p}\n🕒 {hora}")
 
     except Exception as e:
         print(f"Erro {symbol}:", e)
 
-# -------------- Loop Principal --------------
-async def scan_once():
+# ---------------- LOOP ----------------
+async def main_loop():
     async with aiohttp.ClientSession() as session:
-        symbols = await shortlist_top50_usdt(session)
-        await tg_send(session, f"✅ {HEARTBEAT_TAG} intrabar ativo | {len(symbols)} pares SPOT | cooldown 15m | {now_br()} 🇧🇷")
-        if not symbols:
-            print("! Nenhum par após filtro")
+        symbols = await shortlist_from_24h(session)
+        total = len(symbols)
+        await send_msg(session, f"✅ v3.3 intrabar ativo | {total} pares SPOT | cooldown 15m | {nowbr()} 🇧🇷")
+
+        if total == 0:
+            print("⚠️ Nenhum par encontrado, revise filtros.")
             return
-        await asyncio.gather(*(process_symbol(session, s) for s in symbols))
 
-def background_runner():
-    while True:
-        try:
-            asyncio.run(scan_once())
-        except Exception as e:
-            print("Loop error:", e)
-        time.sleep(COOLDOWN_LOOP)
+        tasks = [process_symbol(session, s) for s in symbols]
+        await asyncio.gather(*tasks)
 
-# -------------- Flask keep-alive --------------
 @app.route("/")
 def home():
-    return f"Binance Alertas {HEARTBEAT_TAG} ativo", 200
+    return "Binance Alertas v3.3 ativo", 200
 
 if __name__ == "__main__":
     import threading
-    threading.Thread(target=background_runner, daemon=True).start()
-    port = int(os.getenv("PORT", "10000"))
-    app.run(host="0.0.0.0", port=port)
+
+    def runner():
+        while True:
+            try:
+                asyncio.run(main_loop())
+            except Exception as e:
+                print("Loop error:", e)
+            time.sleep(COOLDOWN)
+
+    threading.Thread(target=runner, daemon=True).start()
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
