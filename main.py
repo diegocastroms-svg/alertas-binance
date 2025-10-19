@@ -1,131 +1,383 @@
-# main_curto_v3.3_exaustao15.py
-# ✅ Igual ao v3.3 anterior
-# ✅ Única modificação: volume_ratio < 0.15 (antes era < 0.25)
-# ✅ Nenhuma outra linha alterada
+# main.py
+# ATLAS – Binance SPOT intrabar MA cross alerts (USDT pairs)
+# - Timeframes: 5m and 15m
+# - Top 50 symbols by 24h quote volume (USDT only), excluding UP/DOWN/BULL/BEAR/PERP and non-USDT quotes
+# - Indicators: EMA 9; SMA 20, 50, 200
+# - Intrabar: detects crossovers using the current (live) candle close via REST polling
+# - Telegram alerts with 15-minute cooldown per (symbol, alert-type)
+# - Clean code, English, Render-ready
+#
+# Env vars required:
+#   TELEGRAM_BOT_TOKEN
+#   TELEGRAM_CHAT_ID
+# Optional:
+#   BINANCE_BASE (default: https://api.binance.com)
+#   POLL_SECONDS (default: 10)
+#   TOP_N (default: 50)
+#
+# Notes:
+# - Uses only moving average crossovers as requested.
+# - Alerts are independent and fire exactly at the crossover moment (intrabar, no candle close wait).
+# - Excludes tokens with UP, DOWN, BULL, BEAR, PERP and non-USDT quotes (also excludes BUSD, FDUSD, TUSD, USDC by design).
+# - Designed to run as a long-lived worker on Render.
 
-import os, asyncio, aiohttp, math, time
+import os
+import time
+import math
+import json
+import queue
+import atexit
+import signal
+import logging
+import threading
 from datetime import datetime, timezone
-from flask import Flask
+from zoneinfo import ZoneInfo
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
-BINANCE_HTTP = "https://api.binance.com"
-INTERVALS = ["5m", "15m"]
-MIN_PCT = 0.0
-MIN_QV = 10000.0
-COOLDOWN = 15 * 60
+import requests
 
-TOKEN = os.getenv("TELEGRAM_TOKEN")
-CHAT_ID = os.getenv("CHAT_ID")
+# ---------------------------- Config ----------------------------
 
-app = Flask(__name__)
+BINANCE_BASE = os.getenv("BINANCE_BASE", "https://api.binance.com").rstrip("/")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
 
-async def send_msg(session, text):
+TOP_N = int(os.getenv("TOP_N", "50"))
+POLL_SECONDS = int(os.getenv("POLL_SECONDS", "10"))  # keep >=10 to be gentle with limits
+TIMEZONE = ZoneInfo("America/Sao_Paulo")
+VERSION = "v3.3"
+
+# HTTP
+HTTP_TIMEOUT = (5, 15)  # (connect, read)
+SESSION = requests.Session()
+
+# Threads
+MAX_WORKERS = max(8, min(32, os.cpu_count() or 8))
+
+# Logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s.%(msecs)03dZ %(levelname)s %(message)s",
+    datefmt="%Y-%m-%dT%H:%M:%S",
+)
+logging.getLogger("urllib3").setLevel(logging.WARNING)
+
+# Cooldown (seconds)
+COOLDOWN = 15 * 60  # 15 minutes
+
+# Klines needed to compute MAs up to 200 periods and compare t-1 vs t
+KLIMIT = 210  # a little headroom for stability
+
+# ---------------------- Utility Functions ----------------------
+
+def now_br_dt() -> datetime:
+    return datetime.now(tz=TIMEZONE)
+
+def now_br_str() -> str:
+    return now_br_dt().strftime("%Y-%m-%d %H:%M:%S")
+
+def tg_send(text: str) -> None:
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        logging.warning("Telegram env vars missing; message skipped.")
+        return
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     try:
-        url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
-        payload = {"chat_id": CHAT_ID, "text": text, "parse_mode": "HTML"}
-        await session.post(url, data=payload)
+        resp = SESSION.post(url, timeout=HTTP_TIMEOUT, json={
+            "chat_id": TELEGRAM_CHAT_ID,
+            "text": text,
+            "disable_web_page_preview": True,
+            "parse_mode": "HTML",
+        })
+        if resp.status_code != 200:
+            logging.warning("Telegram send failed: %s %s", resp.status_code, resp.text)
     except Exception as e:
-        print("Erro send_msg:", e)
+        logging.exception("Telegram send exception: %s", e)
 
-def fmt(num): return f"{num:.6f}".rstrip("0").rstrip(".")
+def http_get(path: str, params: dict | None = None):
+    url = f"{BINANCE_BASE}{path}"
+    r = SESSION.get(url, params=params or {}, timeout=HTTP_TIMEOUT)
+    r.raise_for_status()
+    return r.json()
 
-def nowbr():
-    return datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M:%S")
+def is_excluded_symbol(symbol: str) -> bool:
+    # Exclude leveraged/derivative-like and non-spot tickers
+    # Also exclude any non-USDT quoted pairs (we filter for USDT anyway)
+    bad_substrings = ("UP", "DOWN", "BULL", "BEAR", "PERP")
+    # Exclude if ends with other stable quotes (defensive)
+    bad_quotes = ("BUSD", "FDUSD", "TUSD", "USDC")
+    if not symbol.endswith("USDT"):
+        return True
+    if any(b in symbol for b in bad_substrings):
+        return True
+    if any(symbol.endswith(bq) for bq in bad_quotes):
+        return True
+    return False
 
-async def get_klines(session, symbol, interval, limit=50):
-    url = f"{BINANCE_HTTP}/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
-    async with session.get(url, timeout=10) as r:
-        return await r.json()
+# ---------------------- Symbol Universe ------------------------
 
-async def shortlist_from_24h(session):
-    url = f"{BINANCE_HTTP}/api/v3/ticker/24hr"
-    async with session.get(url, timeout=10) as r:
-        data = await r.json()
-    filtered = [d for d in data if d["symbol"].endswith("USDT") and all(x not in d["symbol"] for x in ["UP", "DOWN", "BUSD", "FDUSD", "TUSD", "USDC", "USD1"])]
-    sorted_pairs = sorted(filtered, key=lambda x: float(x["quoteVolume"]), reverse=True)
-    return [d["symbol"] for d in sorted_pairs[:50]]
+def fetch_top_usdt_symbols(top_n: int) -> list[str]:
+    """
+    Get top-N USDT spot symbols by 24h quoteVolume, excluding unwanted tokens.
+    """
+    # Fetch 24h tickers
+    tickers = http_get("/api/v3/ticker/24hr")
+    # Filter only USDT quote, exclude unwanted, keep TRADING from exchangeInfo
+    exchange_info = http_get("/api/v3/exchangeInfo")
+    status_map = {}
+    for s in exchange_info.get("symbols", []):
+        status_map[s["symbol"]] = s.get("status") == "TRADING"
 
-def ema(values, period):
-    k = 2 / (period + 1)
-    ema_values = []
-    for i, price in enumerate(values):
-        if i == 0: ema_values.append(price)
-        else: ema_values.append(price * k + ema_values[-1] * (1 - k))
-    return ema_values
+    candidates = []
+    for t in tickers:
+        sym = t.get("symbol", "")
+        if is_excluded_symbol(sym):
+            continue
+        if not status_map.get(sym, False):
+            continue
+        try:
+            qv = float(t.get("quoteVolume", "0"))
+        except Exception:
+            qv = 0.0
+        candidates.append((sym, qv))
 
-def sma(values, period):
-    return [sum(values[i-period+1:i+1])/period if i+1>=period else sum(values[:i+1])/(i+1) for i in range(len(values))]
+    candidates.sort(key=lambda x: x[1], reverse=True)
+    top = [s for s, _ in candidates[:top_n]]
+    return top
 
-def cruzamento_up(a, b): return a[-2] < b[-2] and a[-1] > b[-1]
-def cruzamento_down(a, b): return a[-2] > b[-2] and a[-1] < b[-1]
+# ---------------------- Indicators -----------------------------
 
-async def process_symbol(session, symbol):
+def sma(values: list[float], length: int) -> list[float]:
+    out = [math.nan] * len(values)
+    if length <= 0 or len(values) < length:
+        return out
+    csum = 0.0
+    for i, v in enumerate(values):
+        csum += v
+        if i >= length:
+            csum -= values[i - length]
+        if i >= length - 1:
+            out[i] = csum / length
+    return out
+
+def ema(values: list[float], length: int) -> list[float]:
+    out = [math.nan] * len(values)
+    if length <= 0 or len(values) < length:
+        return out
+    k = 2.0 / (length + 1.0)
+    # seed with SMA of first 'length' values
+    seed = sum(values[:length]) / length
+    out[length - 1] = seed
+    for i in range(length, len(values)):
+        out[i] = values[i] * k + out[i - 1] * (1.0 - k)
+    return out
+
+def crossed_up(prev_a: float, prev_b: float, curr_a: float, curr_b: float) -> bool:
+    if math.isnan(prev_a) or math.isnan(prev_b) or math.isnan(curr_a) or math.isnan(curr_b):
+        return False
+    return prev_a <= prev_b and curr_a > curr_b
+
+# ---------------------- Klines / Prices ------------------------
+
+def fetch_klines(symbol: str, interval: str, limit: int = KLIMIT) -> list[list]:
+    """
+    Returns raw kline arrays as per Binance API:
+    [
+      [
+        openTime, open, high, low, close, volume,
+        closeTime, quoteAssetVolume, trades, takerBaseVol, takerQuoteVol, ignore
+      ],
+      ...
+    ]
+    """
+    return http_get("/api/v3/klines", params={
+        "symbol": symbol,
+        "interval": interval,
+        "limit": limit,
+    })
+
+def parse_closes(klines: list[list]) -> list[float]:
+    closes = []
+    for k in klines:
+        try:
+            closes.append(float(k[4]))
+        except Exception:
+            closes.append(math.nan)
+    return closes
+
+def last_price_from_klines(klines: list[list]) -> float | None:
+    if not klines:
+        return None
     try:
-        k5 = await get_klines(session, symbol, "5m")
-        k15 = await get_klines(session, symbol, "15m")
-        c5 = [float(k[4]) for k in k5]
-        c15 = [float(k[4]) for k in k15]
-        v5 = [float(k[5]) for k in k5]
-        v15 = [float(k[5]) for k in k15]
+        return float(klines[-1][4])
+    except Exception:
+        return None
 
-        ema9_5, ma20_5, ma50_5, ma200_5 = ema(c5,9), sma(c5,20), sma(c5,50), sma(c5,200)
-        ema9_15, ma20_15, ma50_15, ma200_15 = ema(c15,9), sma(c15,20), sma(c15,50), sma(c15,200)
+# ---------------------- Alert Engine ---------------------------
 
-        avg_vol5 = sum(v5[-10:]) / 10
-        avg_vol15 = sum(v15[-10:]) / 10
-        vol_ratio_5 = v5[-1] / avg_vol5 if avg_vol5 else 0
-        vol_ratio_15 = v15[-1] / avg_vol15 if avg_vol15 else 0
+class AlertCooldown:
+    def __init__(self, seconds: int):
+        self.seconds = seconds
+        self._last: dict[tuple[str, str], float] = {}
+        self._lock = threading.Lock()
 
-        # ⚙️ Ajuste ÚNICO: exaustão 15%
-        exaustao_5 = vol_ratio_5 < 0.15
-        exaustao_15 = vol_ratio_15 < 0.15
+    def ready(self, symbol: str, alert_key: str) -> bool:
+        key = (symbol, alert_key)
+        now = time.time()
+        with self._lock:
+            ts = self._last.get(key, 0.0)
+            return (now - ts) >= self.seconds
 
-        ini_5m = cruzamento_up(ema9_5, ma20_5) or cruzamento_up(ema9_5, ma50_5)
-        pre_5m = cruzamento_up(ma20_5, ma200_5) or cruzamento_up(ma50_5, ma200_5)
-        pre_15m = cruzamento_up(ema9_15, ma200_15)
-        conf_15m = cruzamento_up(ma20_15, ma200_15) or cruzamento_up(ma50_15, ma200_15)
+    def stamp(self, symbol: str, alert_key: str) -> None:
+        key = (symbol, alert_key)
+        with self._lock:
+            self._last[key] = time.time()
 
-        p = fmt(c5[-1])
-        hora = nowbr()
+cooldown = AlertCooldown(COOLDOWN)
 
-        if ini_5m and not exaustao_5:
-            await send_msg(session, f"🟢 {symbol} ⬆️ Tendência iniciando (5m)\n💰 {p}\n🕒 {hora}")
-        if pre_5m and not exaustao_5:
-            await send_msg(session, f"🟡 {symbol} ⬆️ Tendência pré-confirmada (5m)\n💰 {p}\n🕒 {hora}")
-        if pre_15m and not exaustao_15:
-            await send_msg(session, f"🟡 {symbol} ⬆️ Tendência pré-confirmada (15m)\n💰 {p}\n🕒 {hora}")
-        if conf_15m and not exaustao_15:
-            await send_msg(session, f"🚀 {symbol} ⬆️ Tendência confirmada (15m)\n💰 {p}\n🕒 {hora}")
+def format_alert(symbol: str, label: str, price: float) -> str:
+    # Labels and emojis:
+    # 🟢 Trend starting (5m)
+    # 🟡 Pre-confirmed trend (5m/15m)
+    # 🚀 Confirmed trend (15m)
+    lines = [
+        f"{label} {symbol} ⬆️",
+        f"💰 {price}",
+        f"🕒 {now_br_str()}",
+    ]
+    # Reorder to match examples: first line with emoji before symbol text
+    # Examples given are in Portuguese; we keep content as requested (Portuguese messages).
+    return "\n".join(lines)
 
+def send_status(start_count: int):
+    msg = f"✅ {VERSION} intrabar ativo | {start_count} pares SPOT | cooldown 15m | {now_br_str()} 🇧🇷"
+    tg_send(msg)
+    logging.info("Status sent: %s", msg)
+
+def check_alerts_for_symbol(symbol: str, interval: str) -> None:
+    """
+    Pull klines, compute indicators, detect crossovers (intrabar), send alerts if any.
+    """
+    try:
+        kl = fetch_klines(symbol, interval, KLIMIT)
     except Exception as e:
-        print(f"Erro {symbol}:", e)
+        logging.warning("Klines error %s %s: %s", symbol, interval, e)
+        return
 
-async def main_loop():
-    async with aiohttp.ClientSession() as session:
-        symbols = await shortlist_from_24h(session)
-        total = len(symbols)
-        await send_msg(session, f"✅ v3.3_exaustao15 intrabar ativo | {total} pares SPOT | cooldown 15m | {nowbr()} 🇧🇷")
+    closes = parse_closes(kl)
+    if len(closes) < 200 + 2:
+        return
 
-        if total == 0:
-            print("⚠️ Nenhum par encontrado, revise filtros.")
-            return
+    # Indicators
+    ema9  = ema(closes, 9)
+    ma20  = sma(closes, 20)
+    ma50  = sma(closes, 50)
+    ma200 = sma(closes, 200)
 
-        tasks = [process_symbol(session, s) for s in symbols]
-        await asyncio.gather(*tasks)
+    i_prev = len(closes) - 2
+    i_curr = len(closes) - 1
 
-@app.route("/")
-def home():
-    return "Binance Alertas v3.3_exaustao15 ativo", 200
+    price = last_price_from_klines(kl)
+    if price is None or math.isnan(ema9[i_curr]) or math.isnan(ma200[i_curr]):
+        return
+
+    # Alert keys (cooldown buckets)
+    # INIT_5M, PRE_5M, PRE_15M, CONF_15M
+    if interval == "5m":
+        # 🟢 Trend starting (5m): EMA9 crosses up MA20 and/or MA50
+        trig_init = (
+            crossed_up(ema9[i_prev], ma20[i_prev], ema9[i_curr], ma20[i_curr]) or
+            crossed_up(ema9[i_prev], ma50[i_prev], ema9[i_curr], ma50[i_curr])
+        )
+        if trig_init and cooldown.ready(symbol, "INIT_5M"):
+            text = "🟢 " + f"{symbol} ⬆️ Tendência iniciando (5m)\n" + f"💰 {price}\n" + f"🕒 {now_br_str()}"
+            tg_send(text)
+            cooldown.stamp(symbol, "INIT_5M")
+            logging.info("Alert INIT_5M %s %s", symbol, price)
+
+        # 🟡 Pre-confirmed (5m): MA20 and/or MA50 cross up MA200 (independent triggers)
+        trig_pre5 = (
+            crossed_up(ma20[i_prev], ma200[i_prev], ma20[i_curr], ma200[i_curr]) or
+            crossed_up(ma50[i_prev], ma200[i_prev], ma50[i_curr], ma200[i_curr])
+        )
+        if trig_pre5 and cooldown.ready(symbol, "PRE_5M"):
+            text = "🟡 " + f"{symbol} ⬆️ Tendência pré-confirmada (5m)\n" + f"💰 {price}\n" + f"🕒 {now_br_str()}"
+            tg_send(text)
+            cooldown.stamp(symbol, "PRE_5M")
+            logging.info("Alert PRE_5M %s %s", symbol, price)
+
+    elif interval == "15m":
+        # 🟡 Pre-confirmed (15m): EMA9 crosses up MA200
+        trig_pre15 = crossed_up(ema9[i_prev], ma200[i_prev], ema9[i_curr], ma200[i_curr])
+        if trig_pre15 and cooldown.ready(symbol, "PRE_15m"):
+            text = "🟡 " + f"{symbol} ⬆️ Tendência pré-confirmada (15m)\n" + f"💰 {price}\n" + f"🕒 {now_br_str()}"
+            tg_send(text)
+            cooldown.stamp(symbol, "PRE_15m")
+            logging.info("Alert PRE_15m %s %s", symbol, price)
+
+        # 🚀 Confirmed (15m): MA20 and/or MA50 cross up MA200
+        trig_conf15 = (
+            crossed_up(ma20[i_prev], ma200[i_prev], ma20[i_curr], ma200[i_curr]) or
+            crossed_up(ma50[i_prev], ma200[i_prev], ma50[i_curr], ma200[i_curr])
+        )
+        if trig_conf15 and cooldown.ready(symbol, "CONF_15m"):
+            text = "🚀 " + f"{symbol} ⬆️ Tendência confirmada (15m)\n" + f"💰 {price}\n" + f"🕒 {now_br_str()}"
+            tg_send(text)
+            cooldown.stamp(symbol, "CONF_15m")
+            logging.info("Alert CONF_15m %s %s", symbol, price)
+
+# ---------------------- Worker Loop ----------------------------
+
+_stop_event = threading.Event()
+
+def handle_signals():
+    def _sig(_s, _f):
+        logging.info("Signal received, stopping...")
+        _stop_event.set()
+    signal.signal(signal.SIGINT, _sig)
+    signal.signal(signal.SIGTERM, _sig)
+
+def poll_cycle(symbols: list[str], interval: str):
+    # Threaded fetch+check per symbol for this interval
+    work = []
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
+        for sym in symbols:
+            work.append(ex.submit(check_alerts_for_symbol, sym, interval))
+        for _ in as_completed(work):
+            pass
+
+def main():
+    logging.info("Starting ATLAS %s", VERSION)
+    handle_signals()
+
+    try:
+        symbols = fetch_top_usdt_symbols(TOP_N)
+    except Exception as e:
+        logging.exception("Failed to fetch top symbols: %s", e)
+        symbols = []
+
+    if not symbols:
+        logging.error("No symbols to monitor. Exiting.")
+        return
+
+    # Initial status message
+    send_status(len(symbols))
+
+    # Main loop
+    while not _stop_event.is_set():
+        t0 = time.time()
+        try:
+            # 5m first, then 15m
+            poll_cycle(symbols, "5m")
+            poll_cycle(symbols, "15m")
+        except Exception as e:
+            logging.exception("Poll cycle error: %s", e)
+
+        elapsed = time.time() - t0
+        sleep_s = max(0.0, POLL_SECONDS - elapsed)
+        if sleep_s > 0:
+            _stop_event.wait(timeout=sleep_s)
+
+    logging.info("Stopped.")
 
 if __name__ == "__main__":
-    import threading
-
-    def runner():
-        while True:
-            try:
-                asyncio.run(main_loop())
-            except Exception as e:
-                print("Loop error:", e)
-            time.sleep(COOLDOWN)
-
-    threading.Thread(target=runner, daemon=True).start()
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
+    main()
