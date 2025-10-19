@@ -131,14 +131,21 @@ async def analyze_symbol(session, symbol, interval):
             else:
                 vol_mean20.append(sum(volumes[i - 20:i]) / 20)
 
-        # --- REVERSÃO CONFIRMADA (corrigida) ---
+        # --- REVERSÃO CONFIRMADA (ajustada) ---
+        cruzou_ma20 = False
+        cruzou_ma50 = False
+        for i in range(-3, 0):  # verifica últimas 3 velas
+            if ema9[i] and ma20[i] and ema9[i-1] and ma20[i-1]:
+                if ema9[i] > ma20[i] and ema9[i-1] <= ma20[i-1]:
+                    cruzou_ma20 = True
+            if ema9[i] and ma50[i] and ema9[i-1] and ma50[i-1]:
+                if ema9[i] > ma50[i] and ema9[i-1] <= ma50[i-1]:
+                    cruzou_ma50 = True
+
         if (
-            ema9[-1] is not None and ma20[-1] is not None and ma50[-1] is not None and
-            (
-                (ema9[-1] > ma20[-1] and ema9[-2] <= ma20[-2]) or
-                (ema9[-1] > ma50[-1] and ema9[-2] <= ma50[-2])
-            ) and
-            rsi14[-1] > 50 and
+            (cruzou_ma20 or cruzou_ma50) and
+            rsi14[-1] and rsi14[-1] > 50 and
+            volumes[-1] and vol_mean20[-1] and
             volumes[-1] > 1.2 * vol_mean20[-1]
         ):
             await send_alert(session, symbol, interval, "reversal")
@@ -192,7 +199,7 @@ async def monitor():
             await asyncio.sleep(60)
 
 # -----------------------------
-# EXECUÇÃO (compatível com Render Web Service)
+# EXECUÇÃO (Render Web Service)
 # -----------------------------
 if __name__ == "__main__":
     def start_monitor():
