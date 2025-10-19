@@ -5,7 +5,7 @@ import threading
 import requests
 from flask import Flask
 from dotenv import load_dotenv
-from binance.client import Client
+from binance.spot import Spot  # biblioteca oficial e funcional
 from statistics import mean
 
 # =========================
@@ -18,13 +18,13 @@ API_SECRET = os.getenv("API_SECRET")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-INTERVAL = Client.KLINE_INTERVAL_5MINUTE
+INTERVAL = "5m"
 LOOKBACK = 100
 TOP_N = 50
 UPDATE_INTERVAL = 90  # segundos entre análises
 
 app = Flask(__name__)
-client = Client(API_KEY, API_SECRET)
+client = Spot(api_key=API_KEY, api_secret=API_SECRET)
 
 # =========================
 # FUNÇÕES AUXILIARES
@@ -43,7 +43,7 @@ def send_telegram_message(message: str):
 def get_usdt_pairs():
     """Obtém as top 50 moedas com par USDT por volume"""
     try:
-        tickers = client.get_ticker()
+        tickers = client.ticker_24hr()
         usdt_pairs = [t for t in tickers if t["symbol"].endswith("USDT")]
         usdt_pairs.sort(key=lambda x: float(x["quoteVolume"]), reverse=True)
         top_pairs = [x["symbol"] for x in usdt_pairs[:TOP_N]]
@@ -54,37 +54,32 @@ def get_usdt_pairs():
 
 
 def get_klines(symbol, interval, lookback):
-    """Baixa dados históricos (candles)"""
+    """Baixa candles do par"""
     try:
-        klines = client.get_klines(symbol=symbol, interval=interval, limit=lookback)
+        klines = client.klines(symbol, interval, limit=lookback)
         closes = [float(k[4]) for k in klines]
-        volumes = [float(k[5]) for k in klines]
-        return closes, volumes
+        return closes
     except Exception as e:
         print(f"Erro ao buscar {symbol}: {e}")
-        return None, None
+        return None
 
 
 def ema(values, period):
-    """Calcula EMA (Exponential Moving Average)"""
+    """Calcula EMA"""
     if len(values) < period:
         return None
-    ema_values = []
     k = 2 / (period + 1)
     ema_prev = mean(values[:period])
-    ema_values.append(ema_prev)
     for price in values[period:]:
         ema_prev = (price - ema_prev) * k + ema_prev
-        ema_values.append(ema_prev)
-    return ema_values[-1]
+    return ema_prev
 
 
 def rsi(values, period=14):
-    """Calcula RSI (Relative Strength Index)"""
+    """Calcula RSI"""
     if len(values) < period + 1:
         return None
-    gains = []
-    losses = []
+    gains, losses = [], []
     for i in range(1, period + 1):
         diff = values[i] - values[i - 1]
         if diff > 0:
@@ -94,13 +89,12 @@ def rsi(values, period=14):
     avg_gain = mean(gains) if gains else 0.00001
     avg_loss = mean(losses) if losses else 0.00001
     rs = avg_gain / avg_loss
-    rsi_val = 100 - (100 / (1 + rs))
-    return rsi_val
+    return 100 - (100 / (1 + rs))
 
 
 def analyze(symbol):
     """Analisa o gráfico e identifica sinais"""
-    closes, volumes = get_klines(symbol, INTERVAL, LOOKBACK)
+    closes = get_klines(symbol, INTERVAL, LOOKBACK)
     if not closes:
         return None
 
@@ -119,11 +113,8 @@ def analyze(symbol):
     return None
 
 
-# =========================
-# LOOP PRINCIPAL
-# =========================
-
 def monitor():
+    """Loop principal do bot"""
     print(f"🚀 Bot iniciado — monitorando top {TOP_N} pares USDT.")
     send_telegram_message(f"🤖 Bot iniciado — monitorando top {TOP_N} pares USDT.")
 
@@ -148,13 +139,9 @@ def monitor():
             time.sleep(UPDATE_INTERVAL)
 
 
-# =========================
-# FLASK SERVER (Render)
-# =========================
-
 @app.route("/")
 def home():
-    return "✅ Bot de Monitoramento Binance ativo no Render (sem pandas)!"
+    return "✅ Bot de Monitoramento Binance ativo no Render (versão estável e funcional)!"
 
 
 if __name__ == "__main__":
