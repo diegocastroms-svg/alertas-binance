@@ -1,8 +1,6 @@
-# main_reversao_v5_fix.py
-# ✅ Base v5 preservada
-# ✅ Corrigido: candle atual mantido (intrabar reativado)
-# ✅ Corrigido: loop reduzido p/ 10s
-# ✅ Nenhuma outra estrutura alterada
+# main_reversao_v5_fix_tolerancia.py
+# ✅ Igual ao seu main_reversao_v5_fix.py
+# ✅ ÚNICA mudança: tolerância de +3% na MA200 para detectar exaustão realista
 
 import os, asyncio, aiohttp, time, math
 from datetime import datetime, timezone
@@ -72,8 +70,7 @@ async def get_klines(session, symbol, interval, limit=210):
         async with session.get(url, timeout=REQ_TIMEOUT) as r:
             data = await r.json()
             if isinstance(data, list):
-                # 🔄 Mantém o candle atual (não remove mais o último)
-                return data
+                return data  # mantém o candle atual (intrabar ativo)
             return []
     except:
         return []
@@ -177,7 +174,8 @@ async def scan_symbol(session, symbol):
         ma50_5  = sma(c5, 50)
 
         i5 = len(c5)-1
-        below_200_context = c5[i5] < ma200_5[i5] if ma200_5[i5] is not None else False
+        # ✅ tolerância de 3% acima da MA200 (mantém contexto de queda, mas permite início de reversão)
+        below_200_context = c5[i5] < ma200_5[i5] * 1.03 if ma200_5[i5] is not None else False
 
         if below_200_context:
             ok, msg = detect_exhaustion_5m(o5, h5, l5, c5, v5)
@@ -253,7 +251,7 @@ async def main_loop():
         while True:
             tasks = [scan_symbol(session, s) for s in symbols]
             await asyncio.gather(*tasks)
-            await asyncio.sleep(10)  # 🔄 loop mais rápido p/ cruzamentos em tempo real
+            await asyncio.sleep(10)
 
 # ---------------- RUN ----------------
 if __name__ == "__main__":
