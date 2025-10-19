@@ -104,8 +104,8 @@ def detect_phase(data_5m, data_15m):
 
     return None
 
-def send_alert(phase):
-    """Envia alerta via Telegram."""
+def send_alert(phase, data_5m):
+    """Envia alerta via Telegram com o preço atual."""
     message = f"Alerta para {SYMBOL}: Fase detectada - {phase.upper()}. Preço atual: {data_5m['closes'][-1]}."
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {"chat_id": CHAT_ID, "text": message}
@@ -121,7 +121,7 @@ async def webhook():
         new_phase = detect_phase(data_5m, data_15m)
         if new_phase and new_phase != current_phase:
             current_phase = new_phase
-            send_alert(new_phase)
+            send_alert(new_phase, data_5m)  # Passa data_5m para send_alert
             return {"status": "success", "phase": new_phase}, 200
         return {"status": "no_change", "price": data_5m["closes"][-1]}, 200
     return {"status": "error", "message": "Dados não disponíveis"}, 500
@@ -136,7 +136,7 @@ async def monitor():
             new_phase = detect_phase(data_5m, data_15m)
             if new_phase and new_phase != current_phase:
                 current_phase = new_phase
-                send_alert(new_phase)
+                send_alert(new_phase, data_5m)  # Passa data_5m para send_alert
                 print(f"Alerta enviado: {new_phase}")
         else:
             print("Erro ao buscar dados.")
