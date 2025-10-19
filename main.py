@@ -13,14 +13,43 @@ app = Flask(__name__)
 load_dotenv()
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
-SYMBOL = os.getenv("SYMBOL", "WALUSDT")  # Exemplo: WALUSDT, configure no .env
 INTERVAL_5M = "5m"
 INTERVAL_15M = "15m"
 LIMIT = 50  # Candles suficientes para cálculos manuais
+BINANCE_EXCHANGE_INFO_URL = "https://api.binance.com/api/v3/exchangeInfo"
+BINANCE_TICKER_24HR_URL = "https://api.binance.com/api/v3/ticker/24hr"
 BINANCE_KLINES_URL = "https://api.binance.com/api/v3/klines"
+MIN_VOLUME = 1000000  # Threshold para volume baixo (ajuste se necessário)
 
-# Estados para rastrear fases
-current_phase = None
+# Estados para rastrear fases por símbolo
+current_phases = {}
+
+async def get_usdt_spot_symbols(min_volume=MIN_VOLUME):
+    """Obtém dinamicamente a lista de símbolos spot USDT com volume alto."""
+    symbols = []
+    async with aiohttp.ClientSession() as session:
+        # Fetch exchange info para filtrar spot USDT trading
+        async with session.get(BINANCE_EXCHANGE_INFO_URL) as response:
+            data = await response.json()
+            spot_usdt_symbols = [
+                s['symbol'] for s in data.get('symbols', []) 
+                if s['symbol'].endswith('USDT') and s['status'] == 'TRADING' and 'SPOT' in s['permissions']
+            ]
+        
+        # Fetch ticker 24hr para filtrar por volume
+        async with session.get(BINANCE_TICKER_24HR_URL) as response:
+            data = await response.json()
+            filtered = [
+                d['symbol'] for d in data 
+                if d['symbol'] in spot_usdt_symbols and float(d['quoteVolume']) > min_volume
+            ]
+            # Ordena por volume descendente
+            sorted_symbols = sorted(
+                filtered, 
+                key=lambda sym: next(float(d['quoteVolume']) for d in data if d['symbol'] == sym), 
+                reverse=True
+            )
+            return sorted_symbols
 
 def calculate_sma(prices, period):
     """Calcula a média móvel simples manualmente."""
@@ -40,9 +69,9 @@ def calculate_rsi(prices, period=14):
     rs = avg_gain / avg_loss
     return 100 - (100 / (1 + rs))
 
-async def fetch_klines(interval):
-    """Busca dados OHLCV da Binance."""
-    params = {"symbol": SYMBOL, "interval": interval, "limit": LIMIT}
+async def fetch_klines(symbol, interval):
+    """Busca dados OHLCV da Binance para um símbolo específico."""
+    params = {"symbol": symbol, "interval": interval, "limit": LIMIT}
     async with aiohttp.ClientSession() as session:
         async with session.get(BINANCE_KLINES_URL, params=params) as response:
             data = await response.json()
@@ -104,43 +133,44 @@ def detect_phase(data_5m, data_15m):
 
     return None
 
-def send_alert(phase, data_5m):
-    """Envia alerta via Telegram com o preço atual."""
-    message = f"Alerta para {SYMBOL}: Fase detectada - {phase.upper()}. Preço atual: {data_5m['closes'][-1]}."
+def send_alert(phase, symbol, data_5m):
+    """Envia alerta via Telegram com o preço atual e símbolo."""
+    message = f"Alerta para {symbol}: Fase detectada - {phase.upper()}. Preço atual: {data_5m['closes'][-1]}."
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {"chat_id": CHAT_ID, "text": message}
     requests.post(url, json=payload)
 
 @app.route('/webhook', methods=['POST'])
 async def webhook():
-    """Rota para receber webhooks e processar alertas."""
-    global current_phase
-    data_5m = await fetch_klines(INTERVAL_5M)
-    data_15m = await fetch_klines(INTERVAL_15M)
-    if data_5m and data_15m:
-        new_phase = detect_phase(data_5m, data_15m)
-        if new_phase and new_phase != current_phase:
-            current_phase = new_phase
-            send_alert(new_phase, data_5m)  # Passa data_5m para send_alert
-            return {"status": "success", "phase": new_phase}, 200
-        return {"status": "no_change", "price": data_5m["closes"][-1]}, 200
-    return {"status": "error", "message": "Dados não disponíveis"}, 500
+    """Rota para receber webhooks e processar alertas para todos os símbolos."""
+    symbols = await get_usdt_spot_symbols()
+    for symbol in symbols:
+        data_5m = await fetch_klines(symbol, INTERVAL_5M)
+        data_15m = await fetch_klines(symbol, INTERVAL_15M)
+        if data_5m and data_15m:
+            new_phase = detect_phase(data_5m, data_15m)
+            if new_phase and new_phase != current_phases.get(symbol):
+                current_phases[symbol] = new_phase
+                send_alert(new_phase, symbol, data_5m)
+        await asyncio.sleep(1)  # Delay para evitar rate limits
+    return {"status": "success", "symbols_processed": len(symbols)}, 200
 
 async def monitor():
     """Loop principal para monitoramento contínuo (worker)."""
-    global current_phase
+    symbols = await get_usdt_spot_symbols()
+    print(f"Monitorando {len(symbols)} símbolos USDT spot com volume alto.")
     while True:
-        data_5m = await fetch_klines(INTERVAL_5M)
-        data_15m = await fetch_klines(INTERVAL_15M)
-        if data_5m and data_15m:
-            new_phase = detect_phase(data_5m, data_15m)
-            if new_phase and new_phase != current_phase:
-                current_phase = new_phase
-                send_alert(new_phase, data_5m)  # Passa data_5m para send_alert
-                print(f"Alerta enviado: {new_phase}")
-        else:
-            print("Erro ao buscar dados.")
-        await asyncio.sleep(60)  # Checa a cada 1 minuto
+        for symbol in symbols:
+            data_5m = await fetch_klines(symbol, INTERVAL_5M)
+            data_15m = await fetch_klines(symbol, INTERVAL_15M)
+            if data_5m and data_15m:
+                new_phase = detect_phase(data_5m, data_15m)
+                if new_phase and new_phase != current_phases.get(symbol):
+                    current_phases[symbol] = new_phase
+                    send_alert(new_phase, symbol, data_5m)
+                    print(f"Alerta enviado para {symbol}: {new_phase}")
+            await asyncio.sleep(1)  # Delay para evitar rate limits
+        await asyncio.sleep(60)  # Ciclo completo a cada 1 minuto
 
 if __name__ == "__main__":
     # Inicia o Flask na porta 1000 e o loop de monitoramento em paralelo
