@@ -102,24 +102,40 @@ def crossed_up(a_prev,a_now,b_prev,b_now):
 
 # ===================== BINANCE =====================
 async def fetch_top(session):
+    """Busca as 50 moedas com maior volume USDT, excluindo stablecoins e pares ruins."""
     url = f"{BINANCE}/api/v3/ticker/24hr"
     data = await http_get_json(session, url)
-    if not data: return []
+    if not data:
+        return []
+
     ranked = []
     for d in data:
-        sym = d["symbol"]
-        if not sym.endswith("USDT"): continue
-        if any(x in sym for x in EXCLUDE): continue
+        sym = d.get("symbol", "")
+        if not sym.endswith("USDT"):
+            continue
+        if any(x in sym for x in EXCLUDE):
+            continue
         try:
-            p = float(d["lastPrice"]); qv = float(d["quoteVolume"])
-            if p < PRICE_MIN: continue
+            p = float(d.get("lastPrice", 0))
+            qv = float(d.get("quoteVolume", 0))
+            if p < PRICE_MIN:
+                continue
             ranked.append((sym, qv))
-        except: continue
-    return [s for s,_ in sorted(ranked, key=lambda x:x[1], reverse=True)[:TOP_COUNT]]
+        except:
+            continue
+
+    # Ordena por volume e pega as 50 principais
+    return [s for s, _ in sorted(ranked, key=lambda x: x[1], reverse=True)[:TOP_COUNT]]
 
 async def fetch_klines(session, symbol):
-    url=f"{BINANCE}/api/v3/klines"
-    return await http_get_json(session, {"symbol":symbol,"interval":INTERVAL,"limit":250})
+    """Busca candles da Binance de forma correta (sem erro de tipo)."""
+    url = f"{BINANCE}/api/v3/klines"
+    params = {
+        "symbol": symbol,
+        "interval": INTERVAL,
+        "limit": 250
+    }
+    return await http_get_json(session, url, params=params)
 
 # ===================== DETECÇÃO =====================
 def detect(symbol,o,h,l,c,v):
