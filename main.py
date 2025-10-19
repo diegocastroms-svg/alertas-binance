@@ -131,11 +131,13 @@ async def analyze_symbol(session, symbol, interval):
             else:
                 vol_mean20.append(sum(volumes[i - 20:i]) / 20)
 
-        # --- REVERSÃO CONFIRMADA ---
+        # --- REVERSÃO CONFIRMADA (corrigida) ---
         if (
-            ema9[-1] and ma20[-1] and ma50[-1] and
-            ema9[-1] > ma20[-1] and ema9[-2] <= ma20[-2] and
-            ema9[-1] > ma50[-1] and ema9[-2] <= ma50[-2] and
+            ema9[-1] is not None and ma20[-1] is not None and ma50[-1] is not None and
+            (
+                (ema9[-1] > ma20[-1] and ema9[-2] <= ma20[-2]) or
+                (ema9[-1] > ma50[-1] and ema9[-2] <= ma50[-2])
+            ) and
             rsi14[-1] > 50 and
             volumes[-1] > 1.2 * vol_mean20[-1]
         ):
@@ -190,7 +192,7 @@ async def monitor():
             await asyncio.sleep(60)
 
 # -----------------------------
-# EXECUÇÃO (corrigido para Render Web Service)
+# EXECUÇÃO (compatível com Render Web Service)
 # -----------------------------
 if __name__ == "__main__":
     def start_monitor():
