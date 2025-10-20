@@ -2,7 +2,7 @@
 # ✅ Corrige apenas a execução no Render (loop assíncrono separado do Flask)
 # ✅ Mantém 100% da lógica original
 # ✅ Telegram ativo, Flask porta 10000
-# ⚙️ Nenhuma linha de alerta, cálculo ou filtro foi alterada (exceto acumulação refinada)
+# ⚙️ Nenhuma linha de alerta, cálculo ou filtro foi alterada (exceto acumulação refinada rígida)
 
 import os, asyncio, aiohttp, time, math
 from datetime import datetime
@@ -183,27 +183,23 @@ async def scan_symbol(session, symbol):
                 await tg(session, f"⭐ {symbol}\n{msg}")
                 mark(symbol, "EXAUSTAO_5M")
 
-        # 🟤 Detecção de acumulação/lateralização (ajustada: evita topo e exige queda prévia)
+        # 🟤 Acumulação rígida (evita topo, exige queda prévia)
         if allowed(symbol, "ACUMULACAO_5M"):
             recent = c5[-10:]
             media_recente = (sum(recent) / len(recent)) if recent else c5[i5]
             rng = (max(recent) - min(recent)) / (media_recente + 1e-12)
             vol10 = sum(v5[-10:]) / 10.0
             vol30 = sum(v5[-30:]) / 30.0
-            low_vol = vol10 <= 0.70 * (vol30 + 1e-12)
-
-            flat_ema9 = abs(ema9_5[-1] - ema9_5[-5]) / (c5[i5] + 1e-12) <= 0.003 if len(ema9_5) >= 5 else False
-
+            low_vol = vol10 <= 0.60 * (vol30 + 1e-12)
+            flat_ema9 = abs(ema9_5[-1] - ema9_5[-5]) / (c5[i5] + 1e-12) <= 0.002 if len(ema9_5) >= 5 else False
             if len(c5) >= 30:
-                base = c5[-20]
-                min_20_10 = min(c5[-20:-10])
-                drop_prev = (min_20_10 / (base + 1e-12) - 1.0) <= -0.02
+                base = c5[-25]
+                min_20_10 = min(c5[-25:-10])
+                drop_prev = (min_20_10 / (base + 1e-12) - 1.0) <= -0.03
             else:
                 drop_prev = False
-
-            not_at_high = c5[i5] < (max(recent) * 0.998)
-
-            if rng <= 0.006 and low_vol and flat_ema9 and drop_prev and not_at_high:
+            not_at_high = c5[i5] < (max(recent) * 0.995)
+            if rng <= 0.004 and low_vol and flat_ema9 and drop_prev and not_at_high:
                 p = fmt_price(c5[i5])
                 msg = f"🟤 {symbol} — Acumulação detectada (5m)\n💰 {p}\n🕒 {now_br()}"
                 await tg(session, msg)
