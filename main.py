@@ -188,7 +188,7 @@ async def scan_symbol(session, symbol):
                     # Detecta início de tendência tanto abaixo quanto acima da MA200
             if tendencia_iniciando_5m(ema9_5, ma20_5, ma50_5) and allowed(symbol, "INI_5M"):
                 # Filtra: só envia se o candle atual estiver próximo da MA200 (reversão) ou recém cruzando para cima
-                if (abs(c5[i5] - ma200_5[i5]) / (ma200_5[i5] + 1e-12)) <= 0.02 or c5[i5] > ma200_5[i5]:
+                if (abs(c5[i5] - ma200_5[i5]) / (ma200_5[i5] + 1e-12)) <= 0.05 or c5[i5] > ma200_5[i5]:
                     p = fmt_price(c5[i5])
                     msg = f"🟢 {symbol} ⬆️ Tendência iniciando (5m)\n💰 {p}\n🕒 {now_br()}"
                     await tg(session, msg)
@@ -246,6 +246,7 @@ def start_bot():
 
 threading.Thread(target=start_bot, daemon=True).start()
 app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
+
 
 
 
