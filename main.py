@@ -119,10 +119,10 @@ def detect_exhaustion_5m(o, h, l, c, v):
     lower_wick = open_ - low_ if close_ >= open_ else close_ - low_
     cond_hammer = (close_ > open_) and (lower_wick >= 2.0*body)
     vol_ma20 = sum(v[-20:]) / 20.0
-    cond_vol = v[last] >= 1.2 * (vol_ma20 + 1e-12)
+    cond_vol = v[last] >= 1.1 * (vol_ma20 + 1e-12)
     base = c[max(0, last-12)]
     drop_pct = (close_/(base+1e-12)-1.0)*100.0
-    cond_drop = drop_pct <= -3.0
+    cond_drop = drop_pct <= -1.5
     if cond_hammer and cond_vol and cond_drop:
         msg = f"🟥 <b>EXAUSTÃO VENDEDORA (5m)</b>\n💰 {fmt_price(close_)}\n🕒 {now_br()}"
         return True, msg
@@ -243,6 +243,7 @@ def start_bot():
 
 threading.Thread(target=start_bot, daemon=True).start()
 app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
+
 
 
 
