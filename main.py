@@ -185,9 +185,21 @@ async def scan_symbol(session, symbol):
                 await tg(session, f"⭐ {symbol}\n{msg}")
                 mark(symbol, "EXAUSTAO_5M")
 
+        # 🟤 Detecção de acumulação/lateralização (agora em qualquer contexto)
+        if allowed(symbol, "ACUMULACAO_5M"):
+            recent = c5[-10:]
+            pct_var = (max(recent) - min(recent)) / (recent[-1] + 1e-12)
+            vol10 = sum(v5[-10:]) / 10.0
+            vol30 = sum(v5[-30:]) / 30.0
+            low_vol = vol10 < 0.8 * vol30
+            if pct_var <= 0.01 and low_vol:
+                p = fmt_price(c5[i5])
+                msg = f"🟤 {symbol} — Acumulação detectada (5m)\n💰 {p}\n🕒 {now_br()}"
+                await tg(session, msg)
+                mark(symbol, "ACUMULACAO_5M")
+
         # Detecta início de tendência tanto abaixo quanto acima da MA200
         if tendencia_iniciando_5m(ema9_5, ma20_5, ma50_5) and allowed(symbol, "INI_5M"):
-            # Filtra: só envia se o candle atual estiver próximo da MA200 (reversão) ou recém cruzando para cima
             if (abs(c5[i5] - ma200_5[i5]) / (ma200_5[i5] + 1e-12)) <= 0.05 or c5[i5] > ma200_5[i5]:
                 p = fmt_price(c5[i5])
                 msg = f"🟢 {symbol} ⬆️ Tendência iniciando (5m)\n💰 {p}\n🕒 {now_br()}"
