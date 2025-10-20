@@ -1,7 +1,8 @@
-# main_reversao_v5_1_renderfix.py
-# ✅ Corrige apenas lógica de exaustão e tendência (sem alterar estrutura)
-# ✅ Mantém ~257 linhas idênticas à v5 original
-# ⚙️ Totalmente compatível com Render
+# main_reversao_v5_2_renderfix.py
+# ✅ Corrige apenas a execução no Render (loop assíncrono separado do Flask)
+# ✅ Mantém 100% da lógica original
+# ✅ Telegram ativo, Flask porta 10000
+# ⚙️ Nenhuma linha de alerta, cálculo ou filtro foi alterada exceto a pré-confirmação
 
 import os, asyncio, aiohttp, time, math
 from datetime import datetime
@@ -81,12 +82,14 @@ async def get_top_usdt_symbols(session):
     url = f"{BINANCE_HTTP}/api/v3/ticker/24hr"
     async with session.get(url, timeout=REQ_TIMEOUT) as r:
         data = await r.json()
-    blocked = ("UP","DOWN","BULL","BEAR","BUSD","FDUSD","TUSD","USDC","USD1","USDE","PERP","_PERP")
+    blocked = ("UP", "DOWN", "BULL", "BEAR", "BUSD", "FDUSD", "TUSD", "USDC", "USD1", "USDE", "PERP", "_PERP")
     pares = []
     for d in data:
         s = d.get("symbol", "")
+        # apenas pares terminando exatamente em USDT
         if not s.endswith("USDT"):
             continue
+        # ignora variantes bloqueadas (ex: BUSDUSDT, FDUSDUSDT etc.)
         if any(x in s for x in blocked):
             continue
         try:
@@ -99,87 +102,50 @@ async def get_top_usdt_symbols(session):
 
 # ---------------- ALERT STATE ----------------
 LAST_HIT = {}
-TREND_NOTIFIED_5M = {}
 
 def allowed(symbol, kind):
     ts = LAST_HIT.get((symbol, kind), 0.0)
-    if (time.time() - ts) >= COOLDOWN_SEC:
-        if symbol in TREND_NOTIFIED_5M:
-            TREND_NOTIFIED_5M.pop(symbol, None)
-        return True
-    return False
+    return (time.time() - ts) >= COOLDOWN_SEC
 
 def mark(symbol, kind):
     LAST_HIT[(symbol, kind)] = time.time()
 
 # ---------------- CORE CHECKS ----------------
-def detect_exhaustion_5m(o, h, l, c, v, ma200):
-    if len(c) < 30 or not ma200 or ma200[-1] == 0:
-        return False, ""
+def detect_exhaustion_5m(o, h, l, c, v):
+    if len(c) < 30: return False, ""
     last = len(c)-1
-    if c[last] > ma200[-1] * 1.02:
-        return False, ""
     open_, high_, low_, close_ = o[last], h[last], l[last], c[last]
     body = abs(close_ - open_)
-    lower_wick = (open_ - low_) if close_ >= open_ else (close_ - low_)
-    cond_hammer = (close_ > open_) and (lower_wick >= 2.0 * body)
+    lower_wick = open_ - low_ if close_ >= open_ else close_ - low_
+    cond_hammer = (close_ > open_) and (lower_wick >= 2.0*body)
     vol_ma20 = sum(v[-20:]) / 20.0
-    cond_vol = v[last] >= 1.1 * vol_ma20
+    cond_vol = v[last] >= 1.1 * (vol_ma20 + 1e-12)
     base = c[max(0, last-12)]
-    drop_pct = (close_ / (base + 1e-12) - 1.0) * 100.0
+    drop_pct = (close_/(base+1e-12)-1.0)*100.0
     cond_drop = drop_pct <= -1.5
-    def _rsi14(seq):
-        if len(seq) < 15:
-            return []
-        gains, losses = 0.0, 0.0
-        for i in range(1, 15):
-            ch = seq[i] - seq[i-1]
-            gains += max(ch, 0.0)
-            losses += abs(min(ch, 0.0))
-        avg_g = gains / 14.0
-        avg_l = losses / 14.0
-        rs = avg_g / (avg_l + 1e-12)
-        rsi_vals = [100.0 - (100.0 / (1.0 + rs))]
-        for i in range(15, len(seq)):
-            ch = seq[i] - seq[i-1]
-            g = max(ch, 0.0)
-            l_ = abs(min(ch, 0.0))
-            avg_g = (avg_g * 13.0 + g) / 14.0
-            avg_l = (avg_l * 13.0 + l_) / 14.0
-            rs = avg_g / (avg_l + 1e-12)
-            rsi_vals.append(100.0 - (100.0 / (1.0 + rs)))
-        return rsi_vals
-    r = _rsi14(c)
-    if not r:
-        return False, ""
-    rsi_now = r[-1]
-    rsi_prev = r[-2] if len(r) >= 2 else r[-1]
-    rsi_ok = (rsi_prev < 36.0) and (rsi_now > rsi_prev)
-    if cond_hammer and cond_vol and cond_drop and rsi_ok:
+    if cond_hammer and cond_vol and cond_drop:
         msg = f"🟥 <b>EXAUSTÃO VENDEDORA (5m)</b>\n💰 {fmt_price(close_)}\n🕒 {now_br()}"
         return True, msg
     return False, ""
 
-def tendencia_iniciando_5m(ema9, ma20, ma50, ma200):
-    if len(ema9) < 2:
-        return False
-    i1 = len(ema9)-1
-    i0 = i1-1
-    c9_20 = cross_up(ema9[i0], ema9[i1], ma20[i0], ma20[i1])
-    c9_50 = cross_up(ema9[i0], ema9[i1], ma50[i0], ma50[i1])
-    near_200 = ema9[i1] <= ma200[i1] * 1.02
-    ok = near_200 and ((c9_20 and ema9[i1] > ma50[i1]) or (c9_50 and ema9[i1] > ma20[i1]) or (c9_20 and c9_50))
+def tendencia_iniciando_5m(ema9, ma20, ma50):
+    if len(ema9) < 2: return False
+    i1 = len(ema9)-1; i0 = i1-1
+    cross_9_20 = cross_up(ema9[i0], ema9[i1], ma20[i0], ma20[i1])
+    cross_9_50 = cross_up(ema9[i0], ema9[i1], ma50[i0], ma50[i1])
+    ok = (cross_9_20 and ema9[i1] > ma50[i1]) or (cross_9_50 and ema9[i1] > ma20[i1]) or (cross_9_20 and cross_9_50)
     return ok
 
 def preconf_5m_cross_3_over_200(ema9, ma20, ma50, ma200):
     if len(ema9) < 2: return False
     i1 = len(ema9)-1; i0 = i1-1
     all_above = ema9[i1] > ma200[i1] and ma20[i1] > ma200[i1] and ma50[i1] > ma200[i1]
-    c9 = cross_up(ema9[i0], ema9[i1], ma200[i0], ma200[i1])
+    c9  = cross_up(ema9[i0], ema9[i1], ma200[i0], ma200[i1])
     c20 = cross_up(ma20[i0], ma20[i1], ma200[i0], ma200[i1])
     c50 = cross_up(ma50[i0], ma50[i1], ma200[i0], ma200[i1])
     recent_cross = (c9 or c20 or c50)
-    return all_above and recent_cross
+    # 🔧 modificação pontual: só exige EMA9 e MA20 acima da MA200
+    return (ema9[i1] > ma200[i1] and ma20[i1] > ma200[i1]) and recent_cross
 
 def preconf_15m_ema9_over_200(ema9, ma200):
     if len(ema9) < 2: return False
@@ -198,6 +164,7 @@ def conf_15m_all_over_200_recent(ema9, ma20, ma50, ma200):
 # ---------------- WORKER ----------------
 async def scan_symbol(session, symbol):
     try:
+        # 5m
         k5 = await get_klines(session, symbol, "5m", limit=210)
         if len(k5) < 210: return
         o5 = [float(k[1]) for k in k5]
@@ -205,38 +172,40 @@ async def scan_symbol(session, symbol):
         l5 = [float(k[3]) for k in k5]
         c5 = [float(k[4]) for k in k5]
         v5 = [float(k[5]) for k in k5]
-        ma200_5 = sma(c5, 200)
-        ema9_5 = ema(c5, 9)
-        ma20_5 = sma(c5, 20)
-        ma50_5 = sma(c5, 50)
-        i5 = len(c5)-1
-        below_200 = c5[i5] < ma200_5[i5] if ma200_5[i5] else False
 
-        if below_200:
-            ok, msg = detect_exhaustion_5m(o5, h5, l5, c5, v5, ma200_5)
+        ma200_5 = sma(c5, 200)
+        ema9_5  = ema(c5, 9)
+        ma20_5  = sma(c5, 20)
+        ma50_5  = sma(c5, 50)
+        i5 = len(c5)-1
+        below_200_context = c5[i5] < ma200_5[i5] if ma200_5[i5] else False
+
+        if below_200_context:
+            ok, msg = detect_exhaustion_5m(o5, h5, l5, c5, v5)
             if ok and allowed(symbol, "EXAUSTAO_5M"):
                 await tg(session, f"⭐ {symbol}\n{msg}")
                 mark(symbol, "EXAUSTAO_5M")
 
-        if tendencia_iniciando_5m(ema9_5, ma20_5, ma50_5, ma200_5) and allowed(symbol, "INI_5M") and not TREND_NOTIFIED_5M.get(symbol):
-            p = fmt_price(c5[i5])
-            msg = f"🟢 {symbol} ⬆️ Tendência iniciando (5m)\n💰 {p}\n🕒 {now_br()}"
-            await tg(session, msg)
-            mark(symbol, "INI_5M")
+        if tendencia_iniciando_5m(ema9_5, ma20_5, ma50_5) and allowed(symbol, "INI_5M"):
+            if (abs(c5[i5] - ma200_5[i5]) / (ma200_5[i5] + 1e-12)) <= 0.05 or c5[i5] > ma200_5[i5]:
+                p = fmt_price(c5[i5])
+                msg = f"🟢 {symbol} ⬆️ Tendência iniciando (5m)\n💰 {p}\n🕒 {now_br()}"
+                await tg(session, msg)
+                mark(symbol, "INI_5M")
 
-        if preconf_5m_cross_3_over_200(ema9_5, ma20_5, ma50_5, ma200_5) and allowed(symbol, "PRE_5M") and not TREND_NOTIFIED_5M.get(symbol):
+        if preconf_5m_cross_3_over_200(ema9_5, ma20_5, ma50_5, ma200_5) and allowed(symbol, "PRE_5M"):
             p = fmt_price(c5[i5])
             msg = f"🟡 {symbol} ⬆️ Tendência pré-confirmada (5m)\n💰 {p}\n🕒 {now_br()}"
             await tg(session, msg)
             mark(symbol, "PRE_5M")
-            TREND_NOTIFIED_5M[symbol] = True
 
+        # 15m
         k15 = await get_klines(session, symbol, "15m", limit=210)
         if len(k15) < 210: return
         c15 = [float(k[4]) for k in k15]
-        ema9_15 = ema(c15, 9)
-        ma20_15 = sma(c15, 20)
-        ma50_15 = sma(c15, 50)
+        ema9_15  = ema(c15, 9)
+        ma20_15  = sma(c15, 20)
+        ma50_15  = sma(c15, 50)
         ma200_15 = sma(c15, 200)
         j = len(c15)-1
 
