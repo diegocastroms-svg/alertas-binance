@@ -88,8 +88,8 @@ async def get_top_usdt_symbols(session):
         s = d.get("symbol","")
        # só pares exatamente terminando com USDT e sem USD extra antes
 if not s.endswith("USDT") or "USD" in s[:-4]:
-    continue 
-        if any(x in s for x in blocked):
+            continue 
+if any(x in s for x in blocked):
             continue
         try:
             qv = float(d.get("quoteVolume","0") or 0.0)
@@ -242,4 +242,5 @@ def start_bot():
 
 threading.Thread(target=start_bot, daemon=True).start()
 app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
+
 
