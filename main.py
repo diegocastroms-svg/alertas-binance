@@ -88,9 +88,10 @@ async def get_top_usdt_symbols(session):
     pares = []
     for d in data:
         s = d.get("symbol", "")
-        # só pares exatamente terminando com USDT e sem USD antes
-        if not s.endswith("USDT") or "USD" in s[:-4]:
+        # apenas pares terminando exatamente em USDT
+        if not s.endswith("USDT"):
             continue
+        # ignora variantes bloqueadas (ex: BUSDUSDT, FDUSDUSDT etc.)
         if any(x in s for x in blocked):
             continue
         try:
@@ -100,6 +101,7 @@ async def get_top_usdt_symbols(session):
         pares.append((s, qv))
     pares.sort(key=lambda x: x[1], reverse=True)
     return [s for s, _ in pares[:TOP_N]]
+
 
 # ---------------- ALERT STATE ----------------
 LAST_HIT = {}
@@ -244,6 +246,7 @@ def start_bot():
 
 threading.Thread(target=start_bot, daemon=True).start()
 app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
+
 
 
 
