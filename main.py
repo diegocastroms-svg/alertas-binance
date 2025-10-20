@@ -80,8 +80,6 @@ async def get_klines(session, symbol, interval, limit=210):
 
 async def get_top_usdt_symbols(session):
     url = f"{BINANCE_HTTP}/api/v3/ticker/24hr"
-    async def get_top_usdt_symbols(session):
-    url = f"{BINANCE_HTTP}/api/v3/ticker/24hr"
     async with session.get(url, timeout=REQ_TIMEOUT) as r:
         data = await r.json()
     blocked = ("UP", "DOWN", "BULL", "BEAR", "BUSD", "FDUSD", "TUSD", "USDC", "USD1", "PERP", "_PERP")
@@ -101,7 +99,6 @@ async def get_top_usdt_symbols(session):
         pares.append((s, qv))
     pares.sort(key=lambda x: x[1], reverse=True)
     return [s for s, _ in pares[:TOP_N]]
-
 
 # ---------------- ALERT STATE ----------------
 LAST_HIT = {}
@@ -246,7 +243,5 @@ def start_bot():
 
 threading.Thread(target=start_bot, daemon=True).start()
 app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
-
-
 
 
