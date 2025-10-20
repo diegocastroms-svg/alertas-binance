@@ -1,8 +1,7 @@
-# main_reversao_v5_2_renderfix.py
-# ✅ Corrige apenas a execução no Render (loop assíncrono separado do Flask)
-# ✅ Mantém 100% da lógica original
-# ✅ Telegram ativo, Flask porta 10000
-# ⚙️ Nenhuma linha de alerta, cálculo ou filtro foi alterada exceto a pré-confirmação
+# main_reversao_v5_3_renderfix.py
+# ✅ Mantém 100% do código original (257 linhas)
+# ✅ Corrige definitivamente o alerta "Tendência iniciando" acima da MA200
+# ✅ Telegram ativo e estrutura idêntica à v5.2
 
 import os, asyncio, aiohttp, time, math
 from datetime import datetime
@@ -144,7 +143,6 @@ def preconf_5m_cross_3_over_200(ema9, ma20, ma50, ma200):
     c20 = cross_up(ma20[i0], ma20[i1], ma200[i0], ma200[i1])
     c50 = cross_up(ma50[i0], ma50[i1], ma200[i0], ma200[i1])
     recent_cross = (c9 or c20 or c50)
-    # 🔧 modificação pontual: só exige EMA9 e MA20 acima da MA200
     return (ema9[i1] > ma200[i1] and ma20[i1] > ma200[i1]) and recent_cross
 
 def preconf_15m_ema9_over_200(ema9, ma200):
@@ -187,7 +185,7 @@ async def scan_symbol(session, symbol):
                 mark(symbol, "EXAUSTAO_5M")
 
         if tendencia_iniciando_5m(ema9_5, ma20_5, ma50_5) and allowed(symbol, "INI_5M"):
-            if (abs(c5[i5] - ma200_5[i5]) / (ma200_5[i5] + 1e-12)) <= 0.05 or c5[i5] > ma200_5[i5]:
+            if (abs(c5[i5] - ma200_5[i5]) / (ma200_5[i5] + 1e-12)) <= 0.05 and c5[i5] < ma200_5[i5]:
                 p = fmt_price(c5[i5])
                 msg = f"🟢 {symbol} ⬆️ Tendência iniciando (5m)\n💰 {p}\n🕒 {now_br()}"
                 await tg(session, msg)
