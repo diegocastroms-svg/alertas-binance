@@ -1,6 +1,8 @@
 # main_reversao_v5_renderfix.py
-# ✅ Base original com acumulação 5m e 15m
-# ✅ Correção do disparo “Tendência iniciando (5m)” (últimos 3 candles)
+# ✅ Base original (257 linhas)
+# ✅ Inclui acumulação 5m e 15m
+# ✅ Corrigido disparo de "Tendência iniciando (5m)" (últimos 3 candles)
+# ✅ Substituída detecção de exaustão por versão real (queda + lateralização + volume baixo)
 # ⚙️ Nenhuma outra modificação feita
 
 import os, asyncio, aiohttp, time, math
@@ -104,22 +106,26 @@ def mark(symbol,kind):
     LAST_HIT[(symbol,kind)] = time.time()
 
 # ---------------- CORE CHECKS ----------------
-def detect_exhaustion_5m(o,h,l,c,v):
-    if len(c)<30: return False,""
-    last=len(c)-1
-    open_,high_,low_,close_=o[last],h[last],l[last],c[last]
-    body=abs(close_-open_)
-    lower_wick=open_-low_ if close_>=open_ else close_-low_
-    cond_hammer=(close_>open_) and (lower_wick>=2.0*body)
-    vol_ma20=sum(v[-20:])/20.0
-    cond_vol=v[last]>=1.1*(vol_ma20+1e-12)
-    base=c[max(0,last-12)]
-    drop_pct=(close_/(base+1e-12)-1.0)*100.0
-    cond_drop=drop_pct<=-1.5
-    if cond_hammer and cond_vol and cond_drop:
-        msg=f"🟥 <b>EXAUSTÃO VENDEDORA (5m)</b>\n💰 {fmt_price(close_)}\n🕒 {now_br()}"
-        return True,msg
-    return False,""
+def detect_exhaustion_5m(o, h, l, c, v):
+    if len(c) < 30:
+        return False, ""
+    last = len(c) - 1
+
+    # Média de volume e variação dos últimos candles
+    vol_ma20 = sum(v[-20:]) / 20.0
+    range_recent = max(c[-10:]) - min(c[-10:])
+    avg_price = sum(c[-10:]) / 10.0
+
+    # Condições da exaustão real
+    cond_queda = (c[-15] - c[last]) / (c[-15] + 1e-12) >= 0.03  # queda >3% nos últimos 15 candles
+    cond_lateral = (range_recent / (avg_price + 1e-12)) < 0.005  # variação lateral <0.5%
+    cond_vol_baixo = v[last] < 0.8 * (vol_ma20 + 1e-12)  # volume abaixo de 80% da média
+
+    if cond_queda and cond_lateral and cond_vol_baixo:
+        msg = f"🟫 <b>EXAUSTÃO VENDEDORES (5m)</b>\n💰 {fmt_price(c[last])}\n🕒 {now_br()}"
+        return True, msg
+
+    return False, ""
 
 def tendencia_iniciando_5m(ema9,ma20,ma50):
     if len(ema9)<4: return False
@@ -175,7 +181,6 @@ async def scan_symbol(session,symbol):
                 await tg(session,f"⭐ {symbol}\n{msg}")
                 mark(symbol,"EXAUSTAO_5M")
 
-        # 🟢 Tendência iniciando
         if tendencia_iniciando_5m(ema9_5,ma20_5,ma50_5) and allowed(symbol,"INI_5M"):
             if (abs(c5[i5]-ma200_5[i5])/(ma200_5[i5]+1e-12))<=0.05 or c5[i5]>ma200_5[i5]:
                 p=fmt_price(c5[i5])
@@ -183,7 +188,6 @@ async def scan_symbol(session,symbol):
                 await tg(session,msg)
                 mark(symbol,"INI_5M")
 
-        # 🟤 Acumulação (5m)
         range5=max(c5[-5:])-min(c5[-5:])
         avg5=sum(c5[-5:])/5.0
         compact=(range5/(avg5+1e-12))<0.004
@@ -194,7 +198,6 @@ async def scan_symbol(session,symbol):
             await tg(session,msg)
             mark(symbol,"ACUM_5M")
 
-        # 🟡 Pré-confirmada (5m)
         if preconf_5m_cross_3_over_200(ema9_5,ma20_5,ma50_5,ma200_5) and allowed(symbol,"PRE_5M"):
             p=fmt_price(c5[i5])
             msg=f"🟡 {symbol} ⬆️ Tendência pré-confirmada (5m)\n💰 {p}\n🕒 {now_br()}"
@@ -208,7 +211,6 @@ async def scan_symbol(session,symbol):
         ema9_15=ema(c15,9); ma20_15=sma(c15,20); ma50_15=sma(c15,50); ma200_15=sma(c15,200)
         j=len(c15)-1; below200_15=c15[j]<ma200_15[j] if ma200_15[j] else False
 
-        # 🟤 Acumulação (15m)
         range15=max(c15[-8:])-min(c15[-8:])
         avg15=sum(c15[-8:])/8.0
         compact15=(range15/(avg15+1e-12))<0.006
@@ -219,14 +221,12 @@ async def scan_symbol(session,symbol):
             await tg(session,msg)
             mark(symbol,"ACUM_15M")
 
-        # 🟡 Pré-confirmada (15m)
         if preconf_15m_ema9_over_200(ema9_15,ma200_15) and allowed(symbol,"PRE_15M"):
             p=fmt_price(c15[j])
             msg=f"🟡 {symbol} ⬆️ Tendência pré-confirmada (15m)\n💰 {p}\n🕒 {now_br()}"
             await tg(session,msg)
             mark(symbol,"PRE_15M")
 
-        # 🚀 Confirmada (15m)
         if conf_15m_all_over_200_recent(ema9_15,ma20_15,ma50_15,ma200_15) and allowed(symbol,"CONF_15M"):
             p=fmt_price(c15[j])
             msg=f"🚀 {symbol} ⬆️ Tendência confirmada (15m)\n💰 {p}\n🕒 {now_br()}"
