@@ -1,6 +1,6 @@
-# main_reversao_v5_fix_tolerancia.py
-# ✅ Igual ao seu main_reversao_v5_fix.py
-# ✅ ÚNICA mudança: tolerância de +3% na MA200 para detectar exaustão realista
+# main_reversao_v5_fix_tolerancia_log.py
+# ✅ Igual ao main_reversao_v5_fix_tolerancia.py
+# ✅ ÚNICO acréscimo: prints para debug (sem alterar nada funcional)
 
 import os, asyncio, aiohttp, time, math
 from datetime import datetime, timezone
@@ -70,7 +70,7 @@ async def get_klines(session, symbol, interval, limit=210):
         async with session.get(url, timeout=REQ_TIMEOUT) as r:
             data = await r.json()
             if isinstance(data, list):
-                return data  # mantém o candle atual (intrabar ativo)
+                return data
             return []
     except:
         return []
@@ -158,6 +158,7 @@ def conf_15m_all_over_200_recent(ema9, ma20, ma50, ma200):
 # ---------------- WORKER ----------------
 async def scan_symbol(session, symbol):
     try:
+        print(f"🔍 Analisando {symbol}...")
         # 5m
         k5 = await get_klines(session, symbol, "5m", limit=210)
         if len(k5) < 210: 
@@ -174,16 +175,17 @@ async def scan_symbol(session, symbol):
         ma50_5  = sma(c5, 50)
 
         i5 = len(c5)-1
-        # ✅ tolerância de 3% acima da MA200 (mantém contexto de queda, mas permite início de reversão)
         below_200_context = c5[i5] < ma200_5[i5] * 1.03 if ma200_5[i5] is not None else False
 
         if below_200_context:
             ok, msg = detect_exhaustion_5m(o5, h5, l5, c5, v5)
             if ok and allowed(symbol, "EXAUSTAO_5M"):
+                print(f"⚠️ EXAUSTÃO detectada em {symbol}")
                 await tg(session, f"⭐ {symbol}\n{msg}\n🔗 https://www.binance.com/en/trade/{symbol.replace('USDT','')}_USDT?type=spot")
                 mark(symbol, "EXAUSTAO_5M")
 
         if below_200_context and tendencia_iniciando_5m(ema9_5, ma20_5, ma50_5) and allowed(symbol, "INI_5M"):
+            print(f"✅ Tendência iniciando em {symbol}")
             p = fmt_price(c5[i5])
             msg = (
                 f"🟢 {symbol} ⬆️ <b>Tendência iniciando (5m)</b>\n"
@@ -195,6 +197,7 @@ async def scan_symbol(session, symbol):
             mark(symbol, "INI_5M")
 
         if preconf_5m_cross_3_over_200(ema9_5, ma20_5, ma50_5, ma200_5) and allowed(symbol, "PRE_5M"):
+            print(f"⚡ Pré-confirmada (5m) em {symbol}")
             p = fmt_price(c5[i5])
             msg = (
                 f"🟡 {symbol} ⬆️ <b>Tendência pré-confirmada (5m)</b>\n"
@@ -217,6 +220,7 @@ async def scan_symbol(session, symbol):
         j = len(c15)-1
 
         if preconf_15m_ema9_over_200(ema9_15, ma200_15) and allowed(symbol, "PRE_15M"):
+            print(f"⚡ Pré-confirmada (15m) em {symbol}")
             p = fmt_price(c15[j])
             msg = (
                 f"🟡 {symbol} ⬆️ <b>Tendência pré-confirmada (15m)</b>\n"
@@ -228,6 +232,7 @@ async def scan_symbol(session, symbol):
             mark(symbol, "PRE_15M")
 
         if conf_15m_all_over_200_recent(ema9_15, ma20_15, ma50_15, ma200_15) and allowed(symbol, "CONF_15M"):
+            print(f"🚀 Confirmada (15m) em {symbol}")
             p = fmt_price(c15[j])
             msg = (
                 f"🚀 {symbol} ⬆️ <b>Tendência confirmada (15m)</b>\n"
@@ -239,6 +244,7 @@ async def scan_symbol(session, symbol):
             mark(symbol, "CONF_15M")
 
     except Exception as e:
+        print(f"Erro em {symbol}: {e}")
         return
 
 # ---------------- MAIN LOOP ----------------
@@ -246,6 +252,7 @@ async def main_loop():
     async with aiohttp.ClientSession() as session:
         symbols = await get_top_usdt_symbols(session)
         await tg(session, f"✅ Scanner reversão (5m/15m) ativo | {len(symbols)} pares | cooldown 15m | {now_br()}")
+        print(f"✅ Iniciado com {len(symbols)} pares USDT")
         if not symbols:
             return
         while True:
@@ -260,8 +267,8 @@ if __name__ == "__main__":
         while True:
             try:
                 asyncio.run(main_loop())
-            except:
-                pass
+            except Exception as e:
+                print("Erro no loop principal:", e)
             time.sleep(10)
     threading.Thread(target=runner, daemon=True).start()
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
