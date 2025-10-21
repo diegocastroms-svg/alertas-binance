@@ -1,6 +1,7 @@
 # main_reversao_v5_3_renderfix.py
 # ✅ Mantém 100% do código original
-# ✅ Adiciona filtro para remover moedas tipo EUR, XUSD e similares
+# ✅ Filtro para remover moedas tipo EUR, XUSD e similares
+# ✅ Exaustão vendedora atualizada: detecta fim da queda + início da lateralização
 
 import os, asyncio, aiohttp, time, math, statistics
 from datetime import datetime
@@ -123,19 +124,25 @@ def mark(symbol, kind):
 
 # ---------------- CORE CHECKS ----------------
 def detect_exhaustion_5m(o, h, l, c, v):
-    if len(c) < 30: return False, ""
+    if len(c) < 40: return False, ""
     last = len(c)-1
-    open_, high_, low_, close_ = o[last], h[last], l[last], c[last]
-    body = abs(close_ - open_)
-    lower_wick = open_ - low_ if close_ >= open_ else close_ - low_
-    cond_hammer = (close_ > open_) and (lower_wick >= 2.0*body)
+
+    # 1️⃣ queda recente
+    base = c[max(0, last-10)]
+    drop_pct = (c[last]/(base+1e-12)-1.0)*100.0
+    cond_drop = drop_pct <= -2.5  # caiu pelo menos 2,5%
+
+    # 2️⃣ lateralização nos últimos 5 candles
+    recent = c[-5:]
+    var_pct = (max(recent) - min(recent)) / (sum(recent)/len(recent) + 1e-12)
+    cond_side = var_pct <= 0.012  # variação ≤ 1,2%
+
+    # 3️⃣ volume ainda presente (sem sumir)
     vol_ma20 = sum(v[-20:]) / 20.0
-    cond_vol = v[last] >= 1.1 * (vol_ma20 + 1e-12)
-    base = c[max(0, last-12)]
-    drop_pct = (close_/(base+1e-12)-1.0)*100.0
-    cond_drop = drop_pct <= -1.5
-    if cond_hammer and cond_vol and cond_drop:
-        msg = f"🟥 <b>EXAUSTÃO VENDEDORA (5m)</b>\n💰 {fmt_price(close_)}\n🕒 {now_br()}"
+    cond_vol = v[-1] >= 0.9 * (vol_ma20 + 1e-12)
+
+    if cond_drop and cond_side and cond_vol:
+        msg = f"🟣 <b>ACUMULAÇÃO / EXAUSTÃO VENDEDORA (5m)</b>\n💰 {fmt_price(c[last])}\n🕒 {now_br()}"
         return True, msg
     return False, ""
 
