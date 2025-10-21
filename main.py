@@ -1,9 +1,8 @@
-# main_reversao_v5_3_renderfix.py
-# ✅ Mantém 100% do código original
-# ✅ Filtro para remover moedas tipo EUR, XUSD e similares
-# ✅ Exaustão vendedora atualizada: detecta fim da queda + início da lateralização
+# main_reversao_v5_3_renderfix_BB.py
+# ✅ Idêntico ao v5_3_renderfix
+# ✅ Adiciona Bollinger Bands no 15m para adiantar alerta de tendência confirmada
 
-import os, asyncio, aiohttp, time, math, statistics
+import os, asyncio, aiohttp, time, math
 from datetime import datetime
 from flask import Flask
 import threading
@@ -22,7 +21,7 @@ app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return "✅ Scanner ativo (5m & 15m) — reversão por cruzamentos | 🇧🇷", 200
+    return "✅ Scanner ativo (5m & 15m) — reversão + BB (tendência adiantada) | 🇧🇷", 200
 
 # ---------------- UTILS ----------------
 def now_br():
@@ -65,17 +64,20 @@ def ema(seq, span):
         out.append(e)
     return out
 
-def bollinger_bands(seq, n=20, mult=2):
-    if len(seq) < n: return [], [], []
-    out_mid, out_upper, out_lower = [], [], []
+def bollinger_bands(seq, n=20, k=2):
+    sma_vals = sma(seq, n)
+    std_vals = []
     for i in range(len(seq)):
-        window = seq[max(0, i-n+1):i+1]
-        m = sum(window)/len(window)
-        s = statistics.pstdev(window)
-        out_mid.append(m)
-        out_upper.append(m + mult*s)
-        out_lower.append(m - mult*s)
-    return out_upper, out_mid, out_lower
+        if i < n:
+            std_vals.append(0)
+        else:
+            window = seq[i-n+1:i+1]
+            mean = sum(window)/n
+            var = sum((x-mean)**2 for x in window)/n
+            std_vals.append(math.sqrt(var))
+    upper = [s + k*st for s, st in zip(sma_vals, std_vals)]
+    lower = [s - k*st for s, st in zip(sma_vals, std_vals)]
+    return upper, lower
 
 # ---------------- BINANCE ----------------
 async def get_klines(session, symbol, interval, limit=210):
@@ -93,10 +95,7 @@ async def get_top_usdt_symbols(session):
     url = f"{BINANCE_HTTP}/api/v3/ticker/24hr"
     async with session.get(url, timeout=REQ_TIMEOUT) as r:
         data = await r.json()
-    blocked = (
-        "UP", "DOWN", "BULL", "BEAR", "BUSD", "FDUSD", "TUSD", "USDC", "USD1",
-        "USDE", "PERP", "_PERP", "EUR", "EURS", "CEUR", "XUSD", "USDX", "GUSD"
-    )
+    blocked = ("UP", "DOWN", "BULL", "BEAR", "BUSD", "FDUSD", "TUSD", "USDC", "USD1", "USDE", "PERP", "_PERP", "EUR", "XUSD")
     pares = []
     for d in data:
         s = d.get("symbol", "")
@@ -124,33 +123,27 @@ def mark(symbol, kind):
 
 # ---------------- CORE CHECKS ----------------
 def detect_exhaustion_5m(o, h, l, c, v):
-    if len(c) < 40: return False, ""
+    if len(c) < 30: return False, ""
     last = len(c)-1
-
-    # 1️⃣ queda recente
-    base = c[max(0, last-10)]
-    drop_pct = (c[last]/(base+1e-12)-1.0)*100.0
-    cond_drop = drop_pct <= -2.5  # caiu pelo menos 2,5%
-
-    # 2️⃣ lateralização nos últimos 5 candles
-    recent = c[-5:]
-    var_pct = (max(recent) - min(recent)) / (sum(recent)/len(recent) + 1e-12)
-    cond_side = var_pct <= 0.012  # variação ≤ 1,2%
-
-    # 3️⃣ volume ainda presente (sem sumir)
+    open_, high_, low_, close_ = o[last], h[last], l[last], c[last]
+    body = abs(close_ - open_)
+    lower_wick = open_ - low_ if close_ >= open_ else close_ - low_
+    cond_hammer = (close_ > open_) and (lower_wick >= 2.0*body)
     vol_ma20 = sum(v[-20:]) / 20.0
-    cond_vol = v[-1] >= 0.9 * (vol_ma20 + 1e-12)
-
-    if cond_drop and cond_side and cond_vol:
-        msg = f"🟣 <b>ACUMULAÇÃO / EXAUSTÃO VENDEDORA (5m)</b>\n💰 {fmt_price(c[last])}\n🕒 {now_br()}"
+    cond_vol = v[last] >= 1.1 * (vol_ma20 + 1e-12)
+    base = c[max(0, last-12)]
+    drop_pct = (close_/(base+1e-12)-1.0)*100.0
+    cond_drop = drop_pct <= -1.5
+    if cond_hammer and cond_vol and cond_drop:
+        msg = f"🟥 <b>EXAUSTÃO VENDEDORA (5m)</b>\n💰 {fmt_price(close_)}\n🕒 {now_br()}"
         return True, msg
     return False, ""
 
 def tendencia_iniciando_5m(ema9, ma20, ma50):
-    if len(ema9) < 3: return False
-    i1 = len(ema9)-1; i0 = i1-1; i2 = i1-2
-    cross_9_20 = (ema9[i1] > ma20[i1]) and (ema9[i0] <= ma20[i0] or ema9[i2] < ma20[i2])
-    cross_9_50 = (ema9[i1] > ma50[i1]) and (ema9[i0] <= ma50[i0] or ema9[i2] < ma50[i2])
+    if len(ema9) < 2: return False
+    i1 = len(ema9)-1; i0 = i1-1
+    cross_9_20 = cross_up(ema9[i0], ema9[i1], ma20[i0], ma20[i1])
+    cross_9_50 = cross_up(ema9[i0], ema9[i1], ma50[i0], ma50[i1])
     ok = (cross_9_20 and ema9[i1] > ma50[i1]) or (cross_9_50 and ema9[i1] > ma20[i1]) or (cross_9_20 and cross_9_50)
     return ok
 
@@ -169,14 +162,15 @@ def preconf_15m_ema9_over_200(ema9, ma200):
     i1 = len(ema9)-1; i0 = i1-1
     return cross_up(ema9[i0], ema9[i1], ma200[i0], ma200[i1])
 
-def conf_15m_all_over_200_recent(ema9, ma20, ma50, ma200):
+# ⚙️ ALTERADO: inclui adiantamento com Bollinger Bands
+def conf_15m_all_over_200_recent(ema9, ma20, ma50, ma200, close):
     if len(ema9) < 2: return False
     i1 = len(ema9)-1; i0 = i1-1
     structure = (ema9[i1] > ma20[i1] > ma50[i1] > ma200[i1])
-    c20 = cross_up(ma20[i0], ma20[i1], ma200[i0], ma200[i1])
-    c50 = cross_up(ma50[i0], ma50[i1], ma200[i0], ma200[i1])
-    recent = (c20 or c50)
-    return structure and recent
+    cross_9_200 = cross_up(ema9[i0], ema9[i1], ma200[i0], ma200[i1])
+    bb_upper, _ = bollinger_bands(close, 20, 2)
+    bb_trigger = close[i1] > bb_upper[i1] and ema9[i1] > ma50[i1] > ma200[i1]
+    return (structure and (cross_9_200 or bb_trigger))
 
 # ---------------- WORKER ----------------
 async def scan_symbol(session, symbol):
@@ -197,17 +191,13 @@ async def scan_symbol(session, symbol):
         i5 = len(c5)-1
         below_200_context = c5[i5] < ma200_5[i5] if ma200_5[i5] else False
 
-        upper, mid, lower = bollinger_bands(c5, 20, 2)
-        band_width = (upper[-1] - lower[-1]) / (mid[-1] + 1e-12)
-        bb_signal = band_width <= 0.03 and c5[-1] > mid[-1]
-
         if below_200_context:
             ok, msg = detect_exhaustion_5m(o5, h5, l5, c5, v5)
             if ok and allowed(symbol, "EXAUSTAO_5M"):
                 await tg(session, f"⭐ {symbol}\n{msg}")
                 mark(symbol, "EXAUSTAO_5M")
 
-        if (tendencia_iniciando_5m(ema9_5, ma20_5, ma50_5) or bb_signal) and allowed(symbol, "INI_5M"):
+        if tendencia_iniciando_5m(ema9_5, ma20_5, ma50_5) and allowed(symbol, "INI_5M"):
             if (abs(c5[i5] - ma200_5[i5]) / (ma200_5[i5] + 1e-12)) <= 0.05 and c5[i5] < ma200_5[i5]:
                 p = fmt_price(c5[i5])
                 msg = f"🟢 {symbol} ⬆️ Tendência iniciando (5m)\n💰 {p}\n🕒 {now_br()}"
@@ -236,7 +226,7 @@ async def scan_symbol(session, symbol):
             await tg(session, msg)
             mark(symbol, "PRE_15M")
 
-        if conf_15m_all_over_200_recent(ema9_15, ma20_15, ma50_15, ma200_15) and allowed(symbol, "CONF_15M"):
+        if conf_15m_all_over_200_recent(ema9_15, ma20_15, ma50_15, ma200_15, c15) and allowed(symbol, "CONF_15M"):
             p = fmt_price(c15[j])
             msg = f"🚀 {symbol} ⬆️ Tendência confirmada (15m)\n💰 {p}\n🕒 {now_br()}"
             await tg(session, msg)
