@@ -3,7 +3,7 @@
 # ✅ Corrige definitivamente o alerta "Tendência iniciando" acima da MA200
 # ✅ Telegram ativo e estrutura idêntica à v5.2
 
-import os, asyncio, aiohttp, time, math
+import os, asyncio, aiohttp, time, math, statistics
 from datetime import datetime
 from flask import Flask
 import threading
@@ -64,6 +64,18 @@ def ema(seq, span):
         e = alpha*x + (1-alpha)*e
         out.append(e)
     return out
+
+def bollinger_bands(seq, n=20, mult=2):
+    if len(seq) < n: return [], [], []
+    out_mid, out_upper, out_lower = [], [], []
+    for i in range(len(seq)):
+        window = seq[max(0, i-n+1):i+1]
+        m = sum(window)/len(window)
+        s = statistics.pstdev(window)
+        out_mid.append(m)
+        out_upper.append(m + mult*s)
+        out_lower.append(m - mult*s)
+    return out_upper, out_mid, out_lower
 
 # ---------------- BINANCE ----------------
 async def get_klines(session, symbol, interval, limit=210):
@@ -176,13 +188,17 @@ async def scan_symbol(session, symbol):
         i5 = len(c5)-1
         below_200_context = c5[i5] < ma200_5[i5] if ma200_5[i5] else False
 
+        upper, mid, lower = bollinger_bands(c5, 20, 2)
+        band_width = (upper[-1] - lower[-1]) / (mid[-1] + 1e-12)
+        bb_signal = band_width <= 0.03 and c5[-1] > mid[-1]
+
         if below_200_context:
             ok, msg = detect_exhaustion_5m(o5, h5, l5, c5, v5)
             if ok and allowed(symbol, "EXAUSTAO_5M"):
                 await tg(session, f"⭐ {symbol}\n{msg}")
                 mark(symbol, "EXAUSTAO_5M")
 
-        if tendencia_iniciando_5m(ema9_5, ma20_5, ma50_5) and allowed(symbol, "INI_5M"):
+        if (tendencia_iniciando_5m(ema9_5, ma20_5, ma50_5) or bb_signal) and allowed(symbol, "INI_5M"):
             if (abs(c5[i5] - ma200_5[i5]) / (ma200_5[i5] + 1e-12)) <= 0.05 and c5[i5] < ma200_5[i5]:
                 p = fmt_price(c5[i5])
                 msg = f"🟢 {symbol} ⬆️ Tendência iniciando (5m)\n💰 {p}\n🕒 {now_br()}"
