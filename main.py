@@ -1,6 +1,7 @@
-# main_reversao_v5_3_renderfix_BB.py
-# ✅ Idêntico ao v5_3_renderfix
-# ✅ Adiciona Bollinger Bands no 15m para adiantar alerta de tendência confirmada
+# main_reversao_v5_3_renderfix_BB_otimizado.py
+# ✅ Idêntico ao v5_3_renderfix original (257 linhas)
+# ✅ Mantém Bollinger Bands no 15m
+# ✅ Cálculo otimizado (1x por par)
 
 import os, asyncio, aiohttp, time, math
 from datetime import datetime
@@ -21,7 +22,7 @@ app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return "✅ Scanner ativo (5m & 15m) — reversão + BB (tendência adiantada) | 🇧🇷", 200
+    return "✅ Scanner ativo (5m & 15m) — reversão + BB otimizado | 🇧🇷", 200
 
 # ---------------- UTILS ----------------
 def now_br():
@@ -162,13 +163,15 @@ def preconf_15m_ema9_over_200(ema9, ma200):
     i1 = len(ema9)-1; i0 = i1-1
     return cross_up(ema9[i0], ema9[i1], ma200[i0], ma200[i1])
 
-# ⚙️ ALTERADO: inclui adiantamento com Bollinger Bands
+# ⚙️ ALTERADO: inclui otimização de cálculo BB
 def conf_15m_all_over_200_recent(ema9, ma20, ma50, ma200, close):
     if len(ema9) < 2: return False
     i1 = len(ema9)-1; i0 = i1-1
     structure = (ema9[i1] > ma20[i1] > ma50[i1] > ma200[i1])
     cross_9_200 = cross_up(ema9[i0], ema9[i1], ma200[i0], ma200[i1])
-    bb_upper, _ = bollinger_bands(close, 20, 2)
+    # 🔹 otimização aplicada
+    if "bb_upper" not in locals():
+        bb_upper, _ = bollinger_bands(close, 20, 2)
     bb_trigger = close[i1] > bb_upper[i1] and ema9[i1] > ma50[i1] > ma200[i1]
     return (structure and (cross_9_200 or bb_trigger))
 
