@@ -1,7 +1,6 @@
 # main_reversao_v5_3_renderfix.py
-# ✅ Mantém 100% do código original (257 linhas)
-# ✅ Corrige definitivamente o alerta "Tendência iniciando" acima da MA200
-# ✅ Telegram ativo e estrutura idêntica à v5.2
+# ✅ Mantém 100% do código original
+# ✅ Adiciona filtro para remover moedas tipo EUR, XUSD e similares
 
 import os, asyncio, aiohttp, time, math, statistics
 from datetime import datetime
@@ -93,7 +92,10 @@ async def get_top_usdt_symbols(session):
     url = f"{BINANCE_HTTP}/api/v3/ticker/24hr"
     async with session.get(url, timeout=REQ_TIMEOUT) as r:
         data = await r.json()
-    blocked = ("UP", "DOWN", "BULL", "BEAR", "BUSD", "FDUSD", "TUSD", "USDC", "USD1", "USDE", "PERP", "_PERP")
+    blocked = (
+        "UP", "DOWN", "BULL", "BEAR", "BUSD", "FDUSD", "TUSD", "USDC", "USD1",
+        "USDE", "PERP", "_PERP", "EUR", "EURS", "CEUR", "XUSD", "USDX", "GUSD"
+    )
     pares = []
     for d in data:
         s = d.get("symbol", "")
