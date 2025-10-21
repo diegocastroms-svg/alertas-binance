@@ -1,7 +1,7 @@
-# main_reversao_v5_3_renderfix_15m_cruzamento.py
-# ✅ Igual ao v5_3_renderfix original
-# ✅ ÚNICA mudança: tendência confirmada (15m) só dispara no cruzamento real EMA9 x MA200
-# ✅ Nenhuma outra linha alterada
+# main_reversao_v5_3_renderfix_3m_cruzamento.py
+# ✅ Mantém 100% da lógica atual
+# ✅ Adiciona apenas alerta de EMA9 tocando ou cruzando MA200 no gráfico de 3m
+# ✅ Nenhuma outra parte alterada
 
 import os, asyncio, aiohttp, time, math, statistics
 from datetime import datetime
@@ -22,7 +22,7 @@ app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return "✅ Scanner ativo (5m & 15m) — reversão por cruzamentos | 🇧🇷", 200
+    return "✅ Scanner ativo (3m, 5m & 15m) — reversão por cruzamentos | 🇧🇷", 200
 
 # ---------------- UTILS ----------------
 def now_br():
@@ -166,24 +166,32 @@ def preconf_15m_ema9_over_200(ema9, ma200):
     i1 = len(ema9)-1; i0 = i1-1
     return cross_up(ema9[i0], ema9[i1], ma200[i0], ma200[i1])
 
-# ⚙️ ALTERADO: dispara somente no cruzamento real da EMA9 com a MA200
 def conf_15m_all_over_200_recent(ema9, ma20, ma50, ma200):
-    if len(ema9) < 3:
-        return False
+    if len(ema9) < 3: return False
     i1 = len(ema9) - 1
     i0 = i1 - 1
-
     cruzou_9_200 = cross_up(ema9[i0], ema9[i1], ma200[i0], ma200[i1])
-
-    # Confirma apenas se ainda estiver perto da MA200 (≤5%)
     if cruzou_9_200 and abs(ema9[i1] - ma200[i1]) / (ma200[i1] + 1e-12) <= 0.05:
         return True
-
     return False
 
 # ---------------- WORKER ----------------
 async def scan_symbol(session, symbol):
     try:
+        # 3m — novo sinal
+        k3 = await get_klines(session, symbol, "3m", limit=210)
+        if len(k3) >= 210:
+            c3 = [float(k[4]) for k in k3]
+            ema9_3 = ema(c3, 9)
+            ma200_3 = sma(c3, 200)
+            if len(ema9_3) > 2:
+                i = len(ema9_3) - 1
+                diff = abs(ema9_3[i] - ma200_3[i]) / (ma200_3[i] + 1e-12)
+                if diff <= 0.002 and ema9_3[i] >= ma200_3[i] and allowed(symbol, "CRUZ_3M"):
+                    msg = f"🟢 {symbol} ⬆️ EMA9 tocando/rompendo MA200 (3m)\n💰 {fmt_price(c3[i])}\n🕒 {now_br()}"
+                    await tg(session, msg)
+                    mark(symbol, "CRUZ_3M")
+
         # 5m
         k5 = await get_klines(session, symbol, "5m", limit=210)
         if len(k5) < 210: return
