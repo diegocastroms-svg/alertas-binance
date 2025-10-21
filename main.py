@@ -85,10 +85,8 @@ async def get_top_usdt_symbols(session):
     pares = []
     for d in data:
         s = d.get("symbol", "")
-        # apenas pares terminando exatamente em USDT
         if not s.endswith("USDT"):
             continue
-        # ignora variantes bloqueadas (ex: BUSDUSDT, FDUSDUSDT etc.)
         if any(x in s for x in blocked):
             continue
         try:
@@ -128,10 +126,10 @@ def detect_exhaustion_5m(o, h, l, c, v):
     return False, ""
 
 def tendencia_iniciando_5m(ema9, ma20, ma50):
-    if len(ema9) < 2: return False
-    i1 = len(ema9)-1; i0 = i1-1
-    cross_9_20 = cross_up(ema9[i0], ema9[i1], ma20[i0], ma20[i1])
-    cross_9_50 = cross_up(ema9[i0], ema9[i1], ma50[i0], ma50[i1])
+    if len(ema9) < 3: return False
+    i1 = len(ema9)-1; i0 = i1-1; i2 = i1-2
+    cross_9_20 = (ema9[i1] > ma20[i1]) and (ema9[i0] <= ma20[i0] or ema9[i2] < ma20[i2])
+    cross_9_50 = (ema9[i1] > ma50[i1]) and (ema9[i0] <= ma50[i0] or ema9[i2] < ma50[i2])
     ok = (cross_9_20 and ema9[i1] > ma50[i1]) or (cross_9_50 and ema9[i1] > ma20[i1]) or (cross_9_20 and cross_9_50)
     return ok
 
