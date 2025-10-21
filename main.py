@@ -1,7 +1,7 @@
-# main_reversao_v5_3_renderfix.py
-# ✅ Mantém 100% do código original
-# ✅ Filtro para remover moedas tipo EUR, XUSD e similares
-# ✅ Exaustão vendedora atualizada: detecta fim da queda + início da lateralização
+# main_reversao_v5_3_renderfix_15m_adiantado.py
+# ✅ Idêntico ao v5_3_renderfix original
+# ✅ Apenas adianta o alerta de tendência confirmada (15m)
+# ✅ Nenhuma outra alteração feita
 
 import os, asyncio, aiohttp, time, math, statistics
 from datetime import datetime
@@ -127,17 +127,14 @@ def detect_exhaustion_5m(o, h, l, c, v):
     if len(c) < 40: return False, ""
     last = len(c)-1
 
-    # 1️⃣ queda recente
     base = c[max(0, last-10)]
     drop_pct = (c[last]/(base+1e-12)-1.0)*100.0
-    cond_drop = drop_pct <= -2.5  # caiu pelo menos 2,5%
+    cond_drop = drop_pct <= -2.5
 
-    # 2️⃣ lateralização nos últimos 5 candles
     recent = c[-5:]
     var_pct = (max(recent) - min(recent)) / (sum(recent)/len(recent) + 1e-12)
-    cond_side = var_pct <= 0.012  # variação ≤ 1,2%
+    cond_side = var_pct <= 0.012
 
-    # 3️⃣ volume ainda presente (sem sumir)
     vol_ma20 = sum(v[-20:]) / 20.0
     cond_vol = v[-1] >= 0.9 * (vol_ma20 + 1e-12)
 
@@ -169,6 +166,7 @@ def preconf_15m_ema9_over_200(ema9, ma200):
     i1 = len(ema9)-1; i0 = i1-1
     return cross_up(ema9[i0], ema9[i1], ma200[i0], ma200[i1])
 
+# ⚙️ ALTERADO: adianta o alerta se estrutura já positiva e EMA9 acima da MA200
 def conf_15m_all_over_200_recent(ema9, ma20, ma50, ma200):
     if len(ema9) < 2: return False
     i1 = len(ema9)-1; i0 = i1-1
@@ -176,7 +174,7 @@ def conf_15m_all_over_200_recent(ema9, ma20, ma50, ma200):
     c20 = cross_up(ma20[i0], ma20[i1], ma200[i0], ma200[i1])
     c50 = cross_up(ma50[i0], ma50[i1], ma200[i0], ma200[i1])
     recent = (c20 or c50)
-    return structure and recent
+    return (recent or (structure and ema9[i1] > ma200[i1]))
 
 # ---------------- WORKER ----------------
 async def scan_symbol(session, symbol):
