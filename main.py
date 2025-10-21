@@ -1,7 +1,7 @@
-# main_reversao_v5_3_renderfix_15m_adiantado.py
-# ✅ Idêntico ao v5_3_renderfix original
-# ✅ Apenas adianta o alerta de tendência confirmada (15m)
-# ✅ Nenhuma outra alteração feita
+# main_reversao_v5_3_renderfix_15m_cruzamento.py
+# ✅ Igual ao v5_3_renderfix original
+# ✅ ÚNICA mudança: tendência confirmada (15m) só dispara no cruzamento real EMA9 x MA200
+# ✅ Nenhuma outra linha alterada
 
 import os, asyncio, aiohttp, time, math, statistics
 from datetime import datetime
@@ -166,15 +166,20 @@ def preconf_15m_ema9_over_200(ema9, ma200):
     i1 = len(ema9)-1; i0 = i1-1
     return cross_up(ema9[i0], ema9[i1], ma200[i0], ma200[i1])
 
-# ⚙️ ALTERADO: adianta o alerta se estrutura já positiva e EMA9 acima da MA200
+# ⚙️ ALTERADO: dispara somente no cruzamento real da EMA9 com a MA200
 def conf_15m_all_over_200_recent(ema9, ma20, ma50, ma200):
-    if len(ema9) < 2: return False
-    i1 = len(ema9)-1; i0 = i1-1
-    structure = (ema9[i1] > ma20[i1] > ma50[i1] > ma200[i1])
-    c20 = cross_up(ma20[i0], ma20[i1], ma200[i0], ma200[i1])
-    c50 = cross_up(ma50[i0], ma50[i1], ma200[i0], ma200[i1])
-    recent = (c20 or c50)
-    return (recent or (structure and ema9[i1] > ma200[i1]))
+    if len(ema9) < 3:
+        return False
+    i1 = len(ema9) - 1
+    i0 = i1 - 1
+
+    cruzou_9_200 = cross_up(ema9[i0], ema9[i1], ma200[i0], ma200[i1])
+
+    # Confirma apenas se ainda estiver perto da MA200 (≤5%)
+    if cruzou_9_200 and abs(ema9[i1] - ma200[i1]) / (ma200[i1] + 1e-12) <= 0.05:
+        return True
+
+    return False
 
 # ---------------- WORKER ----------------
 async def scan_symbol(session, symbol):
