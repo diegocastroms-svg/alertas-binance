@@ -1,7 +1,7 @@
 # main_reversao_v5_3_renderfix_3m_cruzamento_up_rsi.py
 # ✅ Mantém 100% do código original
 # ✅ Adiciona RSI ao gatilho Bollinger para confirmar força (RSI > 50)
-# ✅ Exaustão vendedora corrigida com RSI, Bollinger e sombra inferior
+# ✅ Exaustão vendedora permanece idêntica à versão funcional anterior
 
 import os, asyncio, aiohttp, time, math, statistics
 from datetime import datetime
@@ -162,18 +162,7 @@ def detect_exhaustion_5m(o, h, l, c, v):
     vol_ma20 = sum(v[-20:]) / 20.0
     cond_vol = v[-1] >= 0.8 * (vol_ma20 + 1e-12)
 
-    # 🔹 Filtros adicionais: RSI, Bollinger e sombra inferior
-    rsi = calc_rsi(c, 14)
-    cond_rsi = len(rsi) > 3 and rsi[-1] < 35 and rsi[-1] > rsi[-3]
-
-    upper, mid, lower = bollinger_bands(c, 20, 2)
-    cond_boll = len(lower) > 0 and c[-1] <= lower[-1]
-
-    sombra_inferior = h[-1] - l[-1]
-    corpo = abs(c[-1] - o[-1]) + 1e-12
-    cond_sombra = (sombra_inferior / corpo) >= 1.5 and c[-1] > o[-1]
-
-    if cond_queda and cond_lateral and cond_vol and (cond_rsi or cond_boll or cond_sombra):
+    if cond_queda and cond_lateral and cond_vol:
         msg = f"🟣 <b>ACUMULAÇÃO / EXAUSTÃO VENDEDORA (5m)</b>\n💰 {fmt_price(c[last])}\n🕒 {now_br()}"
         return True, msg
     return False, ""
@@ -317,4 +306,4 @@ def start_bot():
             time.sleep(5)
 
 threading.Thread(target=start_bot, daemon=True).start()
-app.run(host="0.0.0.0", port=int
+app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
