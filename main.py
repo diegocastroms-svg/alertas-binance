@@ -147,12 +147,12 @@ def mark(symbol, kind):
 
 # ---------------- CORE CHECKS ----------------
 def detect_exhaustion_5m(o, h, l, c, v):
-    if len(c) < 60: 
+    if len(c) < 200:
         return False, ""
-    last = len(c)-1
 
-    base = c[max(0, last-15)]
-    drop_pct = (c[last]/(base+1e-12)-1.0)*100.0
+    last = len(c) - 1
+    base = c[max(0, last - 15)]
+    drop_pct = (c[last] / (base + 1e-12) - 1.0) * 100.0
     cond_queda = drop_pct <= -3.0
 
     recent = c[-5:]
@@ -162,7 +162,16 @@ def detect_exhaustion_5m(o, h, l, c, v):
     vol_ma20 = sum(v[-20:]) / 20.0
     cond_vol = v[-1] >= 0.8 * (vol_ma20 + 1e-12)
 
-    if cond_queda and cond_lateral and cond_vol:
+    rsi = calc_rsi(c, 14)
+    cond_rsi = rsi[-1] < 40
+
+    ema9 = ema(c, 9)
+    cond_pos = c[-1] <= ema9[-1] and c[-1] <= min(c[-10:])
+
+    ma200 = sma(c, 200)
+    cond_dist = (ma200[-1] - c[-1]) / (ma200[-1] + 1e-12) >= 0.05
+
+    if cond_queda and cond_lateral and cond_vol and cond_rsi and cond_pos and cond_dist:
         msg = f"🟣 <b>ACUMULAÇÃO / EXAUSTÃO VENDEDORA (5m)</b>\n💰 {fmt_price(c[last])}\n🕒 {now_br()}"
         return True, msg
     return False, ""
