@@ -202,7 +202,7 @@ def conf_15m_all_over_200_recent(ema9, ma20, ma50, ma200):
 # ---------------- WORKER ----------------
 async def scan_symbol(session, symbol):
     try:
-        # 3m — EMA9 cruza MA200 de baixo pra cima
+        # 3m — EMA9 cruza MA200 de baixo pra cima  ➜  AJUSTE: encostar (±0,1%) OU cruzar subindo
         k3 = await get_klines(session, symbol, "3m", limit=210)
         if len(k3) >= 210:
             c3 = [float(k[4]) for k in k3]
@@ -210,8 +210,10 @@ async def scan_symbol(session, symbol):
             ma200_3 = sma(c3, 200)
             if len(ema9_3) > 2:
                 i = len(ema9_3) - 1
-                if ema9_3[i-1] < ma200_3[i-1] and ema9_3[i] >= ma200_3[i] and allowed(symbol, "CRUZ_3M"):
-                    msg = f"🟢 {symbol} ⬆️ EMA9 cruzando de baixo para cima a MA200 (3m)\n💰 {fmt_price(c3[i])}\n🕒 {now_br()}"
+                toca = abs(ema9_3[i] - ma200_3[i]) / (ma200_3[i] + 1e-12) <= 0.001
+                cruza = ema9_3[i-1] < ma200_3[i-1] and ema9_3[i] >= ma200_3[i]
+                if (toca or cruza) and allowed(symbol, "CRUZ_3M"):
+                    msg = f"🟢 {symbol} ⬆️ EMA9 tocando / cruzando MA200 (3m)\n💰 {fmt_price(c3[i])}\n🕒 {now_br()}"
                     await tg(session, msg)
                     mark(symbol, "CRUZ_3M")
 
@@ -242,8 +244,12 @@ async def scan_symbol(session, symbol):
                 await tg(session, f"⭐ {symbol}\n{msg}")
                 mark(symbol, "EXAUSTAO_5M")
 
+        # AJUSTE: “Iniciando (5m)” só se EMA9, MA20 e MA50 estiverem > 0,5% acima da MA200
         if (tendencia_iniciando_5m(ema9_5, ma20_5, ma50_5) or bb_signal) and allowed(symbol, "INI_5M"):
-            if (abs(c5[i5] - ma200_5[i5]) / (ma200_5[i5] + 1e-12)) <= 0.05 and c5[i5] < ma200_5[i5]:
+            dist_9  = (ema9_5[i5] - ma200_5[i5]) / (ma200_5[i5] + 1e-12)
+            dist_20 = (ma20_5[i5] - ma200_5[i5]) / (ma200_5[i5] + 1e-12)
+            dist_50 = (ma50_5[i5] - ma200_5[i5]) / (ma200_5[i5] + 1e-12)
+            if (dist_9 > 0.005) and (dist_20 > 0.005) and (dist_50 > 0.005):
                 p = fmt_price(c5[i5])
                 msg = f"🟢 {symbol} ⬆️ Tendência iniciando (5m)\n💰 {p}\n🕒 {now_br()}"
                 await tg(session, msg)
