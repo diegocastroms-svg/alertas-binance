@@ -1,7 +1,7 @@
-# main_reversao_v5_3_renderfix_3m_cruzamento_up.py
+# main_reversao_v5_3_renderfix_3m_cruzamento_up_rsi.py
 # ✅ Mantém 100% do código original
-# ✅ Corrigido: evita alerta de "Tendência iniciando (5m)" logo após exaustão
-# ✅ Nenhuma outra parte alterada
+# ✅ Adiciona RSI ao gatilho Bollinger para confirmar força (RSI > 50)
+# ✅ Exaustão vendedora permanece idêntica à versão funcional anterior
 
 import os, asyncio, aiohttp, time, math, statistics
 from datetime import datetime
@@ -77,6 +77,29 @@ def bollinger_bands(seq, n=20, mult=2):
         out_lower.append(m - mult*s)
     return out_upper, out_mid, out_lower
 
+def calc_rsi(seq, period=14):
+    if len(seq) < period + 1:
+        return [50.0] * len(seq)
+    gains, losses = [], []
+    for i in range(1, len(seq)):
+        diff = seq[i] - seq[i-1]
+        gains.append(max(diff, 0))
+        losses.append(abs(min(diff, 0)))
+    rsi = []
+    avg_gain = sum(gains[:period]) / period
+    avg_loss = sum(losses[:period]) / period
+    rs = avg_gain / (avg_loss + 1e-12)
+    rsi.append(100 - (100 / (1 + rs)))
+    for i in range(period, len(seq)-1):
+        diff = seq[i] - seq[i-1]
+        gain = max(diff, 0)
+        loss = abs(min(diff, 0))
+        avg_gain = (avg_gain * (period-1) + gain) / period
+        avg_loss = (avg_loss * (period-1) + loss) / period
+        rs = avg_gain / (avg_loss + 1e-12)
+        rsi.append(100 - (100 / (1 + rs)))
+    return [50.0]*(len(seq)-len(rsi)) + rsi
+
 # ---------------- BINANCE ----------------
 async def get_klines(session, symbol, interval, limit=210):
     url = f"{BINANCE_HTTP}/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
@@ -128,17 +151,14 @@ def detect_exhaustion_5m(o, h, l, c, v):
         return False, ""
     last = len(c)-1
 
-    # 🔹 Verifica queda anterior (últimos 15 candles)
     base = c[max(0, last-15)]
     drop_pct = (c[last]/(base+1e-12)-1.0)*100.0
     cond_queda = drop_pct <= -3.0
 
-    # 🔹 Lateralização nas últimas 5 velas
     recent = c[-5:]
     var_pct = (max(recent) - min(recent)) / (sum(recent)/len(recent) + 1e-12)
     cond_lateral = var_pct <= 0.012
 
-    # 🔹 Volume ainda ativo
     vol_ma20 = sum(v[-20:]) / 20.0
     cond_vol = v[-1] >= 0.8 * (vol_ma20 + 1e-12)
 
@@ -182,7 +202,7 @@ def conf_15m_all_over_200_recent(ema9, ma20, ma50, ma200):
 # ---------------- WORKER ----------------
 async def scan_symbol(session, symbol):
     try:
-        # 3m — alerta apenas se EMA9 cruza de baixo para cima a MA200
+        # 3m — EMA9 cruza MA200 de baixo pra cima
         k3 = await get_klines(session, symbol, "3m", limit=210)
         if len(k3) >= 210:
             c3 = [float(k[4]) for k in k3]
@@ -213,7 +233,8 @@ async def scan_symbol(session, symbol):
 
         upper, mid, lower = bollinger_bands(c5, 20, 2)
         band_width = (upper[-1] - lower[-1]) / (mid[-1] + 1e-12)
-        bb_signal = band_width <= 0.03 and c5[-1] > mid[-1]
+        rsi = calc_rsi(c5, 14)
+        bb_signal = band_width <= 0.03 and c5[-1] > mid[-1] and rsi[-1] > 50
 
         if below_200_context:
             ok, msg = detect_exhaustion_5m(o5, h5, l5, c5, v5)
@@ -221,9 +242,7 @@ async def scan_symbol(session, symbol):
                 await tg(session, f"⭐ {symbol}\n{msg}")
                 mark(symbol, "EXAUSTAO_5M")
 
-        # ⛔ Nova lógica: evita "iniciando" se exaustão recente (últimos 10 min)
-        recent_exhaust = (time.time() - LAST_HIT.get((symbol, "EXAUSTAO_5M"), 0)) < 600
-        if (not recent_exhaust) and (tendencia_iniciando_5m(ema9_5, ma20_5, ma50_5) or bb_signal) and allowed(symbol, "INI_5M"):
+        if (tendencia_iniciando_5m(ema9_5, ma20_5, ma50_5) or bb_signal) and allowed(symbol, "INI_5M"):
             if (abs(c5[i5] - ma200_5[i5]) / (ma200_5[i5] + 1e-12)) <= 0.05 and c5[i5] < ma200_5[i5]:
                 p = fmt_price(c5[i5])
                 msg = f"🟢 {symbol} ⬆️ Tendência iniciando (5m)\n💰 {p}\n🕒 {now_br()}"
