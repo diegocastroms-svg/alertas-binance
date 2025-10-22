@@ -210,7 +210,8 @@ async def scan_symbol(session, symbol):
             ma200_3 = sma(c3, 200)
             if len(ema9_3) > 2:
                 i = len(ema9_3) - 1
-                toca = abs(ema9_3[i] - ma200_3[i]) / (ma200_3[i] + 1e-12) <= 0.001
+                # ✅ Correção: dispara só se tocar ou cruzar de baixo pra cima (EMA9 acima da MA200)
+                toca = abs(ema9_3[i] - ma200_3[i]) / (ma200_3[i] + 1e-12) <= 0.001 and ema9_3[i] > ma200_3[i]
                 cruza = ema9_3[i-1] < ma200_3[i-1] and ema9_3[i] >= ma200_3[i]
                 if (toca or cruza) and allowed(symbol, "CRUZ_3M"):
                     msg = f"🟢 {symbol} ⬆️ EMA9 tocando / cruzando MA200 (3m)\n💰 {fmt_price(c3[i])}\n🕒 {now_br()}"
