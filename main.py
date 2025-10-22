@@ -313,5 +313,4 @@ def start_bot():
     while True:
         try:
             asyncio.run(main_loop())
-        except Exception:
-            time.sleep(
+        except
