@@ -253,14 +253,14 @@ async def scan_symbol(session, symbol):
                 await tg(session, f"⭐ {symbol}\n{msg}")
                 mark(symbol, "EXAUSTAO_5M")
 
-        # AJUSTE: “Iniciando (5m)” só se cruzar EMA9/MA20 acima da MA200 recentemente e RSI entre 50–60
-        if (tendencia_iniciando_5m(ema9_5, ma20_5, ma50_5) or bb_signal) and allowed(symbol, "INI_5M"):
-            cross_9_200 = ema9_5[i5-1] <= ma200_5[i5-1] and ema9_5[i5] > ma200_5[i5]
-            cross_20_200 = ma20_5[i5-1] <= ma200_5[i5-1] and ma20_5[i5] > ma200_5[i5]
-            recent_cross = cross_9_200 or cross_20_200
+        # AJUSTE: “Iniciando (5m)” quando EMA9 cruza pra cima a MA20/MA50 abaixo da MA200 e BB confirma força
+        if allowed(symbol, "INI_5M"):
+            cross_9_20 = ema9_5[i5-1] <= ma20_5[i5-1] and ema9_5[i5] > ma20_5[i5]
+            cross_9_50 = ema9_5[i5-1] <= ma50_5[i5-1] and ema9_5[i5] > ma50_5[i5]
+            below_200 = ma20_5[i5] < ma200_5[i5] and ma50_5[i5] < ma200_5[i5]
             rsi = calc_rsi(c5, 14)
-            rsi_ok = 50 < rsi[-1] < 60
-            if recent_cross and rsi_ok:
+            rsi_ok = 45 <= rsi[-1] <= 55
+            if (cross_9_20 or cross_9_50) and below_200 and bb_signal and rsi_ok:
                 p = fmt_price(c5[i5])
                 msg = f"🟢 {symbol} ⬆️ Tendência iniciando (5m)\n💰 {p}\n🕒 {now_br()}"
                 await tg(session, msg)
@@ -317,4 +317,3 @@ def start_bot():
             time.sleep(5)
 
 threading.Thread(target=start_bot, daemon=True).start()
-app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
