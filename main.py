@@ -1,6 +1,6 @@
 # main_reversao_v5_3_renderfix_3m_cruzamento_up.py
-# ✅ Mantém 100% da lógica original
-# ✅ Corrigido: detecção de exaustão vendedora mais precisa (queda + lateralização + volume)
+# ✅ Mantém 100% do código original
+# ✅ Corrigido: evita alerta de "Tendência iniciando (5m)" logo após exaustão
 # ✅ Nenhuma outra parte alterada
 
 import os, asyncio, aiohttp, time, math, statistics
@@ -221,7 +221,9 @@ async def scan_symbol(session, symbol):
                 await tg(session, f"⭐ {symbol}\n{msg}")
                 mark(symbol, "EXAUSTAO_5M")
 
-        if (tendencia_iniciando_5m(ema9_5, ma20_5, ma50_5) or bb_signal) and allowed(symbol, "INI_5M"):
+        # ⛔ Nova lógica: evita "iniciando" se exaustão recente (últimos 10 min)
+        recent_exhaust = (time.time() - LAST_HIT.get((symbol, "EXAUSTAO_5M"), 0)) < 600
+        if (not recent_exhaust) and (tendencia_iniciando_5m(ema9_5, ma20_5, ma50_5) or bb_signal) and allowed(symbol, "INI_5M"):
             if (abs(c5[i5] - ma200_5[i5]) / (ma200_5[i5] + 1e-12)) <= 0.05 and c5[i5] < ma200_5[i5]:
                 p = fmt_price(c5[i5])
                 msg = f"🟢 {symbol} ⬆️ Tendência iniciando (5m)\n💰 {p}\n🕒 {now_br()}"
