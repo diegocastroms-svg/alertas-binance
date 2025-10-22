@@ -253,12 +253,14 @@ async def scan_symbol(session, symbol):
                 await tg(session, f"⭐ {symbol}\n{msg}")
                 mark(symbol, "EXAUSTAO_5M")
 
-        # AJUSTE: “Iniciando (5m)” só se EMA9, MA20 e MA50 estiverem > 0,5% acima da MA200
+        # AJUSTE: “Iniciando (5m)” só se cruzar EMA9/MA20 acima da MA200 recentemente e RSI entre 50–60
         if (tendencia_iniciando_5m(ema9_5, ma20_5, ma50_5) or bb_signal) and allowed(symbol, "INI_5M"):
-            dist_9  = (ema9_5[i5] - ma200_5[i5]) / (ma200_5[i5] + 1e-12)
-            dist_20 = (ma20_5[i5] - ma200_5[i5]) / (ma200_5[i5] + 1e-12)
-            dist_50 = (ma50_5[i5] - ma200_5[i5]) / (ma200_5[i5] + 1e-12)
-            if (dist_9 > 0.005) and (dist_20 > 0.005) and (dist_50 > 0.005):
+            cross_9_200 = ema9_5[i5-1] <= ma200_5[i5-1] and ema9_5[i5] > ma200_5[i5]
+            cross_20_200 = ma20_5[i5-1] <= ma200_5[i5-1] and ma20_5[i5] > ma200_5[i5]
+            recent_cross = cross_9_200 or cross_20_200
+            rsi = calc_rsi(c5, 14)
+            rsi_ok = 50 < rsi[-1] < 60
+            if recent_cross and rsi_ok:
                 p = fmt_price(c5[i5])
                 msg = f"🟢 {symbol} ⬆️ Tendência iniciando (5m)\n💰 {p}\n🕒 {now_br()}"
                 await tg(session, msg)
