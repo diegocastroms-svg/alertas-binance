@@ -1,6 +1,6 @@
-# main_reversao_v5_3_renderfix_3m_cruzamento.py
-# ✅ Mantém 100% da lógica atual
-# ✅ Adiciona apenas alerta de EMA9 tocando ou cruzando MA200 no gráfico de 3m
+# main_reversao_v5_3_renderfix_3m_cruzamento_up.py
+# ✅ Mantém 100% da lógica original
+# ✅ Corrigido: alerta 3m só dispara quando EMA9 cruza de baixo para cima a MA200
 # ✅ Nenhuma outra parte alterada
 
 import os, asyncio, aiohttp, time, math, statistics
@@ -178,7 +178,7 @@ def conf_15m_all_over_200_recent(ema9, ma20, ma50, ma200):
 # ---------------- WORKER ----------------
 async def scan_symbol(session, symbol):
     try:
-        # 3m — novo sinal
+        # 3m — alerta apenas se EMA9 cruza de baixo para cima a MA200
         k3 = await get_klines(session, symbol, "3m", limit=210)
         if len(k3) >= 210:
             c3 = [float(k[4]) for k in k3]
@@ -186,9 +186,8 @@ async def scan_symbol(session, symbol):
             ma200_3 = sma(c3, 200)
             if len(ema9_3) > 2:
                 i = len(ema9_3) - 1
-                diff = abs(ema9_3[i] - ma200_3[i]) / (ma200_3[i] + 1e-12)
-                if diff <= 0.002 and ema9_3[i] >= ma200_3[i] and allowed(symbol, "CRUZ_3M"):
-                    msg = f"🟢 {symbol} ⬆️ EMA9 tocando/rompendo MA200 (3m)\n💰 {fmt_price(c3[i])}\n🕒 {now_br()}"
+                if ema9_3[i-1] < ma200_3[i-1] and ema9_3[i] >= ma200_3[i] and allowed(symbol, "CRUZ_3M"):
+                    msg = f"🟢 {symbol} ⬆️ EMA9 cruzando de baixo para cima a MA200 (3m)\n💰 {fmt_price(c3[i])}\n🕒 {now_br()}"
                     await tg(session, msg)
                     mark(symbol, "CRUZ_3M")
 
