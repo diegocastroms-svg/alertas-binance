@@ -317,3 +317,4 @@ def start_bot():
             time.sleep(5)
 
 threading.Thread(target=start_bot, daemon=True).start()
+app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
