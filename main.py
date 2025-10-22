@@ -1,6 +1,6 @@
 # main_reversao_v5_3_renderfix_3m_cruzamento_up.py
 # ✅ Mantém 100% da lógica original
-# ✅ Corrigido: alerta 3m só dispara quando EMA9 cruza de baixo para cima a MA200
+# ✅ Corrigido: detecção de exaustão vendedora mais precisa (queda + lateralização + volume)
 # ✅ Nenhuma outra parte alterada
 
 import os, asyncio, aiohttp, time, math, statistics
@@ -124,21 +124,25 @@ def mark(symbol, kind):
 
 # ---------------- CORE CHECKS ----------------
 def detect_exhaustion_5m(o, h, l, c, v):
-    if len(c) < 40: return False, ""
+    if len(c) < 60: 
+        return False, ""
     last = len(c)-1
 
-    base = c[max(0, last-10)]
+    # 🔹 Verifica queda anterior (últimos 15 candles)
+    base = c[max(0, last-15)]
     drop_pct = (c[last]/(base+1e-12)-1.0)*100.0
-    cond_drop = drop_pct <= -2.5
+    cond_queda = drop_pct <= -3.0
 
+    # 🔹 Lateralização nas últimas 5 velas
     recent = c[-5:]
     var_pct = (max(recent) - min(recent)) / (sum(recent)/len(recent) + 1e-12)
-    cond_side = var_pct <= 0.012
+    cond_lateral = var_pct <= 0.012
 
+    # 🔹 Volume ainda ativo
     vol_ma20 = sum(v[-20:]) / 20.0
-    cond_vol = v[-1] >= 0.9 * (vol_ma20 + 1e-12)
+    cond_vol = v[-1] >= 0.8 * (vol_ma20 + 1e-12)
 
-    if cond_drop and cond_side and cond_vol:
+    if cond_queda and cond_lateral and cond_vol:
         msg = f"🟣 <b>ACUMULAÇÃO / EXAUSTÃO VENDEDORA (5m)</b>\n💰 {fmt_price(c[last])}\n🕒 {now_br()}"
         return True, msg
     return False, ""
@@ -211,17 +215,13 @@ async def scan_symbol(session, symbol):
         band_width = (upper[-1] - lower[-1]) / (mid[-1] + 1e-12)
         bb_signal = band_width <= 0.03 and c5[-1] > mid[-1]
 
-        # >>>>>>> CORREÇÃO MÍNIMA PARA EXAUSTÃO <<<<<<<
-        ex_ok = False
         if below_200_context:
             ok, msg = detect_exhaustion_5m(o5, h5, l5, c5, v5)
             if ok and allowed(symbol, "EXAUSTAO_5M"):
                 await tg(session, f"⭐ {symbol}\n{msg}")
                 mark(symbol, "EXAUSTAO_5M")
-            ex_ok = ok
-        # <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
 
-        if (not ex_ok) and (tendencia_iniciando_5m(ema9_5, ma20_5, ma50_5) or bb_signal) and allowed(symbol, "INI_5M"):
+        if (tendencia_iniciando_5m(ema9_5, ma20_5, ma50_5) or bb_signal) and allowed(symbol, "INI_5M"):
             if (abs(c5[i5] - ma200_5[i5]) / (ma200_5[i5] + 1e-12)) <= 0.05 and c5[i5] < ma200_5[i5]:
                 p = fmt_price(c5[i5])
                 msg = f"🟢 {symbol} ⬆️ Tendência iniciando (5m)\n💰 {p}\n🕒 {now_br()}"
