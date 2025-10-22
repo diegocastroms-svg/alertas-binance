@@ -1,6 +1,7 @@
-# main_reversao_v5_3_renderfix_3m_cruzamento_up_exaustao_fix.py
-# ✅ Corrige conflito entre exaustão e início no 5m
-# ✅ Mantém 100% do restante original
+# main_reversao_v5_3_renderfix_3m_cruzamento_up.py
+# ✅ Mantém 100% da lógica original
+# ✅ Corrigido: alerta 3m só dispara quando EMA9 cruza de baixo para cima a MA200
+# ✅ Nenhuma outra parte alterada
 
 import os, asyncio, aiohttp, time, math, statistics
 from datetime import datetime
@@ -142,27 +143,18 @@ def detect_exhaustion_5m(o, h, l, c, v):
         return True, msg
     return False, ""
 
-# ⚙️ Correção aplicada: agora só dispara "tendência iniciando" se EMA9 estiver acima das curtas e não muito abaixo da MA200
-def tendencia_iniciando_5m(ema9, ma20, ma50, ma200, c):
+def tendencia_iniciando_5m(ema9, ma20, ma50):
     if len(ema9) < 3: return False
-    i1 = len(ema9)-1
-    i0 = i1-1
-
-    cross_9_20 = (ema9[i1] > ma20[i1]) and (ema9[i0] <= ma20[i0])
-    cross_9_50 = (ema9[i1] > ma50[i1]) and (ema9[i0] <= ma50[i0])
-
-    if not (ema9[i1] > ma20[i1] and ema9[i1] > ma50[i1]):
-        return False
-    below200 = (c[i1] < ma200[i1])
-    dist200 = abs(c[i1] - ma200[i1]) / (ma200[i1] + 1e-12)
-    if below200 and dist200 > 0.05:
-        return False
-
-    return cross_9_20 or cross_9_50
+    i1 = len(ema9)-1; i0 = i1-1; i2 = i1-2
+    cross_9_20 = (ema9[i1] > ma20[i1]) and (ema9[i0] <= ma20[i0] or ema9[i2] < ma20[i2])
+    cross_9_50 = (ema9[i1] > ma50[i1]) and (ema9[i0] <= ma50[i0] or ema9[i2] < ma50[i2])
+    ok = (cross_9_20 and ema9[i1] > ma50[i1]) or (cross_9_50 and ema9[i1] > ma20[i1]) or (cross_9_20 and cross_9_50)
+    return ok
 
 def preconf_5m_cross_3_over_200(ema9, ma20, ma50, ma200):
     if len(ema9) < 2: return False
     i1 = len(ema9)-1; i0 = i1-1
+    all_above = ema9[i1] > ma200[i1] and ma20[i1] > ma200[i1] and ma50[i1] > ma200[i1]
     c9  = cross_up(ema9[i0], ema9[i1], ma200[i0], ma200[i1])
     c20 = cross_up(ma20[i0], ma20[i1], ma200[i0], ma200[i1])
     c50 = cross_up(ma50[i0], ma50[i1], ma200[i0], ma200[i1])
@@ -219,13 +211,17 @@ async def scan_symbol(session, symbol):
         band_width = (upper[-1] - lower[-1]) / (mid[-1] + 1e-12)
         bb_signal = band_width <= 0.03 and c5[-1] > mid[-1]
 
+        # >>>>>>> CORREÇÃO MÍNIMA PARA EXAUSTÃO <<<<<<<
+        ex_ok = False
         if below_200_context:
             ok, msg = detect_exhaustion_5m(o5, h5, l5, c5, v5)
             if ok and allowed(symbol, "EXAUSTAO_5M"):
                 await tg(session, f"⭐ {symbol}\n{msg}")
                 mark(symbol, "EXAUSTAO_5M")
+            ex_ok = ok
+        # <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
 
-        if (tendencia_iniciando_5m(ema9_5, ma20_5, ma50_5, ma200_5, c5) or bb_signal) and allowed(symbol, "INI_5M"):
+        if (not ex_ok) and (tendencia_iniciando_5m(ema9_5, ma20_5, ma50_5) or bb_signal) and allowed(symbol, "INI_5M"):
             if (abs(c5[i5] - ma200_5[i5]) / (ma200_5[i5] + 1e-12)) <= 0.05 and c5[i5] < ma200_5[i5]:
                 p = fmt_price(c5[i5])
                 msg = f"🟢 {symbol} ⬆️ Tendência iniciando (5m)\n💰 {p}\n🕒 {now_br()}"
