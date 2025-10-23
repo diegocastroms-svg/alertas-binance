@@ -163,7 +163,7 @@ def detect_exhaustion_5m(o, h, l, c, v):
     cond_vol = v[-1] >= 1.0 * (vol_ma20 + 1e-12)  # precisa de entrada de volume
 
     rsi = calc_rsi(c, 14)
-    cond_rsi = rsi[-1] < 38  # sobrevendido real
+    cond_rsi = rsi[-1] < 45  # sobrevendido real
 
     ema9_vals = ema(c, 9)
     cond_pos = c[-1] <= ema9_vals[-1] and c[-1] <= min(c[-10:])
@@ -178,8 +178,8 @@ def detect_exhaustion_5m(o, h, l, c, v):
         bw_prev = (upper_x[-2] - lower_x[-2]) / (mid_x[-2] + 1e-12)
     else:
         bw_now = bw_prev = 0.0
-    cond_bb_narrow = bw_now <= 0.05
-    cond_toque_lower = l[-1] <= lower_x[-1] if lower_x else False
+    cond_bb_narrow = bw_now <= 0.08
+    cond_toque_lower = l[-1] <= (lower_x[-1] * 1.01) if lower_x else False
 
     # Pavio comprador (candle de rejeição)
     corpo = abs(c[-1] - o[-1])
@@ -385,5 +385,6 @@ def start_bot():
 
 threading.Thread(target=start_bot, daemon=True).start()
 app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
+
 
 
