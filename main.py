@@ -276,23 +276,39 @@ async def scan_symbol(session, symbol):
         k15 = await get_klines(session, symbol, "15m", limit=210)
         if len(k15) < 210: return
         c15 = [float(k[4]) for k in k15]
+        v15 = [float(k[5]) for k in k15]
         ema9_15  = ema(c15, 9)
         ma20_15  = sma(c15, 20)
         ma50_15  = sma(c15, 50)
         ma200_15 = sma(c15, 200)
+        upper_15, mid_15, lower_15 = bollinger_bands(c15, 20, 2)
+        rsi_15 = calc_rsi(c15, 14)
         j = len(c15)-1
 
+        # Pré-confirmada (15m): EMA9 cruzou MA200 E (MA20>MA50) E RSI>50 E Volume >= 1.2x média20
         if preconf_15m_ema9_over_200(ema9_15, ma200_15) and allowed(symbol, "PRE_15M"):
-            p = fmt_price(c15[j])
-            msg = f"🟡 {symbol} ⬆️ Tendência pré-confirmada (15m)\n💰 {p}\n🕒 {now_br()}"
-            await tg(session, msg)
-            mark(symbol, "PRE_15M")
+            vol_ma20_15 = sum(v15[-20:]) / 20.0
+            cond_alinhadas = ma20_15[j] > ma50_15[j]
+            cond_rsi = rsi_15[-1] > 50
+            cond_vol = v15[-1] >= 1.2 * (vol_ma20_15 + 1e-12)
+            if cond_alinhadas and cond_rsi and cond_vol:
+                p = fmt_price(c15[j])
+                msg = f"🟡 {symbol} ⬆️ Tendência pré-confirmada (15m)\n💰 {p}\n🕒 {now_br()}"
+                await tg(session, msg)
+                mark(symbol, "PRE_15M")
 
+        # Confirmada (15m): 9,20,50 > 200 E Bollinger abrindo pra cima E RSI>55
         if conf_15m_all_over_200_recent(ema9_15, ma20_15, ma50_15, ma200_15) and allowed(symbol, "CONF_15M"):
-            p = fmt_price(c15[j])
-            msg = f"🚀 {symbol} ⬆️ Tendência confirmada (15m)\n💰 {p}\n🕒 {now_br()}"
-            await tg(session, msg)
-            mark(symbol, "CONF_15M")
+            todas_acima = (ema9_15[j] > ma200_15[j]) and (ma20_15[j] > ma200_15[j]) and (ma50_15[j] > ma200_15[j])
+            band_width_now_15 = (upper_15[-1] - lower_15[-1]) / (mid_15[-1] + 1e-12)
+            band_width_prev_15 = (upper_15[-2] - lower_15[-2]) / (mid_15[-2] + 1e-12)
+            bb_abrindo_15 = band_width_now_15 > band_width_prev_15
+            rsi_ok_15 = rsi_15[-1] > 55
+            if todas_acima and bb_abrindo_15 and rsi_ok_15:
+                p = fmt_price(c15[j])
+                msg = f"🚀 {symbol} ⬆️ Tendência confirmada (15m)\n💰 {p}\n🕒 {now_br()}"
+                await tg(session, msg)
+                mark(symbol, "CONF_15M")
 
     except:
         return
