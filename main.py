@@ -4,7 +4,7 @@
 # ✅ Exaustão vendedora permanece idêntica à versão funcional anterior
 
 import os, asyncio, aiohttp, time, math, statistics
-from datetime import datetime
+from datetime import datetime, timedelta
 from flask import Flask
 import threading
 
@@ -385,4 +385,5 @@ def start_bot():
 
 threading.Thread(target=start_bot, daemon=True).start()
 app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
+
 
