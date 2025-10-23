@@ -26,7 +26,7 @@ def home():
 
 # ---------------- UTILS ----------------
 def now_br():
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S") + " 🇧🇷"
+    return (datetime.utcnow() - timedelta(hours=3)).strftime("%Y-%m-%d %H:%M:%S") + " 🇧🇷"
 
 async def tg(session, text: str):
     if not (TELEGRAM_TOKEN and CHAT_ID):
@@ -385,3 +385,4 @@ def start_bot():
 
 threading.Thread(target=start_bot, daemon=True).start()
 app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
+
