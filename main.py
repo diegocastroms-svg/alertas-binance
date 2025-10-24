@@ -1,6 +1,6 @@
 # main_breakout_v1_render_hibrido.py
 # ✅ Híbrido (3m + 5m + 15m)
-# ✅ Substituídos todos os alertas antigos
+# ✅ Corrigido alerta do 15m (dispara apenas no cruzamento inicial)
 # ✅ Apenas 3 alertas ativos:
 #    🟡 Rompimento MA200 (3m)
 #    🟠 Confirmação EMA9×MA200 (5m)
@@ -66,18 +66,6 @@ def ema(seq, span):
         e = alpha*x + (1-alpha)*e
         out.append(e)
     return out
-
-def bollinger_bands(seq, n=20, mult=2):
-    if len(seq) < n: return [], [], []
-    out_mid, out_upper, out_lower = [], [], []
-    for i in range(len(seq)):
-        window = seq[max(0, i-n+1):i+1]
-        m = sum(window)/len(window)
-        s = statistics.pstdev(window)
-        out_mid.append(m)
-        out_upper.append(m + mult*s)
-        out_lower.append(m - mult*s)
-    return out_upper, out_mid, out_lower
 
 def calc_rsi(seq, period=14):
     if len(seq) < period + 1:
@@ -156,7 +144,6 @@ async def scan_symbol(session, symbol):
         k3 = await get_klines(session, symbol, "3m", limit=210)
         if len(k3) >= 210:
             c3 = [float(k[4]) for k in k3]
-            v3 = [float(k[5]) for k in k3]
             ma200_3 = sma(c3, 200)
             rsi3 = calc_rsi(c3, 14)
             i3 = len(c3)-1
@@ -196,8 +183,10 @@ async def scan_symbol(session, symbol):
             ma200_15 = sma(c15, 200)
             rsi15 = calc_rsi(c15, 14)
             j = len(c15)-1
-            tendencia_15m = (ema9_15[j] > ema20_15[j] > ma50_15[j] > ma200_15[j]) and (rsi15[-1] > 55)
-            if tendencia_15m and allowed(symbol, "TEND_15M"):
+            formou_agora_15m = (
+                ema9_15[j-1] <= ema20_15[j-1] or ema20_15[j-1] <= ma50_15[j-1] or ma50_15[j-1] <= ma200_15[j-1]
+            ) and (ema9_15[j] > ema20_15[j] > ma50_15[j] > ma200_15[j]) and (rsi15[-1] > 55)
+            if formou_agora_15m and allowed(symbol, "TEND_15M"):
                 msg = (f"🟢 {symbol} — TENDÊNCIA CONSOLIDADA (15m)\n"
                        f"• EMA9>EMA20>MA50>MA200 e RSI>55\n"
                        f"💰 {fmt_price(c15[j])}\n🕒 {now_br()}\n──────────────────────────────")
