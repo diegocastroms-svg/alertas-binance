@@ -11,7 +11,7 @@ import threading
 
 # ---------------- CONFIG ----------------
 BINANCE_HTTP = "https://api.binance.com"
-COOLDOWN_SEC = 8 * 60          # 8 minutos
+COOLDOWN_SEC = 10 * 60          # 10 minutos
 TOP_N = 50
 REQ_TIMEOUT = 8
 
@@ -329,3 +329,4 @@ def start_bot():
 
 threading.Thread(target=start_bot, daemon=True).start()
 app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
+
