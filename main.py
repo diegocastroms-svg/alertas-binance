@@ -175,52 +175,139 @@ def candle_red(close_, open_):   return close_ < open_
 # ---------------- WORKER ----------------
 async def scan_symbol(session, symbol):
     try:
-        k3 = await get_klines(session, symbol, "3m", limit=300)
+        # -------- 3m (MANTIDO) --------
+        k3 = await get_klines(session, symbol, "3m", limit=210)
+        three_ready = False
+        c3 = []; v3 = []
         if len(k3) >= 210:
-            o3 = [float(k[1]) for k in k3]
-            h3 = [float(k[2]) for k in k3]
-            l3 = [float(k[3]) for k in k3]
             c3 = [float(k[4]) for k in k3]
             v3 = [float(k[5]) for k in k3]
+            ema9_3  = ema(c3, 9)
+            ema20_3 = ema(c3, 20)
+            ma50_3  = sma(c3, 50)
+            upper3, mid3, lower3 = bollinger_bands(c3, 20, 2)
+            rsi7_3  = calc_rsi(c3, 7)
+            rsi14_3 = calc_rsi(c3, 14)
+            vma20_3 = sum(v3[-20:]) / 20.0
+            i3 = len(c3) - 1
 
-            ema9_3 = ema(c3, 9)
-            ema21_3 = ema(c3, 21)
-            ema50_3 = ema(c3, 50)
-            rsi3 = calc_rsi(c3, 14)
-            vol_ma20_3 = sum(v3[-20:]) / 20.0
+            # Condição 3m: tendência curta real + volume + expansão
+            cond_3m = (ema9_3[i3] > ema20_3[i3] > ma50_3[i3]) and (rsi7_3[-1] > 55 and rsi14_3[-1] > 50) \
+                      and (v3[-1] >= 1.5*(vma20_3 + 1e-12)) and widening_now(upper3, mid3, lower3) \
+                      and (c3[-1] > mid3[-1])
 
-            if len(ema9_3) > 2:
-                i = len(ema9_3) - 1
-                # Condição precoce: preço atual > EMA 21 anterior OU cruzamento
-                cross_up_9_21 = cross_up(ema9_3[i-1], ema9_3[i], ema21_3[i-1], ema21_3[i])
-                pre_break = c3[-1] > ema21_3[i-1] * 1.01  # 1% acima da EMA 21 anterior
-                vol_spike = v3[-1] >= 1.0 * vol_ma20_3  # Volume pelo menos igual à MA
-                rsi_ok = rsi3[-1] > 25
-                trend_ok = c3[-1] > ema50_3[-1]
-
-                # Debug pra verificar valores
-                print(f"Checando {symbol}: EMA9={ema9_3[-1]:.4f}, EMA21={ema21_3[-1]:.4f}, EMA21_prev={ema21_3[i-1]:.4f}, Vol={v3[-1]:.0f}, VolMA20={vol_ma20_3:.0f}, RSI={rsi3[-1]:.1f}, PreBreak={pre_break}, Cross={cross_up_9_21}")
-
-                # Entrada antecipada
-                if ((pre_break or cross_up_9_21) and vol_spike and rsi_ok and trend_ok and allowed(symbol, "BREAKOUT_3M")):
-                    p = fmt_price(c3[i])
-                    msg = f"🚀 {symbol} ⬆️ Breakout confirmado (3m) - INÍCIO\n💰 {p}\n🕒 {now_br()} (UTC-3)\n──────────────────────────────"
+            if cond_3m:
+                three_ready = True
+                if allowed(symbol, "ALRT_3M"):
+                    msg = (
+                        f"🟦 {symbol} — 3m PRONTO\n"
+                        f"• EMA9>EMA20>MA50 • RSI7:{rsi7_3[-1]:.1f} RSI14:{rsi14_3[-1]:.1f}\n"
+                        f"• Vol {fmt_price(v3[-1])} > 1.5×MA20 • BB abrindo\n"
+                        f"💰 {fmt_price(c3[i3])}\n🕒 {now_br()}\n"
+                        f"──────────────────────────────"
+                    )
                     await tg(session, msg)
-                    mark(symbol, "BREAKOUT_3M")
+                    mark(symbol, "ALRT_3M")
 
-                # Saída mantida
-                if len(rsi3) >= 2 and i >= 1:
-                    rsi_turn_top = rsi3[-2] >= 60 and rsi3[-1] < rsi3[-2] and rsi3[-1] <= 55
-                    first_close_below_ema9 = c3[-1] < ema9_3[-1] and c3[-2] >= ema9_3[-2]
-                    vol_falling = (len(v3) >= 3 and v3[-1] < v3[-2] and v3[-2] <= v3[-3]) or (v3[-1] < vol_ma20_3)
-                    if (rsi_turn_top and first_close_below_ema9 and vol_falling and allowed(symbol, "EXIT_3M")):
-                        p = fmt_price(c3[i])
-                        msg = f"⚠️ {symbol} — Tendência perdendo força (saída)\n💰 {p}\n🕒 {now_br()} (UTC-3)\n──────────────────────────────"
-                        await tg(session, msg)
-                        mark(symbol, "EXIT_3M")
+        # -------- 5m --------
+        k5 = await get_klines(session, symbol, "5m", limit=210)
+        if len(k5) < 210: return
+        o5 = [float(k[1]) for k in k5]
+        h5 = [float(k[2]) for k in k5]
+        l5 = [float(k[3]) for k in k5]
+        c5 = [float(k[4]) for k in k5]
+        v5 = [float(k[5]) for k in k5]
 
-    except Exception as e:
-        print(f"Erro em {symbol}: {e}")
+        ema9_5  = ema(c5, 9)
+        ema20_5 = ema(c5, 20)
+        ma50_5  = sma(c5, 50)
+        ma200_5 = sma(c5, 200)
+        upper5, mid5, lower5 = bollinger_bands(c5, 20, 2)
+        rsi7_5  = calc_rsi(c5, 7)
+        rsi14_5 = calc_rsi(c5, 14)
+        vma20_5 = sum(v5[-20:]) / 20.0
+        i5 = len(c5) - 1
+
+        cond_5m = (ema9_5[i5] > ema20_5[i5] > ma50_5[i5]) and (rsi7_5[-1] > 55 and rsi14_5[-1] > 50) \
+                  and (v5[-1] >= 1.5*(vma20_5 + 1e-12)) and widening_now(upper5, mid5, lower5) \
+                  and (c5[-1] > mid5[-1])
+
+        if cond_5m and allowed(symbol, "ALRT_5M"):
+            msg = (
+                f"🟩 {symbol} — 5m PRONTO\n"
+                f"• EMA9>EMA20>MA50 • RSI7:{rsi7_5[-1]:.1f} RSI14:{rsi14_5[-1]:.1f}\n"
+                f"• Vol {fmt_price(v5[-1])} > 1.5×MA20 • BB abrindo\n"
+                f"💰 {fmt_price(c5[i5])}\n🕒 {now_br()}\n"
+                f"──────────────────────────────"
+            )
+            await tg(session, msg)
+            mark(symbol, "ALRT_5M")
+
+        # -------- 15m --------
+        k15 = await get_klines(session, symbol, "15m", limit=210)
+        if len(k15) < 210: return
+        o15 = [float(k[1]) for k in k15]
+        h15 = [float(k[2]) for k in k15]
+        l15 = [float(k[3]) for k in k15]
+        c15 = [float(k[4]) for k in k15]
+        v15 = [float(k[5]) for k in k15]
+
+        ema9_15  = ema(c15, 9)
+        ema20_15 = ema(c15, 20)
+        ma50_15  = sma(c15, 50)
+        ma200_15 = sma(c15, 200)
+        upper15, mid15, lower15 = bollinger_bands(c15, 20, 2)
+        rsi7_15  = calc_rsi(c15, 7)
+        rsi14_15 = calc_rsi(c15, 14)
+        vma20_15 = sum(v15[-20:]) / 20.0
+        j = len(c15) - 1
+
+        cond_15m_confirm = (ema9_15[j] > ema20_15[j]) and (rsi14_15[-1] > 50) and widening_now(upper15, mid15, lower15)
+
+        # ==========================
+        # 🟡 ENTRADA (3m + 5m alinhados)
+        # ==========================
+        # three_ready vem do bloco 3m; se por algum motivo não calculou 3m, revalida aqui com cond_3m calculável
+        if not three_ready and len(k3) >= 210:
+            # reusa cond_3m se necessário
+            try:
+                three_ready = cond_3m
+            except:
+                three_ready = False
+
+        if three_ready and cond_5m and allowed(symbol, "ENTRY_35"):
+            p = fmt_price(c5[i5])
+            msg = (
+                f"🚀 {symbol} — ENTRADA (3m + 5m alinhados)\n"
+                f"• 3m e 5m: EMA9>EMA20>MA50, RSI7>55 & RSI14>50\n"
+                f"• Volume > 1.5×MA20 • BB abrindo\n"
+                f"💰 {p}\n🕒 {now_br()}\n"
+                f"──────────────────────────────"
+            )
+            await tg(session, msg)
+            mark(symbol, "ENTRY_35")
+
+        # ==========================
+        # ✅ CONFIRMAÇÃO (15m)
+        # ==========================
+        # Só confirma se houve ENTRADA nos últimos 60 minutos
+        entry_age = time.time() - LAST_HIT.get((symbol, "ENTRY_35"), 0.0)
+        if entry_age <= 60*60 and cond_15m_confirm and allowed(symbol, "CONF_15"):
+            p = fmt_price(c15[j])
+            msg = (
+                f"✅ {symbol} — CONFIRMAÇÃO 15m\n"
+                f"• EMA9>EMA20 • RSI14:{rsi14_15[-1]:.1f} • BB abrindo\n"
+                f"💰 {p}\n🕒 {now_br()}\n"
+                f"──────────────────────────────"
+            )
+            await tg(session, msg)
+            mark(symbol, "CONF_15")
+
+        # ==========================
+        # (Removidos alerts antigos de saída/pullback para evitar flood)
+        # ==========================
+
+    except:
         return
 
 # ---------------- MAIN LOOP ----------------
