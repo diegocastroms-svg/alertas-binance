@@ -169,6 +169,9 @@ def touches_and_closes_above(low, close, ref):
 def touches_and_closes_below(high, close, ref):
     return (high >= ref) and (close < ref)
 
+def candle_green(close_, open_): return close_ > open_
+def candle_red(close_, open_):   return close_ < open_
+
 # ---------------- WORKER ----------------
 async def scan_symbol(session, symbol):
     try:
@@ -208,9 +211,10 @@ async def scan_symbol(session, symbol):
         upper5, mid5, lower5 = bollinger_bands(c5, 20, 2)
         rsi5 = calc_rsi(c5, 14)
         vma20_5 = sum(v5[-20:]) / 20.0
-
         i5 = len(c5) - 1
+
         cross_up_9_20_5   = (ema9_5[i5-1] <= ema20_5[i5-1]) and (ema9_5[i5] > ema20_5[i5])
+        cross_up_9_50_5   = (ema9_5[i5-1] <= ma50_5[i5-1]) and (ema9_5[i5] > ma50_5[i5])
         bb_open_5 = widening_now(upper5, mid5, lower5)
         break_upper_5 = c5[-1] >= upper5[-1] if upper5 else False
 
@@ -230,15 +234,23 @@ async def scan_symbol(session, symbol):
         upper15, mid15, lower15 = bollinger_bands(c15, 20, 2)
         rsi15 = calc_rsi(c15, 14)
         vma20_15 = sum(v15[-20:]) / 20.0
-
         j = len(c15) - 1
         trend_ok_15  = (ema9_15[j] > ema20_15[j]) and (rsi15[-1] > 55) and widening_now(upper15, mid15, lower15)
 
         # ==========================
-        # 🚀 ROMPIMENTO CONFIRMADO
-        # 5m gatilho + 15m confirmação
+        # 🔵 TENDÊNCIA INICIANDO (5m)
         # ==========================
-        if (cross_up_9_20_5 and rsi5[-1] > 55 and v5[-1] >= 1.2*(vma20_5+1e-12)
+        ini_filters_ok = (rsi5[-1] > 55) and (v5[-1] >= 1.2*(vma20_5+1e-12)) and bb_open_5 and (c5[-1] > mid5[-1])
+        if (ini_filters_ok and (cross_up_9_20_5 or cross_up_9_50_5) and allowed(symbol, "INI_5M")):
+            p = fmt_price(c5[i5])
+            msg = f"🔵 {symbol} ⬆️ Tendência iniciando (5m)\n💰 {p}\n🕒 {now_br()} (UTC-3)\n──────────────────────────────"
+            await tg(session, msg)
+            mark(symbol, "INI_5M")
+
+        # ==========================
+        # 🚀 ROMPIMENTO CONFIRMADO (5m + 15m)
+        # ==========================
+        if (cross_up_9_20_5 and rsi5[-1] > 60 and v5[-1] >= 1.2*(vma20_5+1e-12)
             and bb_open_5 and break_upper_5 and trend_ok_15 and allowed(symbol, "BRK_5M15")):
             p = fmt_price(c5[i5])
             msg = f"🚀 {symbol} — Rompimento confirmado (5m + 15m)\n💰 {p}\n🕒 {now_br()} (UTC-3)\n──────────────────────────────"
@@ -247,20 +259,9 @@ async def scan_symbol(session, symbol):
 
         # ==========================
         # ⚠️ PERDENDO FORÇA / SAÍDA (TOPo PROVÁVEL) — AJUSTADO
-        # Dispara após alta forte, no início da virada
-        # Critérios:
-        # - RSI alto virando: rsi5[-2] >= 65 e rsi5[-1] < rsi5[-2] e rsi5[-1] <= 60
-        # - 1º fechamento abaixo da EMA9 (fechava acima no candle anterior)
-        # - Volume em queda por 2 candles (v[-1] < v[-2] e v[-2] <= v[-3], se possível)
-        # - Sem lateralização: BB > 0.03 e amplitude do candle > 0.4%
-        # - Rejeição: candle anterior verde e atual vermelho (quando possível)
         # ==========================
-        def candle_green(close_, open_): return close_ > open_
-        def candle_red(close_, open_):   return close_ < open_
-
         bbw5 = band_width(upper5, mid5, lower5)
         amp5_pct = (h5[-1] - l5[-1]) / (c5[-1] + 1e-12)
-
         rsi_turn_top   = (len(rsi5) >= 2 and rsi5[-2] >= 65 and rsi5[-1] < rsi5[-2] and rsi5[-1] <= 60)
         first_close_below_ema9 = (c5[-1] < ema9_5[-1]) and (c5[-2] >= ema9_5[-2])
         vol_falling = (len(v5) >= 3 and v5[-1] < v5[-2] and v5[-2] <= v5[-3]) or (v5[-1] < vma20_5 and v5[-1] < v5[-2])
@@ -276,50 +277,24 @@ async def scan_symbol(session, symbol):
 
         # ==========================
         # 🔄 PULLBACKS CONFIRMADOS (5m) — EMA20 / MA50 / MA200
-        # Reentrada curta, desde que 15m continue alinhado (EMA9>EMA20)
         # ==========================
         if ema9_15[j] > ema20_15[j] and rsi15[-1] >= 52:
-            # EMA20
             if touches_and_closes_above(l5[-1], c5[-1], ema20_5[-1]) and (50 <= rsi5[-1] <= 60) and v5[-1] >= max(v5[-2], vma20_5) and ema9_5[-1] >= ema20_5[-1] and allowed(symbol, "PB5_EMA20"):
-                p = fmt_price(c5[i5])
-                msg = f"🔄 {symbol} — Pullback confirmado (5m • EMA20)\n💰 {p}\n🕒 {now_br()} (UTC-3)\n──────────────────────────────"
-                await tg(session, msg)
-                mark(symbol, "PB5_EMA20")
-            # MA50
-            if touches_and_closes_above(l5[-1], c5[-1], ma50_5[-1]) and (50 <= rsi5[-1] <= 60) and v5[-1] >= max(v5[-2], vma20_5) and ema9_5[-1] >= ema20_5[-1] and allowed(symbol, "PB5_MA50"):
-                p = fmt_price(c5[i5])
-                msg = f"🔄 {symbol} — Pullback confirmado (5m • MA50)\n💰 {p}\n🕒 {now_br()} (UTC-3)\n──────────────────────────────"
-                await tg(session, msg)
-                mark(symbol, "PB5_MA50")
-            # MA200
+                p = fmt_price(c5[i5]); msg = f"🔄 {symbol} — Pullback confirmado (5m • EMA20)\n💰 {p}\n🕒 {now_br()} (UTC-3)\n──────────────────────────────"; await tg(session, msg); mark(symbol, "PB5_EMA20")
+            if touches_and_closes_above(l5[-1], c5[-1], ma50_5[-1])  and (50 <= rsi5[-1] <= 60) and v5[-1] >= max(v5[-2], vma20_5) and ema9_5[-1] >= ema20_5[-1] and allowed(symbol, "PB5_MA50"):
+                p = fmt_price(c5[i5]); msg = f"🔄 {symbol} — Pullback confirmado (5m • MA50)\n💰 {p}\n🕒 {now_br()} (UTC-3)\n──────────────────────────────"; await tg(session, msg); mark(symbol, "PB5_MA50")
             if touches_and_closes_above(l5[-1], c5[-1], ma200_5[-1]) and (50 <= rsi5[-1] <= 60) and v5[-1] >= max(v5[-2], vma20_5) and ema9_5[-1] >= ema20_5[-1] and allowed(symbol, "PB5_MA200"):
-                p = fmt_price(c5[i5])
-                msg = f"🔄 {symbol} — Pullback confirmado (5m • MA200)\n💰 {p}\n🕒 {now_br()} (UTC-3)\n──────────────────────────────"
-                await tg(session, msg)
-                mark(symbol, "PB5_MA200")
+                p = fmt_price(c5[i5]); msg = f"🔄 {symbol} — Pullback confirmado (5m • MA200)\n💰 {p}\n🕒 {now_br()} (UTC-3)\n──────────────────────────────"; await tg(session, msg); mark(symbol, "PB5_MA200")
 
         # ==========================
         # 🔄 PULLBACKS CONFIRMADOS (15m) — EMA20 / MA50 / MA200
-        # Reentrada para movimentos de 1–3 horas
         # ==========================
-        # EMA20
         if touches_and_closes_above(l15[-1], c15[-1], ema20_15[-1]) and (50 <= rsi15[-1] <= 60) and v15[-1] >= max(v15[-2], vma20_15) and ema9_15[-1] >= ema20_15[-1] and allowed(symbol, "PB15_EMA20"):
-            p = fmt_price(c15[j])
-            msg = f"🔄 {symbol} — Pullback confirmado (15m • EMA20)\n💰 {p}\n🕒 {now_br()} (UTC-3)\n──────────────────────────────"
-            await tg(session, msg)
-            mark(symbol, "PB15_EMA20")
-        # MA50
-        if touches_and_closes_above(l15[-1], c15[-1], ma50_15[-1]) and (50 <= rsi15[-1] <= 60) and v15[-1] >= max(v15[-2], vma20_15) and ema9_15[-1] >= ema20_15[-1] and allowed(symbol, "PB15_MA50"):
-            p = fmt_price(c15[j])
-            msg = f"🔄 {symbol} — Pullback confirmado (15m • MA50)\n💰 {p}\n🕒 {now_br()} (UTC-3)\n──────────────────────────────"
-            await tg(session, msg)
-            mark(symbol, "PB15_MA50")
-        # MA200
+            p = fmt_price(c15[j]); msg = f"🔄 {symbol} — Pullback confirmado (15m • EMA20)\n💰 {p}\n🕒 {now_br()} (UTC-3)\n──────────────────────────────"; await tg(session, msg); mark(symbol, "PB15_EMA20")
+        if touches_and_closes_above(l15[-1], c15[-1], ma50_15[-1])  and (50 <= rsi15[-1] <= 60) and v15[-1] >= max(v15[-2], vma20_15) and ema9_15[-1] >= ema20_15[-1] and allowed(symbol, "PB15_MA50"):
+            p = fmt_price(c15[j]); msg = f"🔄 {symbol} — Pullback confirmado (15m • MA50)\n💰 {p}\n🕒 {now_br()} (UTC-3)\n──────────────────────────────"; await tg(session, msg); mark(symbol, "PB15_MA50")
         if touches_and_closes_above(l15[-1], c15[-1], ma200_15[-1]) and (50 <= rsi15[-1] <= 60) and v15[-1] >= max(v15[-2], vma20_15) and ema9_15[-1] >= ema20_15[-1] and allowed(symbol, "PB15_MA200"):
-            p = fmt_price(c15[j])
-            msg = f"🔄 {symbol} — Pullback confirmado (15m • MA200)\n💰 {p}\n🕒 {now_br()} (UTC-3)\n──────────────────────────────"
-            await tg(session, msg)
-            mark(symbol, "PB15_MA200")
+            p = fmt_price(c15[j]); msg = f"🔄 {symbol} — Pullback confirmado (15m • MA200)\n💰 {p}\n🕒 {now_br()} (UTC-3)\n──────────────────────────────"; await tg(session, msg); mark(symbol, "PB15_MA200")
 
     except:
         return
