@@ -12,7 +12,7 @@ import threading
 # ---------------- CONFIG ----------------
 BINANCE_HTTP = "https://api.binance.com"
 COOLDOWN_SEC = 10 * 60          # 10 minutos
-TOP_N = 50
+TOP_N = 30
 REQ_TIMEOUT = 8
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
@@ -329,4 +329,5 @@ def start_bot():
 
 threading.Thread(target=start_bot, daemon=True).start()
 app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
+
 
