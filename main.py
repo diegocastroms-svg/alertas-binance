@@ -175,126 +175,50 @@ def candle_red(close_, open_):   return close_ < open_
 # ---------------- WORKER ----------------
 async def scan_symbol(session, symbol):
     try:
-        # -------- 3m (MANTIDO) --------
+        # -------- 3m (AJUSTADO COM SUGESTÃO) --------
         k3 = await get_klines(session, symbol, "3m", limit=210)
         if len(k3) >= 210:
-            c3 = [float(k[4]) for k in k3]
+            o3 = [float(k[1]) for k in k3]  # Open
+            h3 = [float(k[2]) for k in k3]  # High
+            l3 = [float(k[3]) for k in k3]  # Low
+            c3 = [float(k[4]) for k in k3]  # Close
+            v3 = [float(k[5]) for k in k3]  # Volume
+
+            # Cálculo dos indicadores sugeridos
             ema9_3 = ema(c3, 9)
-            ma200_3 = sma(c3, 200)
+            ema21_3 = ema(c3, 21)
+            ema50_3 = ema(c3, 50)
+            rsi3 = calc_rsi(c3, 14)
+            upper3, mid3, lower3 = bollinger_bands(c3, 20, 2)
+            vol_ma20_3 = sum(v3[-20:]) / 20.0
+
             if len(ema9_3) > 2:
                 i = len(ema9_3) - 1
-                cruza = ema9_3[i-1] < ma200_3[i-1] and ema9_3[i] >= ma200_3[i]
-                v3 = [float(k[5]) for k in k3]
-                rsi3 = calc_rsi(c3, 14)
-                vol_ma20_3 = sum(v3[-20:]) / 20.0
-                dif = abs(ema9_3[i] - ma200_3[i]) / (ma200_3[i] + 1e-12)
-                encostar = dif <= 0.001
-                cruzou_ou_encostou = cruza or encostar
-                if cruzou_ou_encostou and rsi3[-1] > 45 and v3[-1] >= 1.1 * (vol_ma20_3 + 1e-12) and allowed(symbol, "CRUZ_3M"):
-                    msg = f"🟢 {symbol} ⬆️ TOQUE / CRUZAMENTO (3m)\n💰 {fmt_price(c3[i])}\n🕒 {now_br()} (UTC-3)\n──────────────────────────────"
+                # Condição de entrada: Início de Alta
+                cross_up_9_21 = cross_up(ema9_3[i-1], ema9_3[i], ema21_3[i-1], ema21_3[i])
+                macd_line = ema(c3, 12)[-1] - ema(c3, 26)[-1]
+                signal_line = ema([ema(c3, 12)[j] - ema(c3, 26)[j] for j in range(len(c3)-9)], 9)[-1]
+                macd_bullish = macd_line > signal_line and (macd_line - signal_line) > 0
+                vol_spike = v3[-1] >= 1.5 * vol_ma20_3
+                rsi_ok = rsi3[-1] > 30 and rsi3[-1] < 70
+                trend_ok = c3[-1] > ema50_3[-1]
+
+                if (cross_up_9_21 and macd_bullish and vol_spike and rsi_ok and trend_ok and allowed(symbol, "BREAKOUT_3M")):
+                    p = fmt_price(c3[i])
+                    msg = f"🚀 {symbol} ⬆️ Breakout confirmado (3m)\n💰 {p}\n🕒 {now_br()} (UTC-3)\n──────────────────────────────"
                     await tg(session, msg)
-                    mark(symbol, "CRUZ_3M")
+                    mark(symbol, "BREAKOUT_3M")
 
-        # -------- 5m --------
-        k5 = await get_klines(session, symbol, "5m", limit=210)
-        if len(k5) < 210: return
-        o5 = [float(k[1]) for k in k5]
-        h5 = [float(k[2]) for k in k5]
-        l5 = [float(k[3]) for k in k5]
-        c5 = [float(k[4]) for k in k5]
-        v5 = [float(k[5]) for k in k5]
-
-        ema9_5  = ema(c5, 9)
-        ema20_5 = ema(c5, 20)
-        ma50_5  = sma(c5, 50)
-        ma200_5 = sma(c5, 200)
-        upper5, mid5, lower5 = bollinger_bands(c5, 20, 2)
-        rsi5 = calc_rsi(c5, 14)
-        vma20_5 = sum(v5[-20:]) / 20.0
-        i5 = len(c5) - 1
-
-        cross_up_9_20_5   = (ema9_5[i5-1] <= ema20_5[i5-1]) and (ema9_5[i5] > ema20_5[i5])
-        cross_up_9_50_5   = (ema9_5[i5-1] <= ma50_5[i5-1]) and (ema9_5[i5] > ma50_5[i5])
-        bb_open_5 = widening_now(upper5, mid5, lower5)
-        break_upper_5 = c5[-1] >= upper5[-1] if upper5 else False
-
-        # -------- 15m --------
-        k15 = await get_klines(session, symbol, "15m", limit=210)
-        if len(k15) < 210: return
-        o15 = [float(k[1]) for k in k15]
-        h15 = [float(k[2]) for k in k15]
-        l15 = [float(k[3]) for k in k15]
-        c15 = [float(k[4]) for k in k15]
-        v15 = [float(k[5]) for k in k15]
-
-        ema9_15  = ema(c15, 9)
-        ema20_15 = ema(c15, 20)
-        ma50_15  = sma(c15, 50)
-        ma200_15 = sma(c15, 200)
-        upper15, mid15, lower15 = bollinger_bands(c15, 20, 2)
-        rsi15 = calc_rsi(c15, 14)
-        vma20_15 = sum(v15[-20:]) / 20.0
-        j = len(c15) - 1
-        trend_ok_15  = (ema9_15[j] > ema20_15[j]) and (rsi15[-1] > 55) and widening_now(upper15, mid15, lower15)
-
-        # ==========================
-        # 🔵 TENDÊNCIA INICIANDO (5m)
-        # ==========================
-        ini_filters_ok = (rsi5[-1] > 55) and (v5[-1] >= 1.2*(vma20_5+1e-12)) and bb_open_5 and (c5[-1] > mid5[-1])
-        if (ini_filters_ok and (cross_up_9_20_5 or cross_up_9_50_5) and allowed(symbol, "INI_5M")):
-            p = fmt_price(c5[i5])
-            msg = f"🔵 {symbol} ⬆️ Tendência iniciando (5m)\n💰 {p}\n🕒 {now_br()} (UTC-3)\n──────────────────────────────"
-            await tg(session, msg)
-            mark(symbol, "INI_5M")
-
-        # ==========================
-        # 🚀 ROMPIMENTO CONFIRMADO (5m + 15m)
-        # ==========================
-        if (cross_up_9_20_5 and rsi5[-1] > 60 and v5[-1] >= 1.2*(vma20_5+1e-12)
-            and bb_open_5 and break_upper_5 and trend_ok_15 and allowed(symbol, "BRK_5M15")):
-            p = fmt_price(c5[i5])
-            msg = f"🚀 {symbol} — Rompimento confirmado (5m + 15m)\n💰 {p}\n🕒 {now_br()} (UTC-3)\n──────────────────────────────"
-            await tg(session, msg)
-            mark(symbol, "BRK_5M15")
-
-        # ==========================
-        # ⚠️ PERDENDO FORÇA / SAÍDA (TOPo PROVÁVEL) — AJUSTADO
-        # ==========================
-        bbw5 = band_width(upper5, mid5, lower5)
-        amp5_pct = (h5[-1] - l5[-1]) / (c5[-1] + 1e-12)
-        rsi_turn_top   = (len(rsi5) >= 2 and rsi5[-2] >= 65 and rsi5[-1] < rsi5[-2] and rsi5[-1] <= 60)
-        first_close_below_ema9 = (c5[-1] < ema9_5[-1]) and (c5[-2] >= ema9_5[-2])
-        vol_falling = (len(v5) >= 3 and v5[-1] < v5[-2] and v5[-2] <= v5[-3]) or (v5[-1] < vma20_5 and v5[-1] < v5[-2])
-        not_lateral = (bbw5 > 0.03) and (amp5_pct > 0.004)
-        rejection_colors = (len(o5) >= 2 and candle_green(c5[-2], o5[-2]) and candle_red(c5[-1], o5[-1]))
-
-        if (rsi_turn_top and first_close_below_ema9 and vol_falling and not_lateral and rejection_colors
-            and allowed(symbol, "EXIT_5M")):
-            p = fmt_price(c5[i5])
-            msg = f"⚠️ {symbol} — Tendência perdendo força (saída)\n💰 {p}\n🕒 {now_br()} (UTC-3)\n──────────────────────────────"
-            await tg(session, msg)
-            mark(symbol, "EXIT_5M")
-
-        # ==========================
-        # 🔄 PULLBACKS CONFIRMADOS (5m) — EMA20 / MA50 / MA200
-        # ==========================
-        if ema9_15[j] > ema20_15[j] and rsi15[-1] >= 52:
-            if touches_and_closes_above(l5[-1], c5[-1], ema20_5[-1]) and (50 <= rsi5[-1] <= 60) and v5[-1] >= max(v5[-2], vma20_5) and ema9_5[-1] >= ema20_5[-1] and allowed(symbol, "PB5_EMA20"):
-                p = fmt_price(c5[i5]); msg = f"🔄 {symbol} — Pullback confirmado (5m • EMA20)\n💰 {p}\n🕒 {now_br()} (UTC-3)\n──────────────────────────────"; await tg(session, msg); mark(symbol, "PB5_EMA20")
-            if touches_and_closes_above(l5[-1], c5[-1], ma50_5[-1])  and (50 <= rsi5[-1] <= 60) and v5[-1] >= max(v5[-2], vma20_5) and ema9_5[-1] >= ema20_5[-1] and allowed(symbol, "PB5_MA50"):
-                p = fmt_price(c5[i5]); msg = f"🔄 {symbol} — Pullback confirmado (5m • MA50)\n💰 {p}\n🕒 {now_br()} (UTC-3)\n──────────────────────────────"; await tg(session, msg); mark(symbol, "PB5_MA50")
-            if touches_and_closes_above(l5[-1], c5[-1], ma200_5[-1]) and (50 <= rsi5[-1] <= 60) and v5[-1] >= max(v5[-2], vma20_5) and ema9_5[-1] >= ema20_5[-1] and allowed(symbol, "PB5_MA200"):
-                p = fmt_price(c5[i5]); msg = f"🔄 {symbol} — Pullback confirmado (5m • MA200)\n💰 {p}\n🕒 {now_br()} (UTC-3)\n──────────────────────────────"; await tg(session, msg); mark(symbol, "PB5_MA200")
-
-        # ==========================
-        # 🔄 PULLBACKS CONFIRMADOS (15m) — EMA20 / MA50 / MA200
-        # ==========================
-        if touches_and_closes_above(l15[-1], c15[-1], ema20_15[-1]) and (50 <= rsi15[-1] <= 60) and v15[-1] >= max(v15[-2], vma20_15) and ema9_15[-1] >= ema20_15[-1] and allowed(symbol, "PB15_EMA20"):
-            p = fmt_price(c15[j]); msg = f"🔄 {symbol} — Pullback confirmado (15m • EMA20)\n💰 {p}\n🕒 {now_br()} (UTC-3)\n──────────────────────────────"; await tg(session, msg); mark(symbol, "PB15_EMA20")
-        if touches_and_closes_above(l15[-1], c15[-1], ma50_15[-1])  and (50 <= rsi15[-1] <= 60) and v15[-1] >= max(v15[-2], vma20_15) and ema9_15[-1] >= ema20_15[-1] and allowed(symbol, "PB15_MA50"):
-            p = fmt_price(c15[j]); msg = f"🔄 {symbol} — Pullback confirmado (15m • MA50)\n💰 {p}\n🕒 {now_br()} (UTC-3)\n──────────────────────────────"; await tg(session, msg); mark(symbol, "PB15_MA50")
-        if touches_and_closes_above(l15[-1], c15[-1], ma200_15[-1]) and (50 <= rsi15[-1] <= 60) and v15[-1] >= max(v15[-2], vma20_15) and ema9_15[-1] >= ema20_15[-1] and allowed(symbol, "PB15_MA200"):
-            p = fmt_price(c15[j]); msg = f"🔄 {symbol} — Pullback confirmado (15m • MA200)\n💰 {p}\n🕒 {now_br()} (UTC-3)\n──────────────────────────────"; await tg(session, msg); mark(symbol, "PB15_MA200")
+                # Condição de saída: Perda de força ou trailing stop implícito
+                if len(rsi3) >= 2 and i >= 1:
+                    rsi_turn_top = rsi3[-2] >= 65 and rsi3[-1] < rsi3[-2] and rsi3[-1] <= 60
+                    first_close_below_ema9 = c3[-1] < ema9_3[-1] and c3[-2] >= ema9_3[-2]
+                    vol_falling = (len(v3) >= 3 and v3[-1] < v3[-2] and v3[-2] <= v3[-3]) or (v3[-1] < vol_ma20_3 and v3[-1] < v3[-2])
+                    if (rsi_turn_top and first_close_below_ema9 and vol_falling and allowed(symbol, "EXIT_3M")):
+                        p = fmt_price(c3[i])
+                        msg = f"⚠️ {symbol} — Tendência perdendo força (saída)\n💰 {p}\n🕒 {now_br()} (UTC-3)\n──────────────────────────────"
+                        await tg(session, msg)
+                        mark(symbol, "EXIT_3M")
 
     except:
         return
