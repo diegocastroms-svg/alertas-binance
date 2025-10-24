@@ -175,52 +175,52 @@ def candle_red(close_, open_):   return close_ < open_
 # ---------------- WORKER ----------------
 async def scan_symbol(session, symbol):
     try:
-        # -------- 3m (AJUSTADO COM SUGESTÃO) --------
-        k3 = await get_klines(session, symbol, "3m", limit=210)
+        k3 = await get_klines(session, symbol, "3m", limit=300)
         if len(k3) >= 210:
-            o3 = [float(k[1]) for k in k3]  # Open
-            h3 = [float(k[2]) for k in k3]  # High
-            l3 = [float(k[3]) for k in k3]  # Low
-            c3 = [float(k[4]) for k in k3]  # Close
-            v3 = [float(k[5]) for k in k3]  # Volume
+            o3 = [float(k[1]) for k in k3]
+            h3 = [float(k[2]) for k in k3]
+            l3 = [float(k[3]) for k in k3]
+            c3 = [float(k[4]) for k in k3]
+            v3 = [float(k[5]) for k in k3]
 
-            # Cálculo dos indicadores sugeridos
             ema9_3 = ema(c3, 9)
             ema21_3 = ema(c3, 21)
             ema50_3 = ema(c3, 50)
             rsi3 = calc_rsi(c3, 14)
-            upper3, mid3, lower3 = bollinger_bands(c3, 20, 2)
             vol_ma20_3 = sum(v3[-20:]) / 20.0
 
             if len(ema9_3) > 2:
                 i = len(ema9_3) - 1
-                # Condição de entrada: Início de Alta
+                # Condição precoce: preço atual > EMA 21 anterior OU cruzamento
                 cross_up_9_21 = cross_up(ema9_3[i-1], ema9_3[i], ema21_3[i-1], ema21_3[i])
-                macd_line = ema(c3, 12)[-1] - ema(c3, 26)[-1]
-                signal_line = ema([ema(c3, 12)[j] - ema(c3, 26)[j] for j in range(len(c3)-9)], 9)[-1]
-                macd_bullish = macd_line > signal_line and (macd_line - signal_line) > 0
-                vol_spike = v3[-1] >= 1.5 * vol_ma20_3
-                rsi_ok = rsi3[-1] > 30 and rsi3[-1] < 70
+                pre_break = c3[-1] > ema21_3[i-1] * 1.01  # 1% acima da EMA 21 anterior
+                vol_spike = v3[-1] >= 1.0 * vol_ma20_3  # Volume pelo menos igual à MA
+                rsi_ok = rsi3[-1] > 25
                 trend_ok = c3[-1] > ema50_3[-1]
 
-                if (cross_up_9_21 and macd_bullish and vol_spike and rsi_ok and trend_ok and allowed(symbol, "BREAKOUT_3M")):
+                # Debug pra verificar valores
+                print(f"Checando {symbol}: EMA9={ema9_3[-1]:.4f}, EMA21={ema21_3[-1]:.4f}, EMA21_prev={ema21_3[i-1]:.4f}, Vol={v3[-1]:.0f}, VolMA20={vol_ma20_3:.0f}, RSI={rsi3[-1]:.1f}, PreBreak={pre_break}, Cross={cross_up_9_21}")
+
+                # Entrada antecipada
+                if ((pre_break or cross_up_9_21) and vol_spike and rsi_ok and trend_ok and allowed(symbol, "BREAKOUT_3M")):
                     p = fmt_price(c3[i])
-                    msg = f"🚀 {symbol} ⬆️ Breakout confirmado (3m)\n💰 {p}\n🕒 {now_br()} (UTC-3)\n──────────────────────────────"
+                    msg = f"🚀 {symbol} ⬆️ Breakout confirmado (3m) - INÍCIO\n💰 {p}\n🕒 {now_br()} (UTC-3)\n──────────────────────────────"
                     await tg(session, msg)
                     mark(symbol, "BREAKOUT_3M")
 
-                # Condição de saída: Perda de força ou trailing stop implícito
+                # Saída mantida
                 if len(rsi3) >= 2 and i >= 1:
-                    rsi_turn_top = rsi3[-2] >= 65 and rsi3[-1] < rsi3[-2] and rsi3[-1] <= 60
+                    rsi_turn_top = rsi3[-2] >= 60 and rsi3[-1] < rsi3[-2] and rsi3[-1] <= 55
                     first_close_below_ema9 = c3[-1] < ema9_3[-1] and c3[-2] >= ema9_3[-2]
-                    vol_falling = (len(v3) >= 3 and v3[-1] < v3[-2] and v3[-2] <= v3[-3]) or (v3[-1] < vol_ma20_3 and v3[-1] < v3[-2])
+                    vol_falling = (len(v3) >= 3 and v3[-1] < v3[-2] and v3[-2] <= v3[-3]) or (v3[-1] < vol_ma20_3)
                     if (rsi_turn_top and first_close_below_ema9 and vol_falling and allowed(symbol, "EXIT_3M")):
                         p = fmt_price(c3[i])
                         msg = f"⚠️ {symbol} — Tendência perdendo força (saída)\n💰 {p}\n🕒 {now_br()} (UTC-3)\n──────────────────────────────"
                         await tg(session, msg)
                         mark(symbol, "EXIT_3M")
 
-    except:
+    except Exception as e:
+        print(f"Erro em {symbol}: {e}")
         return
 
 # ---------------- MAIN LOOP ----------------
