@@ -11,8 +11,8 @@ import threading
 
 # ---------------- CONFIG ----------------
 BINANCE_HTTP = "https://api.binance.com"
-COOLDOWN_SEC = 10 * 60          # 10 minutos
-TOP_N = 30
+COOLDOWN_SEC = 8 * 60          # 8 minutos
+TOP_N = 50
 REQ_TIMEOUT = 8
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
@@ -211,7 +211,6 @@ async def scan_symbol(session, symbol):
 
         i5 = len(c5) - 1
         cross_up_9_20_5   = (ema9_5[i5-1] <= ema20_5[i5-1]) and (ema9_5[i5] > ema20_5[i5])
-        cross_down_9_20_5 = (ema9_5[i5-1] >= ema20_5[i5-1]) and (ema9_5[i5] < ema20_5[i5])
         bb_open_5 = widening_now(upper5, mid5, lower5)
         break_upper_5 = c5[-1] >= upper5[-1] if upper5 else False
 
@@ -247,12 +246,29 @@ async def scan_symbol(session, symbol):
             mark(symbol, "BRK_5M15")
 
         # ==========================
-        # ⚠️ PERDENDO FORÇA / SAÍDA (baseada no 5m)
+        # ⚠️ PERDENDO FORÇA / SAÍDA (TOPo PROVÁVEL) — AJUSTADO
+        # Dispara após alta forte, no início da virada
+        # Critérios:
+        # - RSI alto virando: rsi5[-2] >= 65 e rsi5[-1] < rsi5[-2] e rsi5[-1] <= 60
+        # - 1º fechamento abaixo da EMA9 (fechava acima no candle anterior)
+        # - Volume em queda por 2 candles (v[-1] < v[-2] e v[-2] <= v[-3], se possível)
+        # - Sem lateralização: BB > 0.03 e amplitude do candle > 0.4%
+        # - Rejeição: candle anterior verde e atual vermelho (quando possível)
         # ==========================
-        losing_rsi_5   = rsi5[-1] < 45
-        losing_price_5 = c5[-1] < ema9_5[-1]
-        losing_vol_5   = v5[-1] < (vma20_5 + 1e-12)
-        if (cross_down_9_20_5 or (losing_rsi_5 and losing_price_5 and losing_vol_5)) and allowed(symbol, "EXIT_5M"):
+        def candle_green(close_, open_): return close_ > open_
+        def candle_red(close_, open_):   return close_ < open_
+
+        bbw5 = band_width(upper5, mid5, lower5)
+        amp5_pct = (h5[-1] - l5[-1]) / (c5[-1] + 1e-12)
+
+        rsi_turn_top   = (len(rsi5) >= 2 and rsi5[-2] >= 65 and rsi5[-1] < rsi5[-2] and rsi5[-1] <= 60)
+        first_close_below_ema9 = (c5[-1] < ema9_5[-1]) and (c5[-2] >= ema9_5[-2])
+        vol_falling = (len(v5) >= 3 and v5[-1] < v5[-2] and v5[-2] <= v5[-3]) or (v5[-1] < vma20_5 and v5[-1] < v5[-2])
+        not_lateral = (bbw5 > 0.03) and (amp5_pct > 0.004)
+        rejection_colors = (len(o5) >= 2 and candle_green(c5[-2], o5[-2]) and candle_red(c5[-1], o5[-1]))
+
+        if (rsi_turn_top and first_close_below_ema9 and vol_falling and not_lateral and rejection_colors
+            and allowed(symbol, "EXIT_5M")):
             p = fmt_price(c5[i5])
             msg = f"⚠️ {symbol} — Tendência perdendo força (saída)\n💰 {p}\n🕒 {now_br()} (UTC-3)\n──────────────────────────────"
             await tg(session, msg)
@@ -329,5 +345,3 @@ def start_bot():
 
 threading.Thread(target=start_bot, daemon=True).start()
 app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
-
-
