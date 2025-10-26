@@ -1,7 +1,7 @@
 # main_hibrido_vflex.py
-# ✅ Híbrido (3m + 5m + 15m) — apenas NOVO ALERTA UNIFICADO DE TENDÊNCIA INICIAL
-# ✅ Detecta o início do movimento pré-pump tocando/abaixo da MA200
-# ✅ Estrutura original preservada, lógica limpa e direta
+# ✅ Híbrido (3m + 5m + 15m) — ALERTA ANTECIPADO (pré-pump real)
+# ✅ Dispara quando o preço está tocando/ABAIXO da MA200 (janela ±1.5%) + início de força
+# ✅ Estrutura original preservada
 
 import os, asyncio, aiohttp, time, math, statistics
 from datetime import datetime, timedelta
@@ -18,17 +18,23 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 CHAT_ID = os.getenv("CHAT_ID", "").strip()
 
 # ---------------- PARÂMETROS ----------------
-RSI_LOW, RSI_HIGH = 55, 70
-VOL_MULTIPLIER = 1.3
-MIN_VOL_24H = 15_000_000
-NAME_BLOCKLIST = ("PEPE","FLOKI","BONK","SHIB","DOGE")
+# Faixas pensadas para DISPARAR CEDO (antes do pump)
+RSI_LOW, RSI_HIGH = 50, 62            # força inicial, sem pico
+VOL_MULTIPLIER = 1.10                  # leve aumento de volume já basta
+MIN_VOL_24H = 80_000_000               # filtro reforçado de liquidez
+NAME_BLOCKLIST = (
+    "PEPE","FLOKI","BONK","SHIB","DOGE",
+    "HIFI","BAKE","WIF","MEME","1000","ORDI","ZK","ZRO","SAGA"
+)
+# Banda de “toque na 200”: dentro de ±1.5% da MA200 (permite abaixo)
+BAND_200 = 0.015
 
 # ---------------- FLASK ----------------
 app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return "✅ Scanner ativo (3m, 5m, 15m) — alerta único pré-pump 🇧🇷", 200
+    return "✅ Scanner ativo (3m, 5m, 15m) — alerta ANTECIPADO pré-pump 🇧🇷", 200
 
 # ---------------- UTILS ----------------
 def now_br():
@@ -91,6 +97,7 @@ def calc_rsi(seq, period=14):
         rsi.append(100 - (100 / (1 + rs)))
     return [50.0]*(len(seq)-len(rsi)) + rsi
 
+# ---------------- COOLDOWN ----------------
 LAST_HIT = {}
 def allowed(symbol, kind):
     ts = LAST_HIT.get((symbol, kind), 0.0)
@@ -122,6 +129,9 @@ async def get_top_usdt_symbols(session):
         if not s.endswith("USDT"): continue
         if any(x in s for x in blocked): continue
         if any(x in s for x in NAME_BLOCKLIST): continue
+        # corta tokens hype
+        if "AI" in s or "GPT" in s or "BOT" in s:
+            continue
         try: qv = float(d.get("quoteVolume", "0") or 0.0)
         except: qv = 0.0
         if qv < float(MIN_VOL_24H): continue
@@ -129,22 +139,43 @@ async def get_top_usdt_symbols(session):
     pares.sort(key=lambda x: x[1], reverse=True)
     return [s for s, _ in pares[:TOP_N]]
 
-# ---------------- ALERTA UNIFICADO ----------------
-async def detectar_tendencia(session, symbol, closes, vols, rsi, ema9, ma20, ma50, ma200, timeframe):
+# ---------------- ALERTA ANTECIPADO ----------------
+async def detectar_inicio_real(session, symbol, closes, vols, rsi, ema9, ema20, ma50, ma200, timeframe):
+    """
+    Dispara cedo:
+    - Preço tocando/ABAIXO da MA200 (banda ±1.5%)
+    - EMA9 > EMA20 (abertura inicial)
+    - MA20 e MA50 ainda perto da 200 (sem alinhamento completo)
+    - RSI 50–62 e leve aumento de volume
+    - Vela anterior <= MA200 (garante que veio de baixo/encoste)
+    """
     try:
-        i = len(closes)-1
-        if len(closes) < 210: return
+        n = len(closes)
+        if n < 210: return
+        i = n - 1
+        close_now = closes[i]
+        ma200_now = ma200[i]
         avg_vol20 = sum(vols[-20:]) / 20.0
-        close = closes[i]
-        cond1 = ema9[i] > ma20[i] > ma50[i]
-        cond2 = close >= ma200[i] * 0.995
-        cond3 = RSI_LOW <= rsi[-1] <= RSI_HIGH
-        cond4 = vols[-1] >= VOL_MULTIPLIER * avg_vol20
-        if cond1 and cond2 and cond3 and cond4 and allowed(symbol, f"TEND_{timeframe}"):
-            msg = (f"🚀 {symbol} — INÍCIO DE TENDÊNCIA ({timeframe})\n"
-                   f"• EMA9>MA20>MA50 • Tocando/rompendo MA200\n"
-                   f"• RSI:{rsi[-1]:.1f} ({RSI_LOW}-{RSI_HIGH}) • Vol ≥ {VOL_MULTIPLIER:.1f}×MA20\n"
-                   f"💰 {fmt_price(close)}\n🕒 {now_br()}\n──────────────────────────────")
+
+        # dentro da banda da 200 (permite abaixo)
+        band_ok = (close_now >= ma200_now * (1 - BAND_200)) and (close_now <= ma200_now * (1 + BAND_200))
+        # veio de baixo/encostando recentemente
+        prev_below = closes[i-1] <= ma200[i-1] * (1 + 0.002)  # até +0,2% ainda conta como encosto
+        # abertura inicial de médias curtas
+        opening = ema9[i] > ema20[i]
+        # MA20 e MA50 ainda “coladas” na 200 (sem alinhamento total)
+        ma20_near = abs(ema20[i] - ma200_now) / max(ma200_now,1e-12) <= 0.012
+        ma50_near = abs(ma50[i]  - ma200_now) / max(ma200_now,1e-12) <= 0.02
+        # força inicial e volume começando
+        rsi_ok  = RSI_LOW <= rsi[-1] <= RSI_HIGH
+        vol_ok  = vols[-1] >= VOL_MULTIPLIER * (avg_vol20 + 1e-12)
+
+        if band_ok and prev_below and opening and ma20_near and ma50_near and rsi_ok and vol_ok and allowed(symbol, f"TEND_{timeframe}"):
+            msg = (f"🚀 {symbol} — INÍCIO ANTECIPADO ({timeframe})\n"
+                   f"• Preço tocando/ABAIXO da MA200 (±{int(BAND_200*100)}%)\n"
+                   f"• EMA9>EMA20 • MA20≈MA200 • MA50≈MA200\n"
+                   f"• RSI:{rsi[-1]:.1f} ({RSI_LOW}-{RSI_HIGH}) • Vol ≥ {VOL_MULTIPLIER:.2f}×MA20\n"
+                   f"💰 {fmt_price(close_now)}\n🕒 {now_br()}\n──────────────────────────────")
             await tg(session, msg)
             mark(symbol, f"TEND_{timeframe}")
     except:
@@ -158,21 +189,21 @@ async def scan_symbol(session, symbol):
         if len(k3) >= 210:
             c3 = [float(k[4]) for k in k3]
             v3 = [float(k[5]) for k in k3]
-            await detectar_tendencia(session, symbol, c3, v3, calc_rsi(c3,14), ema(c3,9), ema(c3,20), sma(c3,50), sma(c3,200), "3M")
+            await detectar_inicio_real(session, symbol, c3, v3, calc_rsi(c3,14), ema(c3,9), ema(c3,20), sma(c3,50), sma(c3,200), "3M")
 
         # 5m
         k5 = await get_klines(session, symbol, "5m", limit=210)
         if len(k5) >= 210:
             c5 = [float(k[4]) for k in k5]
             v5 = [float(k[5]) for k in k5]
-            await detectar_tendencia(session, symbol, c5, v5, calc_rsi(c5,14), ema(c5,9), ema(c5,20), sma(c5,50), sma(c5,200), "5M")
+            await detectar_inicio_real(session, symbol, c5, v5, calc_rsi(c5,14), ema(c5,9), ema(c5,20), sma(c5,50), sma(c5,200), "5M")
 
         # 15m
         k15 = await get_klines(session, symbol, "15m", limit=210)
         if len(k15) >= 210:
             c15 = [float(k[4]) for k in k15]
             v15 = [float(k[5]) for k in k15]
-            await detectar_tendencia(session, symbol, c15, v15, calc_rsi(c15,14), ema(c15,9), ema(c15,20), sma(c15,50), sma(c15,200), "15M")
+            await detectar_inicio_real(session, symbol, c15, v15, calc_rsi(c15,14), ema(c15,9), ema(c15,20), sma(c15,50), sma(c15,200), "15M")
 
     except:
         return
