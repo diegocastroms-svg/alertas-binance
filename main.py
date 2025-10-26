@@ -8,7 +8,7 @@
 #    🟢 TENDÊNCIA (15m) — alinhamento completo, dispara só quando forma
 #    🚀 ACELERAÇÃO REAL (3m) — explosão rápida (pumps com continuidade mínima)
 #    ♻️ TENDÊNCIA PÓS-PUMP (3m e 5m)
-#    📈 TENDÊNCIA GRADUAL (5m) — alta progressiva sem pump (novo)
+#    📈 TENDÊNCIA GRADUAL (5m) — **ajustado para disparar no INÍCIO, tocando/abaixo da MA200**
 # ✅ Filtro moedas mortas (blocklist + volume 24h mínimo)
 # ✅ Estrutura original preservada + validações de continuidade
 
@@ -32,6 +32,7 @@ RSI_RANGE_REVERSAO = (45, 65)     # Para sinais de início (3m/5m)
 RSI_RANGE_CONF     = (55, 70)     # Para confirmação/tendência (5m/15m)
 VOL_MULTIPLIER     = 1.2          # Volume atual precisa ser >= VOL_MULTIPLIER * média20
 MIN_VOL_24H        = 15_000_000   # Filtro de liquidez mínima em USDT (24h)
+
 # 🔄 Parâmetros de tendência pós-pump (flexíveis)
 RSI_RANGE_POSTPUMP = (50, 60)        # faixa de RSI aceitável na retomada
 VOL_MULTIPLIER_POSTPUMP = 1.3        # volume atual precisa ser >= 1.3× média5
@@ -243,7 +244,7 @@ async def scan_symbol(session, symbol):
             if first_move_3m and allowed(symbol, "FIRST_3M"):
                 msg = (f"🟣 {symbol} — PRIMEIRO MOVIMENTO (3m)\n"
                        f"• Preço FECHOU acima da MA200 com força (antes do cruzamento da EMA9)\n"
-                       f"• RSI:{rsi3[-1]:.1f} dentro da faixa {RSI_RANGE_REVERSAO[0]}–{RSI_RANGE_REVERSAO[1]} • Vol ≥ {VOL_MULTIPLIER:.1f}×MA20\n"
+                       f"• RSI:{rsi3[-1]:.1f} dentro da faixa {RSI_RANGE_REVERSAO[0]}–{RSI_RANGE_REVERSAO[1]]} • Vol ≥ {VOL_MULTIPLIER:.1f}×MA20\n"
                        f"💰 {fmt_price(c3[i3])}\n🕒 {now_br()}\n──────────────────────────────")
                 await tg(session, msg)
                 mark(symbol, "FIRST_3M")
@@ -312,8 +313,8 @@ async def scan_symbol(session, symbol):
             c5 = [float(k[4]) for k in k5]
             v5 = [float(k[5]) for k in k5]
             ema9_5  = ema(c5, 9)
-            ema20_5 = ema(c5, 20)              # (adição para o alerta gradual)
-            ma50_5  = sma(c5, 50)              # (adição para o alerta gradual)
+            ema20_5 = ema(c5, 20)
+            ma50_5  = sma(c5, 50)
             ma200_5 = sma(c5, 200)
             rsi5 = calc_rsi(c5, 14)
             vma20_5 = sum(v5[-20:]) / 20.0
@@ -350,21 +351,33 @@ async def scan_symbol(session, symbol):
                         await tg(session, msg)
                         mark(symbol, "REAL_5M")
 
-            # 📈 TENDÊNCIA GRADUAL (5m) — alta progressiva sem pump (novo)
-            if (
-                52 <= rsi5[-1] <= 68
-                and ema9_5[i5] > ema20_5[i5] > ma50_5[i5] > ma200_5[i5]
-                and v5[-1] > 1.05 * (vma20_5 + 1e-12)
-                and len(c5) >= 31 and (c5[-1] - c5[-30]) / max(c5[-30], 1e-12) >= 0.02
-                and allowed(symbol, "STEADY_5M")
-            ):
-                msg = (f"📈 {symbol} — TENDÊNCIA GRADUAL (5m)\n"
-                       f"• Alta constante e progressiva (sem pump)\n"
-                       f"• RSI:{rsi5[-1]:.1f} • Vol ≥ 1.05×MA20\n"
-                       f"• MA9>MA20>MA50>MA200\n"
-                       f"💰 {fmt_price(c5[-1])}\n🕒 {now_br()}\n──────────────────────────────")
-                await tg(session, msg)
-                mark(symbol, "STEADY_5M")
+            # 📈 TENDÊNCIA GRADUAL (5m) — INÍCIO na MA200 (ajuste pedido)
+            # Requisitos (foco no começo do movimento):
+            # - RSI entre 48 e 60 (força inicial, sem pico)
+            # - Preço atual <= MA200 * 1.02 (tocando/abaixo/colado na 200)
+            # - EMA9 > EMA20 e ambas próximas da MA200 (abertura inicial das médias)
+            # - Volume atual ≥ 1.05 × MA20 de volume (entrada gradual de compradores)
+            # - Alta mínima de 1.2% nas últimas 25 velas (início de progressão)
+            if len(c5) >= 31:
+                price_now = c5[i5]
+                ma200_now = ma200_5[i5]
+                ema9_now  = ema9_5[i5]
+                ema20_now = ema20_5[i5]
+                rsi_now   = rsi5[-1]
+                price_near_200 = price_now <= ma200_now * 1.02  # <= +2% da 200 (ainda colado/abaixo)
+                ema_opening = (ema9_now > ema20_now)
+                ema_near_200 = (abs(ema20_now - ma200_now) / max(ma200_now,1e-12) <= 0.006) and (abs(ema9_now - ma200_now) / max(ma200_now,1e-12) <= 0.012)
+                vol_ok_grad = v5[-1] >= 1.05 * (vma20_5 + 1e-12)
+                progress_ok = (price_now - c5[-26]) / max(c5[-26],1e-12) >= 0.012
+                rsi_ok_grad = 48 <= rsi_now <= 60
+
+                if (rsi_ok_grad and price_near_200 and ema_opening and ema_near_200 and vol_ok_grad and progress_ok and allowed(symbol, "STEADY_5M")):
+                    msg = (f"📈 {symbol} — TENDÊNCIA GRADUAL (5m)\n"
+                           f"• INÍCIO na MA200 (preço tocando/colado na 200)\n"
+                           f"• RSI:{rsi_now:.1f} • Vol ≥ 1.05×MA20 • EMA9>EMA20 ~ MA200\n"
+                           f"💰 {fmt_price(price_now)}\n🕒 {now_br()}\n──────────────────────────────")
+                    await tg(session, msg)
+                    mark(symbol, "STEADY_5M")
 
             # ♻️ Verifica tendência pós-pump (5m)
             await postpump_alert(session, symbol, c5, v5, rsi5, ema9_5, ema20_5, ma50_5, ma200_5, "5M", i5)
