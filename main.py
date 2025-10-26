@@ -7,6 +7,7 @@
 #    🟠 CONFIRMAÇÃO (5m) — EMA9 cruza MA200
 #    🟢 TENDÊNCIA (15m) — alinhamento completo, dispara só quando forma
 #    🚀 ACELERAÇÃO REAL (3m) — explosão rápida (pumps com continuidade mínima)
+#    ♻️ TENDÊNCIA PÓS-PUMP (3m e 5m)
 # ✅ Filtro moedas mortas (blocklist + volume 24h mínimo)
 # ✅ Estrutura original preservada + validações de continuidade
 
@@ -30,6 +31,10 @@ RSI_RANGE_REVERSAO = (45, 65)     # Para sinais de início (3m/5m)
 RSI_RANGE_CONF     = (55, 70)     # Para confirmação/tendência (5m/15m)
 VOL_MULTIPLIER     = 1.2          # Volume atual precisa ser >= VOL_MULTIPLIER * média20
 MIN_VOL_24H        = 15_000_000   # Filtro de liquidez mínima em USDT (24h)
+# 🔄 Parâmetros de tendência pós-pump (flexíveis)
+RSI_RANGE_POSTPUMP = (50, 60)        # faixa de RSI aceitável na retomada
+VOL_MULTIPLIER_POSTPUMP = 1.3        # volume atual precisa ser >= 1.3× média5
+POSTPUMP_LOOKBACK = 20               # quantas velas olhar pra trás pra detectar o pump anterior
 
 # Moedas mortas / memes a evitar (além dos já bloqueados)
 NAME_BLOCKLIST = ("PEPE", "FLOKI", "BONK", "SHIB", "DOGE")
@@ -165,6 +170,42 @@ def allowed(symbol, kind):
 def mark(symbol, kind):
     LAST_HIT[(symbol, kind)] = time.time()
 
+# ---------------- FUNÇÃO PÓS-PUMP ----------------
+async def postpump_alert(session, symbol, closes, vols, rsi, ema9, ema20, ema50, ma200, timeframe_tag, index):
+    """Detecta retomada de tendência após pump forte"""
+    try:
+        if len(closes) < POSTPUMP_LOOKBACK:
+            return
+
+        # Detecta pump anterior (RSI >70 + volume 2× média)
+        recent_rsi = rsi[-POSTPUMP_LOOKBACK:]
+        recent_vol = vols[-POSTPUMP_LOOKBACK:]
+        pump_before = any(r > 70 for r in recent_rsi[:-5]) and any(
+            v >= 2 * (sum(recent_vol[-10:]) / 10 + 1e-12) for v in recent_vol[:-5]
+        )
+        if not pump_before:
+            return
+
+        # Condições atuais de retomada
+        rsi_now = rsi[-1]
+        vol_now = vols[-1]
+        mean5 = sum(vols[-6:-1]) / 5.0
+        volume_ok = vol_now >= VOL_MULTIPLIER_POSTPUMP * (mean5 + 1e-12)
+        rsi_ok = RSI_RANGE_POSTPUMP[0] <= rsi_now <= RSI_RANGE_POSTPUMP[1]
+        alignment = ema9[index] > ema20[index] > ema50[index] > ma200[index]
+
+        # Se tudo alinhado, dispara alerta
+        if rsi_ok and volume_ok and alignment and allowed(symbol, f"POSTPUMP_{timeframe_tag}"):
+            msg = (f"♻️ {symbol} — TENDÊNCIA PÓS-PUMP ({timeframe_tag})\n"
+                   f"• Correção concluída e retomada confirmada\n"
+                   f"• RSI:{rsi_now:.1f} • Vol ≥ {VOL_MULTIPLIER_POSTPUMP:.1f}×MA5\n"
+                   f"• MA9>MA20>MA50>MA200\n"
+                   f"💰 {fmt_price(closes[index])}\n🕒 {now_br()}\n──────────────────────────────")
+            await tg(session, msg)
+            mark(symbol, f"POSTPUMP_{timeframe_tag}")
+    except:
+        return
+
 # ---------------- WORKER ----------------
 async def scan_symbol(session, symbol):
     try:
@@ -232,27 +273,16 @@ async def scan_symbol(session, symbol):
                         await tg(session, msg)
                         mark(symbol, "CONT_3M")
 
-            # 🚀 ACELERAÇÃO REAL (3m) — pumps com continuidade mínima
+            # 🚀 ACELERAÇÃO REAL (3m)
             if len(c3) >= 210:
-                # volume explosivo em 2 velas: vela anterior >=2×média5 e atual >=80% da anterior
                 mean5 = (sum(v3[-6:-1]) / 5.0) if len(v3) >= 6 else vma20_3
-                vol_prev = v3[-2]
-                vol_now  = v3[-1]
+                vol_prev = v3[-2]; vol_now  = v3[-1]
                 vol_explosive = (vol_prev >= 2.0 * (mean5 + 1e-12)) and (vol_now >= 0.8 * vol_prev)
-
-                # salto de RSI ≥ 10 pts em até 3 velas
-                rsi_jump = False
-                if len(rsi3) >= 3:
-                    rsi_jump = (rsi3[-1] - rsi3[-3]) >= 10.0
-
-                # médias curtas coladas (aceleração real)
-                ema_close = abs(ema9_3[i3] - ema20_3[i3]) / max(c3[i3], 1e-12) < 0.003  # 0,3%
-
-                # fechamento perto da máxima (candle forte)
+                rsi_jump = (len(rsi3) >= 3) and ((rsi3[-1] - rsi3[-3]) >= 10.0)
+                ema_close = abs(ema9_3[i3] - ema20_3[i3]) / max(c3[i3], 1e-12) < 0.003
                 h = float(k3[-1][2]); l = float(k3[-1][3]); close = c3[i3]
                 rng = max(h - l, 1e-12)
-                close_near_high = (h - close) / rng <= 0.20  # top 20% do range
-
+                close_near_high = (h - close) / rng <= 0.20
                 if vol_explosive and rsi_jump and ema_close and close_near_high and allowed(symbol, "ACCEL_3M"):
                     msg = (f"🚀 {symbol} — ACELERAÇÃO REAL (3m)\n"
                            f"• Volume explosivo (≥2× média5 e continuidade)\n"
@@ -261,111 +291,9 @@ async def scan_symbol(session, symbol):
                     await tg(session, msg)
                     mark(symbol, "ACCEL_3M")
 
+            # ♻️ Verifica tendência pós-pump (3m)
+            await postpump_alert(session, symbol, c3, v3, rsi3, ema9_3, ema(c3,20), sma(c3,50), sma(c3,200), "3M", i3)
+
         # -------- 5m --------
         k5 = await get_klines(session, symbol, "5m", limit=210)
-        if len(k5) >= 210:
-            c5 = [float(k[4]) for k in k5]
-            v5 = [float(k[5]) for k in k5]
-            ema9_5  = ema(c5, 9)
-            ma200_5 = sma(c5, 200)
-            rsi5 = calc_rsi(c5, 14)
-            vma20_5 = sum(v5[-20:]) / 20.0
-            i5 = len(c5)-1
-
-            rsi_ok_5_rev  = (RSI_RANGE_REVERSAO[0] <= rsi5[-1] <= RSI_RANGE_REVERSAO[1])
-            rsi_ok_5_conf = (RSI_RANGE_CONF[0]     <= rsi5[-1] <= RSI_RANGE_CONF[1])
-            vol_ok_5      = (v5[-1] >= VOL_MULTIPLIER * (vma20_5 + 1e-12))
-
-            # 🟠 CONFIRMAÇÃO (5m)
-            cross_9_200_5m = (ema9_5[i5-1] <= ma200_5[i5-1]) and (ema9_5[i5] > ma200_5[i5]) and (rsi_ok_5_rev or rsi_ok_5_conf) and vol_ok_5
-            if cross_9_200_5m and allowed(symbol, "CONF_5M"):
-                msg = (f"🟠 {symbol} — CONFIRMAÇÃO (5m)\n"
-                       f"• EMA9 cruzou MA200 de baixo para cima\n"
-                       f"• RSI:{rsi5[-1]:.1f} (faixa aceita) • Vol ≥ {VOL_MULTIPLIER:.1f}×MA20\n"
-                       f"💰 {fmt_price(c5[i5])}\n🕒 {now_br()}\n──────────────────────────────")
-                await tg(session, msg)
-                mark(symbol, "CONF_5M")
-
-                # 🔍 CONFIRMAÇÃO REAL (5m) — pullback + sustentação
-                if len(c5) > 205:
-                    next_prices = [float(k[4]) for k in k5[-5:]]
-                    next_vols   = [float(k[5]) for k in k5[-5:]]
-                    next_rsi    = rsi5[-5:]
-                    price_pullback = min(next_prices) > ma200_5[i5] * 0.995  # não perdeu 0,5% da MA200
-                    price_gain = (next_prices[-1] - next_prices[0]) / next_prices[0]
-                    vol_trend  = next_vols[-1] >= 0.8 * max(next_vols)
-                    rsi_hold   = all(r > 55 for r in next_rsi[-3:])
-                    if price_pullback and price_gain > 0.008 and vol_trend and rsi_hold and allowed(symbol, "REAL_5M"):
-                        msg = (f"🟢 {symbol} — CONFIRMAÇÃO REAL (5m)\n"
-                               f"• Preço manteve acima da MA200 (sem devolução)\n"
-                               f"• RSI >55 e volume estável\n"
-                               f"💰 {fmt_price(c5[i5])}\n🕒 {now_br()}\n──────────────────────────────")
-                        await tg(session, msg)
-                        mark(symbol, "REAL_5M")
-
-        # -------- 15m --------
-        k15 = await get_klines(session, symbol, "15m", limit=210)
-        if len(k15) >= 210:
-            c15 = [float(k[4]) for k in k15]
-            v15 = [float(k[5]) for k in k15]
-            ema9_15  = ema(c15, 9)
-            ema20_15 = ema(c15, 20)
-            ma50_15  = sma(c15, 50)
-            ma200_15 = sma(c15, 200)
-            rsi15 = calc_rsi(c15, 14)
-            vma20_15 = sum(v15[-20:]) / 20.0
-            j = len(c15)-1
-
-            rsi_ok_15 = (RSI_RANGE_CONF[0] <= rsi15[-1] <= RSI_RANGE_CONF[1])
-            vol_ok_15 = (v15[-1] >= VOL_MULTIPLIER * (vma20_15 + 1e-12))
-
-            aligned_prev = (ema9_15[j-1] > ema20_15[j-1] > ma50_15[j-1] > ma200_15[j-1])
-            aligned_now  = (ema9_15[j]   > ema20_15[j]   > ma50_15[j]   > ma200_15[j])
-            formed_now_15m = (not aligned_prev) and aligned_now and rsi_ok_15 and vol_ok_15
-
-            if formed_now_15m and allowed(symbol, "TEND_15M"):
-                msg = (f"🟢 {symbol} — TENDÊNCIA CONSOLIDADA (15m)\n"
-                       f"• EMA9>EMA20>MA50>MA200 • RSI:{rsi15[-1]:.1f} (faixa) • Vol ≥ {VOL_MULTIPLIER:.1f}×MA20\n"
-                       f"💰 {fmt_price(c15[j])}\n🕒 {now_br()}\n──────────────────────────────")
-                await tg(session, msg)
-                mark(symbol, "TEND_15M")
-
-                # 💚 CONFIRMAÇÃO REAL (15m) — tendência sustentada
-                if len(c15) > 205:
-                    next_prices = [float(k[4]) for k in k15[-5:]]
-                    next_vols   = [float(k[5]) for k in k15[-5:]]
-                    next_rsi    = rsi15[-5:]
-                    price_above_ma50 = all(p > ma50_15[j] for p in next_prices)
-                    steady_vol = (min(next_vols) > 0.7 * max(next_vols))
-                    strong_rsi = all(r > 60 for r in next_rsi[-3:])
-                    if price_above_ma50 and steady_vol and strong_rsi and allowed(symbol, "REAL_15M"):
-                        msg = (f"💚 {symbol} — TENDÊNCIA CONFIRMADA (15m)\n"
-                               f"• Mantém acima da MA50, RSI>60 e volume constante\n"
-                               f"💰 {fmt_price(c15[j])}\n🕒 {now_br()}\n──────────────────────────────")
-                        await tg(session, msg)
-                        mark(symbol, "REAL_15M")
-
-    except:
-        return
-
-# ---------------- MAIN LOOP ----------------
-async def main_loop():
-    async with aiohttp.ClientSession() as session:
-        symbols = await get_top_usdt_symbols(session)
-        await tg(session, f"✅ Scanner ativo | {len(symbols)} pares | cooldown {COOLDOWN_SEC//60}m | {now_br()} (UTC-3)\n──────────────────────────────")
-        if not symbols: return
-        while True:
-            tasks = [scan_symbol(session, s) for s in symbols]
-            await asyncio.gather(*tasks)
-            await asyncio.sleep(10)
-
-# ---------------- RUN ----------------
-def start_bot():
-    while True:
-        try:
-            asyncio.run(main_loop())
-        except Exception:
-            time.sleep(5)
-
-threading.Thread(target=start_bot, daemon=True).start()
-app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
+        if len(k5) >= 210
