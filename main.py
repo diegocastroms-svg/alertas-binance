@@ -244,7 +244,7 @@ async def scan_symbol(session, symbol):
             if first_move_3m and allowed(symbol, "FIRST_3M"):
                 msg = (f"🟣 {symbol} — PRIMEIRO MOVIMENTO (3m)\n"
                        f"• Preço FECHOU acima da MA200 com força (antes do cruzamento da EMA9)\n"
-                       f"• RSI:{rsi3[-1]:.1f} dentro da faixa {RSI_RANGE_REVERSAO[0]}–{RSI_RANGE_REVERSAO[1]]} • Vol ≥ {VOL_MULTIPLIER:.1f}×MA20\n"
+                       f"• RSI:{rsi3[-1]:.1f} dentro da faixa {RSI_RANGE_REVERSAO[0]}–{RSI_RANGE_REVERSAO[1]} • Vol ≥ {VOL_MULTIPLIER:.1f}×MA20\n"
                        f"💰 {fmt_price(c3[i3])}\n🕒 {now_br()}\n──────────────────────────────")
                 await tg(session, msg)
                 mark(symbol, "FIRST_3M")
