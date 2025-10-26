@@ -1,6 +1,12 @@
 # main_hibrido_vflex.py
-# ✅ Versão limpa — apenas 15m, 1h, 4h, 1d
-# ✅ Alertas DualSetup: Small Cap Explosiva + Swing Curto
+# ✅ Híbrido (3m + 5m + 15m) com alertas limpos
+# ✅ Flex: faixas de RSI e volume configuráveis (não engessado)
+# ✅ Novos alertas:
+#    🟣 PRIMEIRO MOVIMENTO (3m) — preço fecha acima da MA200 com força (antes do cruzamento da EMA9)
+#    🟡 ROMPIMENTO (3m) — EMA9 cruza MA200 de baixo para cima
+#    🟠 CONFIRMAÇÃO (5m) — EMA9 cruza MA200
+#    🟢 TENDÊNCIA (15m) — alinhamento completo, dispara só quando forma
+# ✅ Filtro moedas mortas (blocklist + volume 24h mínimo)
 # ✅ Estrutura original preservada
 
 import os, asyncio, aiohttp, time, math, statistics
@@ -10,19 +16,29 @@ import threading
 
 # ---------------- CONFIG ----------------
 BINANCE_HTTP = "https://api.binance.com"
-COOLDOWN_SEC = 8 * 60
+COOLDOWN_SEC = 8 * 60          # 8 minutos (pode ajustar abaixo se quiser)
 TOP_N = 50
 REQ_TIMEOUT = 8
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 CHAT_ID = os.getenv("CHAT_ID", "").strip()
 
+# ---------------- AJUSTES DINÂMICOS ----------------
+# Faixas flexíveis (intervalos) e filtros — ajuste aqui sem mexer na lógica
+RSI_RANGE_REVERSAO = (45, 65)     # Para sinais de início (3m/5m)
+RSI_RANGE_CONF     = (55, 70)     # Para confirmação/tendência (5m/15m)
+VOL_MULTIPLIER     = 1.2          # Volume atual precisa ser >= VOL_MULTIPLIER * média20
+MIN_VOL_24H        = 15_000_000   # Filtro de liquidez mínima em USDT (24h)
+
+# Moedas mortas / memes a evitar (além dos já bloqueados)
+NAME_BLOCKLIST = ("PEPE", "FLOKI", "BONK", "SHIB", "DOGE")
+
 # ---------------- FLASK ----------------
 app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return "✅ Scanner ativo (15m, 1h, 4h, 1d) — DualSetup SmallCap + Swing | 🇧🇷", 200
+    return "✅ Scanner ativo (3m, 5m + 15m) — flex RSI/Volume | 🇧🇷", 200
 
 # ---------------- UTILS ----------------
 def now_br():
@@ -94,6 +110,7 @@ def calc_rsi(seq, period=14):
         avg_gain = (avg_gain * (period-1) + gain) / period
         avg_loss = (avg_loss * (period-1) + loss) / period
         rs = avg_gain / (avg_loss + 1e-12)
+    # continue calc
         rsi.append(100 - (100 / (1 + rs)))
     return [50.0]*(len(seq)-len(rsi)) + rsi
 
@@ -114,9 +131,13 @@ async def get_top_usdt_symbols(session):
     async with session.get(url, timeout=REQ_TIMEOUT) as r:
         data = await r.json()
     blocked = (
+        # alavancados / leveraged
         "UP", "DOWN", "BULL", "BEAR",
+        # stablecoins / sintéticos / paralelos
         "BUSD", "FDUSD", "TUSD", "USDC", "USDP", "USD1", "USDE", "XUSD", "USDX", "GUSD", "BFUSD",
+        # fiat / outros mercados
         "EUR", "EURS", "CEUR", "BRL", "TRY",
+        # perp / testes
         "PERP", "_PERP", "STABLE", "TEST"
     )
     pares = []
@@ -126,11 +147,13 @@ async def get_top_usdt_symbols(session):
             continue
         if any(x in s for x in blocked):
             continue
+        if any(x in s for x in NAME_BLOCKLIST):
+            continue
         try:
             qv = float(d.get("quoteVolume", "0") or 0.0)
         except:
             qv = 0.0
-        if qv < 15_000_000:
+        if qv < float(MIN_VOL_24H):
             continue
         pares.append((s, qv))
     pares.sort(key=lambda x: x[1], reverse=True)
@@ -149,95 +172,93 @@ def mark(symbol, kind):
 # ---------------- WORKER ----------------
 async def scan_symbol(session, symbol):
     try:
+        # -------- 3m --------
+        k3 = await get_klines(session, symbol, "3m", limit=210)
+        if len(k3) >= 210:
+            c3 = [float(k[4]) for k in k3]
+            v3 = [float(k[5]) for k in k3]
+            ema9_3  = ema(c3, 9)
+            ma200_3 = sma(c3, 200)
+            rsi3 = calc_rsi(c3, 14)
+            vma20_3 = sum(v3[-20:]) / 20.0
+            i3 = len(c3)-1
+
+            rsi_ok_3_rev  = (RSI_RANGE_REVERSAO[0] <= rsi3[-1] <= RSI_RANGE_REVERSAO[1])
+            rsi_ok_3_conf = (RSI_RANGE_CONF[0]     <= rsi3[-1] <= RSI_RANGE_CONF[1])
+            vol_ok_3      = (v3[-1] >= VOL_MULTIPLIER * (vma20_3 + 1e-12))
+
+            # 🟣 PRIMEIRO MOVIMENTO (3m) — preço fecha acima da MA200 com força antes da EMA9 cruzar
+            first_move_3m = (ema9_3[i3] < ma200_3[i3]) and (c3[i3] > ma200_3[i3]) and rsi_ok_3_rev and vol_ok_3
+            if first_move_3m and allowed(symbol, "FIRST_3M"):
+                msg = (f"🟣 {symbol} — PRIMEIRO MOVIMENTO (3m)\n"
+                       f"• Preço FECHOU acima da MA200 com força (antes do cruzamento da EMA9)\n"
+                       f"• RSI:{rsi3[-1]:.1f} dentro da faixa {RSI_RANGE_REVERSAO[0]}–{RSI_RANGE_REVERSAO[1]} • Vol ≥ {VOL_MULTIPLIER:.1f}×MA20\n"
+                       f"💰 {fmt_price(c3[i3])}\n🕒 {now_br()}\n──────────────────────────────")
+                await tg(session, msg)
+                mark(symbol, "FIRST_3M")
+
+            # 🟡 ROMPIMENTO (3m) — EMA9 cruza MA200 de baixo para cima (início da reversão)
+            cross_9_200_3m = (ema9_3[i3-1] <= ma200_3[i3-1]) and (ema9_3[i3] > ma200_3[i3]) and (rsi_ok_3_rev or rsi_ok_3_conf) and vol_ok_3
+            if cross_9_200_3m and allowed(symbol, "ROMP_3M"):
+                msg = (f"🟡 {symbol} — ROMPIMENTO EMA9×MA200 (3m)\n"
+                       f"• EMA9 cruzou MA200 de baixo para cima\n"
+                       f"• RSI:{rsi3[-1]:.1f} (faixa aceita) • Vol ≥ {VOL_MULTIPLIER:.1f}×MA20\n"
+                       f"💰 {fmt_price(c3[i3])}\n🕒 {now_br()}\n──────────────────────────────")
+                await tg(session, msg)
+                mark(symbol, "ROMP_3M")
+
+        # -------- 5m --------
+        k5 = await get_klines(session, symbol, "5m", limit=210)
+        if len(k5) >= 210:
+            c5 = [float(k[4]) for k in k5]
+            v5 = [float(k[5]) for k in k5]
+            ema9_5  = ema(c5, 9)
+            ma200_5 = sma(c5, 200)
+            rsi5 = calc_rsi(c5, 14)
+            vma20_5 = sum(v5[-20:]) / 20.0
+            i5 = len(c5)-1
+
+            rsi_ok_5_rev  = (RSI_RANGE_REVERSAO[0] <= rsi5[-1] <= RSI_RANGE_REVERSAO[1])
+            rsi_ok_5_conf = (RSI_RANGE_CONF[0]     <= rsi5[-1] <= RSI_RANGE_CONF[1])
+            vol_ok_5      = (v5[-1] >= VOL_MULTIPLIER * (vma20_5 + 1e-12))
+
+            # 🟠 CONFIRMAÇÃO (5m) — EMA9 cruza MA200 (força validada)
+            cross_9_200_5m = (ema9_5[i5-1] <= ma200_5[i5-1]) and (ema9_5[i5] > ma200_5[i5]) and (rsi_ok_5_rev or rsi_ok_5_conf) and vol_ok_5
+            if cross_9_200_5m and allowed(symbol, "CONF_5M"):
+                msg = (f"🟠 {symbol} — CONFIRMAÇÃO (5m)\n"
+                       f"• EMA9 cruzou MA200 de baixo para cima\n"
+                       f"• RSI:{rsi5[-1]:.1f} (faixa aceita) • Vol ≥ {VOL_MULTIPLIER:.1f}×MA20\n"
+                       f"💰 {fmt_price(c5[i5])}\n🕒 {now_br()}\n──────────────────────────────")
+                await tg(session, msg)
+                mark(symbol, "CONF_5M")
+
+        # -------- 15m --------
         k15 = await get_klines(session, symbol, "15m", limit=210)
-        k1h = await get_klines(session, symbol, "1h",  limit=210)
-        k4h = await get_klines(session, symbol, "4h",  limit=210)
-        k1d = await get_klines(session, symbol, "1d",  limit=210)
-        if not (len(k15)>=50 and len(k1h)>=50 and len(k4h)>=50 and len(k1d)>=50):
-            return
+        if len(k15) >= 210:
+            c15 = [float(k[4]) for k in k15]
+            v15 = [float(k[5]) for k in k15]
+            ema9_15  = ema(c15, 9)
+            ema20_15 = ema(c15, 20)
+            ma50_15  = sma(c15, 50)
+            ma200_15 = sma(c15, 200)
+            rsi15 = calc_rsi(c15, 14)
+            vma20_15 = sum(v15[-20:]) / 20.0
+            j = len(c15)-1
 
-        c15=[float(k[4]) for k in k15]; v15=[float(k[5]) for k in k15]
-        ema9_15=ema(c15,9); ema20_15=sma(c15,20)
-        u15,m15,l15=bollinger_bands(c15,20,2)
-        rsi15=calc_rsi(c15,14)
-        vol_ma20_15=sum(v15[-20:])/20.0
-        vol_ratio_15=v15[-1]/(vol_ma20_15+1e-12)
-        bbw15=(u15[-1]-l15[-1])/(m15[-1]+1e-12)
-        bbw15_prev=(u15[-2]-l15[-2])/(m15[-2]+1e-12)
-        bb_expand_15 = bbw15 >= bbw15_prev * 0.98
+            rsi_ok_15 = (RSI_RANGE_CONF[0] <= rsi15[-1] <= RSI_RANGE_CONF[1])
+            vol_ok_15 = (v15[-1] >= VOL_MULTIPLIER * (vma20_15 + 1e-12))
 
-        c1h=[float(k[4]) for k in k1h]; v1h=[float(k[5]) for k in k1h]
-        ema9_1h=ema(c1h,9); ema20_1h=sma(c1h,20)
-        ma50_1h=sma(c1h,50); ma200_1h=sma(c1h,200)
-        u1h,m1h,l1h=bollinger_bands(c1h,20,2)
-        rsi1h=calc_rsi(c1h,14)
-        vol_ma20_1h=sum(v1h[-20:])/20.0
-        vol_ratio_1h=v1h[-1]/(vol_ma20_1h+1e-12)
-        bbw1h=(u1h[-1]-l1h[-1])/(m1h[-1]+1e-12)
-        bbw1h_prev=(u1h[-2]-l1h[-2])/(m1h[-2]+1e-12)
-        bb_expand_1h = bbw1h >= bbw1h_prev * 0.98
+            aligned_prev = (ema9_15[j-1] > ema20_15[j-1] > ma50_15[j-1] > ma200_15[j-1])
+            aligned_now  = (ema9_15[j]   > ema20_15[j]   > ma50_15[j]   > ma200_15[j])
+            formed_now_15m = (not aligned_prev) and aligned_now and rsi_ok_15 and vol_ok_15
 
-        c4h=[float(k[4]) for k in k4h]
-        ema9_4h=ema(c4h,9); ema20_4h=sma(c4h,20)
-        ma50_4h=sma(c4h,50); ma200_4h=sma(c4h,200)
-
-        c1d=[float(k[4]) for k in k1d]
-        ema20_1d=sma(c1d,20)
-
-        RSI_SMALL_MIN, RSI_SMALL_MAX = 55.0, 80.0
-        VOL_SMALL_MIN, VOL_SMALL_MAX = 1.3, 6.0
-        RSI_SWING_MIN, RSI_SWING_MAX = 45.0, 60.0
-        VOL_SWING_MIN, VOL_SWING_MAX = 0.8, 3.0
-        TOL_EMA = 0.99
-
-        # 🔥 SMALL CAP EXPLOSIVA (15m/1h)
-        small_ok = (
-            (RSI_SMALL_MIN <= rsi15[-1] <= RSI_SMALL_MAX) and
-            (VOL_SMALL_MIN <= vol_ratio_15 <= VOL_SMALL_MAX) and
-            (ema9_15[-1] >= ema20_15[-1] * TOL_EMA) and
-            bb_expand_15 and
-            (c1h[-1] >= ema20_1h[-1] * TOL_EMA)
-        )
-        if small_ok and allowed(symbol, "SMALL_ALERT"):
-            price = fmt_price(c15[-1])
-            msg = (
-                f"🚨 <b>[EXPLOSÃO SUSTENTÁVEL DETECTADA]</b>\n"
-                f"💥 {symbol}\n"
-                f"🕒 {now_br()}\n"
-                f"💰 Preço: {price}\n"
-                f"📊 Volume: {(vol_ratio_15-1)*100:.0f}% acima da média 💣\n"
-                f"📈 RSI(15m): {rsi15[-1]:.1f} | EMA9≥EMA20 | BB abrindo ✅\n"
-                f"⏱️ Confirmação 1h: Close ≥ EMA20 ✅\n"
-                f"🔗 https://www.binance.com/en/trade/{symbol}"
-            )
-            await tg(session, msg)
-            mark(symbol, "SMALL_ALERT")
-
-        # 🟩 SWING CURTO (1h/4h/1D)
-        cross_9_20_1h = (ema9_1h[-2] <= ema20_1h[-2]) and (ema9_1h[-1] > ema20_1h[-1])
-        swing_ok = (
-            cross_9_20_1h and
-            (RSI_SWING_MIN <= rsi1h[-1] <= RSI_SWING_MAX) and
-            (VOL_SWING_MIN <= vol_ratio_1h <= VOL_SWING_MAX) and
-            bb_expand_1h and
-            (ema9_4h[-1] >= ema20_4h[-1] * TOL_EMA) and
-            (ma50_4h[-1] >= ma200_4h[-1] * TOL_EMA) and
-            (c1d[-1] >= ema20_1d[-1] * TOL_EMA)
-        )
-        if swing_ok and allowed(symbol, "SWING_ALERT"):
-            price = fmt_price(c1h[-1])
-            msg = (
-                f"💹 <b>[SWING CURTO – TENDÊNCIA SUSTENTADA]</b>\n"
-                f"📊 {symbol}\n"
-                f"🕒 {now_br()}\n"
-                f"💰 Preço: {price}\n"
-                f"📈 EMA9>EMA20 (1h) | EMA9≥EMA20 (4h) | MA50≥MA200 (4h) ✅\n"
-                f"⚡ RSI(1h): {rsi1h[-1]:.1f} | Volume: {(vol_ratio_1h-1)*100:.0f}% acima | BB abrindo ✅\n"
-                f"🧭 Direção 1D: Close ≥ EMA20 ✅\n"
-                f"🔗 https://www.binance.com/en/trade/{symbol}"
-            )
-            await tg(session, msg)
-            mark(symbol, "SWING_ALERT")
+            # 🟢 TENDÊNCIA (15m) — só quando FORMAR (sem repetir no topo)
+            if formed_now_15m and allowed(symbol, "TEND_15M"):
+                msg = (f"🟢 {symbol} — TENDÊNCIA CONSOLIDADA (15m)\n"
+                       f"• EMA9>EMA20>MA50>MA200 • RSI:{rsi15[-1]:.1f} (faixa) • Vol ≥ {VOL_MULTIPLIER:.1f}×MA20\n"
+                       f"💰 {fmt_price(c15[j])}\n🕒 {now_br()}\n──────────────────────────────")
+                await tg(session, msg)
+                mark(symbol, "TEND_15M")
 
     except:
         return
@@ -246,10 +267,11 @@ async def scan_symbol(session, symbol):
 async def main_loop():
     async with aiohttp.ClientSession() as session:
         symbols = await get_top_usdt_symbols(session)
-        await tg(session, f"✅ Scanner ativo | {len(symbols)} pares | cooldown {COOLDOWN_SEC//60}m | {now_br()} (UTC-3)")
+        await tg(session, f"✅ Scanner ativo | {len(symbols)} pares | cooldown {COOLDOWN_SEC//60}m | {now_br()} (UTC-3)\n──────────────────────────────")
         if not symbols: return
         while True:
-            await asyncio.gather(*[scan_symbol(session, s) for s in symbols])
+            tasks = [scan_symbol(session, s) for s in symbols]
+            await asyncio.gather(*tasks)
             await asyncio.sleep(10)
 
 # ---------------- RUN ----------------
@@ -261,4 +283,4 @@ def start_bot():
             time.sleep(5)
 
 threading.Thread(target=start_bot, daemon=True).start()
-app.run(host="0.0.0.0", port=int(os.getenv("PORT", 50000)))
+app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
