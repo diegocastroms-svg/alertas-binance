@@ -8,6 +8,7 @@
 #    🟢 TENDÊNCIA (15m) — alinhamento completo, dispara só quando forma
 #    🚀 ACELERAÇÃO REAL (3m) — explosão rápida (pumps com continuidade mínima)
 #    ♻️ TENDÊNCIA PÓS-PUMP (3m e 5m)
+#    📈 TENDÊNCIA GRADUAL (5m) — alta progressiva sem pump (novo)
 # ✅ Filtro moedas mortas (blocklist + volume 24h mínimo)
 # ✅ Estrutura original preservada + validações de continuidade
 
@@ -275,17 +276,21 @@ async def scan_symbol(session, symbol):
 
             # 🚀 ACELERAÇÃO REAL (3m) — pumps com continuidade mínima
             if len(c3) >= 210:
+                # volume explosivo em 2 velas: vela anterior >=2×média5 e atual >=80% da anterior
                 mean5 = (sum(v3[-6:-1]) / 5.0) if len(v3) >= 6 else vma20_3
                 vol_prev = v3[-2]
                 vol_now  = v3[-1]
                 vol_explosive = (vol_prev >= 2.0 * (mean5 + 1e-12)) and (vol_now >= 0.8 * vol_prev)
 
+                # salto de RSI ≥ 10 pts em até 3 velas
                 rsi_jump = False
                 if len(rsi3) >= 3:
                     rsi_jump = (rsi3[-1] - rsi3[-3]) >= 10.0
 
+                # médias curtas coladas (aceleração real)
                 ema_close = abs(ema9_3[i3] - ema20_3[i3]) / max(c3[i3], 1e-12) < 0.003  # 0,3%
 
+                # fechamento perto da máxima (candle forte)
                 h = float(k3[-1][2]); l = float(k3[-1][3]); close = c3[i3]
                 rng = max(h - l, 1e-12)
                 close_near_high = (h - close) / rng <= 0.20  # top 20% do range
@@ -307,6 +312,8 @@ async def scan_symbol(session, symbol):
             c5 = [float(k[4]) for k in k5]
             v5 = [float(k[5]) for k in k5]
             ema9_5  = ema(c5, 9)
+            ema20_5 = ema(c5, 20)              # (adição para o alerta gradual)
+            ma50_5  = sma(c5, 50)              # (adição para o alerta gradual)
             ma200_5 = sma(c5, 200)
             rsi5 = calc_rsi(c5, 14)
             vma20_5 = sum(v5[-20:]) / 20.0
@@ -343,8 +350,24 @@ async def scan_symbol(session, symbol):
                         await tg(session, msg)
                         mark(symbol, "REAL_5M")
 
+            # 📈 TENDÊNCIA GRADUAL (5m) — alta progressiva sem pump (novo)
+            if (
+                52 <= rsi5[-1] <= 68
+                and ema9_5[i5] > ema20_5[i5] > ma50_5[i5] > ma200_5[i5]
+                and v5[-1] > 1.05 * (vma20_5 + 1e-12)
+                and len(c5) >= 31 and (c5[-1] - c5[-30]) / max(c5[-30], 1e-12) >= 0.02
+                and allowed(symbol, "STEADY_5M")
+            ):
+                msg = (f"📈 {symbol} — TENDÊNCIA GRADUAL (5m)\n"
+                       f"• Alta constante e progressiva (sem pump)\n"
+                       f"• RSI:{rsi5[-1]:.1f} • Vol ≥ 1.05×MA20\n"
+                       f"• MA9>MA20>MA50>MA200\n"
+                       f"💰 {fmt_price(c5[-1])}\n🕒 {now_br()}\n──────────────────────────────")
+                await tg(session, msg)
+                mark(symbol, "STEADY_5M")
+
             # ♻️ Verifica tendência pós-pump (5m)
-            await postpump_alert(session, symbol, c5, v5, rsi5, ema9_5, ema(c5,20), sma(c5,50), sma(c5,200), "5M", i5)
+            await postpump_alert(session, symbol, c5, v5, rsi5, ema9_5, ema20_5, ma50_5, ma200_5, "5M", i5)
 
         # -------- 15m --------
         k15 = await get_klines(session, symbol, "15m", limit=210)
