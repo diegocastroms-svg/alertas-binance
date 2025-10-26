@@ -1,7 +1,7 @@
 # main_hibrido_vflex.py
-# ✅ Híbrido (3m + 5m + 15m) — ALERTA ANTECIPADO (pré-pump real)
-# ✅ Dispara quando o preço está tocando/ABAIXO da MA200 (janela ±1.5%) + início de força
-# ✅ Estrutura original preservada
+# ✅ Híbrido (3m + 5m + 15m) — ALERTA ÚNICO: "INÍCIO DE TENDÊNCIA REAL (FLEX)"
+# ✅ Detecção cedo (abaixo/tocando MA200) com faixas dinâmicas (sem números engessados)
+# ✅ Estrutura original preservada (Flask, threading, cooldown, filtros e top N)
 
 import os, asyncio, aiohttp, time, math, statistics
 from datetime import datetime, timedelta
@@ -17,24 +17,36 @@ REQ_TIMEOUT = 8
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 CHAT_ID = os.getenv("CHAT_ID", "").strip()
 
-# ---------------- PARÂMETROS ----------------
-# Faixas pensadas para DISPARAR CEDO (antes do pump)
-RSI_LOW, RSI_HIGH = 50, 62            # força inicial, sem pico
-VOL_MULTIPLIER = 1.10                  # leve aumento de volume já basta
-MIN_VOL_24H = 80_000_000               # filtro reforçado de liquidez
+# ---------------- PARÂMETROS FLEX ----------------
+# Filtro de liquidez e "memecoins"
+MIN_VOL_24H = 80_000_000
 NAME_BLOCKLIST = (
     "PEPE","FLOKI","BONK","SHIB","DOGE",
     "HIFI","BAKE","WIF","MEME","1000","ORDI","ZK","ZRO","SAGA"
 )
-# Banda de “toque na 200”: dentro de ±1.5% da MA200 (permite abaixo)
-BAND_200 = 0.015
+HYPE_SUBSTRINGS = ("AI","GPT","BOT")
+
+# Tolerância base à MA200 (ajustada pela volatilidade, com limites)
+BAND_200_BASE = 0.020  # 2.0% base
+BAND_200_MIN  = 0.010  # 1.0% mínimo
+BAND_200_MAX  = 0.025  # 2.5% máximo
+
+# Volume: multiplicador dinâmico com base na volatilidade
+VOL_MULT_MIN  = 1.05
+VOL_MULT_MAX  = 1.30
+
+# RSI: centrado dinamicamente com janelas móveis
+RSI_CENTER_WIN = 20  # janelas para média dinâmica
+RSI_MIN_FLOOR  = 42  # piso absoluto
+RSI_MAX_CEIL   = 63  # teto absoluto
+RSI_BAND       = 5   # +/- faixa em torno do centro
 
 # ---------------- FLASK ----------------
 app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return "✅ Scanner ativo (3m, 5m, 15m) — alerta ANTECIPADO pré-pump 🇧🇷", 200
+    return "✅ Scanner ativo (3m, 5m, 15m) — INÍCIO DE TENDÊNCIA REAL (FLEX) 🇧🇷", 200
 
 # ---------------- UTILS ----------------
 def now_br():
@@ -53,6 +65,9 @@ async def tg(session, text: str):
 def fmt_price(x: float) -> str:
     s = f"{x:.8f}".rstrip("0").rstrip(".")
     return s if s else "0"
+
+def clamp(x, lo, hi):
+    return max(lo, min(hi, x))
 
 def sma(seq, n):
     out, s = [], 0.0
@@ -97,6 +112,54 @@ def calc_rsi(seq, period=14):
         rsi.append(100 - (100 / (1 + rs)))
     return [50.0]*(len(seq)-len(rsi)) + rsi
 
+def bollinger_bands(seq, n=20, mult=2.0):
+    if len(seq) < n: 
+        return [], [], []
+    out_mid, out_upper, out_lower = [], [], []
+    for i in range(len(seq)):
+        window = seq[max(0, i-n+1):i+1]
+        m = sum(window)/len(window)
+        s = statistics.pstdev(window)
+        out_mid.append(m)
+        out_upper.append(m + mult*s)
+        out_lower.append(m - mult*s)
+    return out_upper, out_mid, out_lower
+
+def calc_sar(highs, lows, step=0.02, max_step=0.2):
+    """Parabolic SAR básico (trend following); retorna lista do SAR."""
+    if len(highs) < 2 or len(lows) < 2:
+        return [0.0]*len(highs)
+    sar = [0.0]*len(highs)
+    uptrend = True
+    af = step
+    ep = highs[0]  # extreme point
+    sar[0] = lows[0]
+    for i in range(1, len(highs)):
+        prev_sar = sar[i-1]
+        if uptrend:
+            sar_candidate = prev_sar + af*(ep - prev_sar)
+            sar[i] = min(sar_candidate, lows[i-1], lows[i])  # não pode ficar acima dos lows
+            if highs[i] > ep:
+                ep = highs[i]
+                af = min(af + step, max_step)
+            if lows[i] < sar[i]:  # reversão
+                uptrend = False
+                sar[i] = ep
+                af = step
+                ep = lows[i]
+        else:
+            sar_candidate = prev_sar + af*(ep - prev_sar)
+            sar[i] = max(sar_candidate, highs[i-1], highs[i])  # não pode ficar abaixo dos highs
+            if lows[i] < ep:
+                ep = lows[i]
+                af = min(af + step, max_step)
+            if highs[i] > sar[i]:  # reversão
+                uptrend = True
+                sar[i] = ep
+                af = step
+                ep = highs[i]
+    return sar
+
 # ---------------- COOLDOWN ----------------
 LAST_HIT = {}
 def allowed(symbol, kind):
@@ -129,9 +192,7 @@ async def get_top_usdt_symbols(session):
         if not s.endswith("USDT"): continue
         if any(x in s for x in blocked): continue
         if any(x in s for x in NAME_BLOCKLIST): continue
-        # corta tokens hype
-        if "AI" in s or "GPT" in s or "BOT" in s:
-            continue
+        if any(h in s for h in HYPE_SUBSTRINGS): continue
         try: qv = float(d.get("quoteVolume", "0") or 0.0)
         except: qv = 0.0
         if qv < float(MIN_VOL_24H): continue
@@ -139,45 +200,98 @@ async def get_top_usdt_symbols(session):
     pares.sort(key=lambda x: x[1], reverse=True)
     return [s for s, _ in pares[:TOP_N]]
 
-# ---------------- ALERTA ANTECIPADO ----------------
-async def detectar_inicio_real(session, symbol, closes, vols, rsi, ema9, ema20, ma50, ma200, timeframe):
+# ---------------- ALERTA FLEX (núcleo) ----------------
+async def detectar_tendencia_flex(session, symbol, k, timeframe_tag):
     """
-    Dispara cedo:
-    - Preço tocando/ABAIXO da MA200 (banda ±1.5%)
-    - EMA9 > EMA20 (abertura inicial)
-    - MA20 e MA50 ainda perto da 200 (sem alinhamento completo)
-    - RSI 50–62 e leve aumento de volume
-    - Vela anterior <= MA200 (garante que veio de baixo/encoste)
+    Alerta único "INÍCIO DE TENDÊNCIA REAL (FLEX)" aplicado ao timeframe atual.
+    Condições:
+      - Preço abaixo/tocando MA200 (tolerância dinâmica)
+      - Cruzamento EMA9>EMA20 RECENTE
+      - MA50 ainda abaixo da MA200 (início, não meio)
+      - RSI em faixa dinâmica (centro móvel ±5, com pisos/tetos)
+      - Volume atual >= multiplicador dinâmico * média20
+      - Fechamento acima da banda média de Bollinger
+      - SAR abaixo do preço
     """
     try:
-        n = len(closes)
-        if n < 210: return
-        i = n - 1
-        close_now = closes[i]
-        ma200_now = ma200[i]
+        if len(k) < 210: 
+            return
+        closes = [float(x[4]) for x in k]
+        highs  = [float(x[2]) for x in k]
+        lows   = [float(x[3]) for x in k]
+        vols   = [float(x[5]) for x in k]
+        i = len(closes) - 1
+
+        # Indicadores
+        ema9   = ema(closes, 9)
+        ema20  = ema(closes, 20)
+        ma50   = sma(closes, 50)
+        ma200  = sma(closes, 200)
+        rsi    = calc_rsi(closes, 14)
+        bb_u, bb_m, bb_l = bollinger_bands(closes, n=20, mult=2.0)
+        sar    = calc_sar(highs, lows, step=0.02, max_step=0.2)
+
+        close_now  = closes[i]
+        ma200_now  = ma200[i]
+        ema9_now   = ema9[i]
+        ema20_now  = ema20[i]
+        ma50_now   = ma50[i]
+        rsi_now    = rsi[-1]
+        bbm_now    = bb_m[i] if bb_m else close_now
+
+        # Volatilidade local (20 velas) para ajustar bandas
+        win = closes[-20:]
+        mean_p = sum(win)/len(win)
+        dev_p  = statistics.pstdev(win) if len(win) >= 2 else 0.0
+        vol_norm = dev_p / max(mean_p, 1e-12)  # ~0.001 a 0.02+
+
+        # Banda dinâmica em torno da MA200
+        band200 = clamp(BAND_200_BASE * (1.0 + 10.0*vol_norm), BAND_200_MIN, BAND_200_MAX)
+        near_200 = (close_now >= ma200_now * (1.0 - band200)) and (close_now <= ma200_now * (1.0 + band200))
+
+        # Cruzamento recente EMA9>EMA20 (até 3 velas)
+        crossed_recent = False
+        if ema9_now > ema20_now:
+            for off in (1, 2, 3):
+                if i-off < 0: break
+                if ema9[i-off] <= ema20[i-off]:
+                    crossed_recent = True
+                    break
+
+        # MA50 ainda abaixo da 200 (garante "início")
+        early_trend = ma50_now < ma200_now
+
+        # RSI dinâmico (centro móvel dos últimos RSI_CENTER_WIN valores)
+        rsi_window = rsi[-RSI_CENTER_WIN:] if len(rsi) >= RSI_CENTER_WIN else rsi
+        rsi_center = sum(rsi_window)/len(rsi_window) if rsi_window else 50.0
+        rsi_low  = clamp(rsi_center - RSI_BAND, RSI_MIN_FLOOR, RSI_MAX_CEIL-2)
+        rsi_high = clamp(rsi_center + RSI_BAND, rsi_low+2, RSI_MAX_CEIL)
+        rsi_ok   = (rsi_now >= rsi_low) and (rsi_now <= rsi_high)
+
+        # Volume dinâmico
         avg_vol20 = sum(vols[-20:]) / 20.0
+        vol_mult  = clamp(VOL_MULT_MIN + 20.0*vol_norm, VOL_MULT_MIN, VOL_MULT_MAX)
+        vol_ok    = vols[-1] >= vol_mult * (avg_vol20 + 1e-12)
 
-        # dentro da banda da 200 (permite abaixo)
-        band_ok = (close_now >= ma200_now * (1 - BAND_200)) and (close_now <= ma200_now * (1 + BAND_200))
-        # veio de baixo/encostando recentemente
-        prev_below = closes[i-1] <= ma200[i-1] * (1 + 0.002)  # até +0,2% ainda conta como encosto
-        # abertura inicial de médias curtas
-        opening = ema9[i] > ema20[i]
-        # MA20 e MA50 ainda “coladas” na 200 (sem alinhamento total)
-        ma20_near = abs(ema20[i] - ma200_now) / max(ma200_now,1e-12) <= 0.012
-        ma50_near = abs(ma50[i]  - ma200_now) / max(ma200_now,1e-12) <= 0.02
-        # força inicial e volume começando
-        rsi_ok  = RSI_LOW <= rsi[-1] <= RSI_HIGH
-        vol_ok  = vols[-1] >= VOL_MULTIPLIER * (avg_vol20 + 1e-12)
+        # Bollinger média rompida (saindo da neutralidade)
+        bb_ok = close_now > bbm_now
 
-        if band_ok and prev_below and opening and ma20_near and ma50_near and rsi_ok and vol_ok and allowed(symbol, f"TEND_{timeframe}"):
-            msg = (f"🚀 {symbol} — INÍCIO ANTECIPADO ({timeframe})\n"
-                   f"• Preço tocando/ABAIXO da MA200 (±{int(BAND_200*100)}%)\n"
-                   f"• EMA9>EMA20 • MA20≈MA200 • MA50≈MA200\n"
-                   f"• RSI:{rsi[-1]:.1f} ({RSI_LOW}-{RSI_HIGH}) • Vol ≥ {VOL_MULTIPLIER:.2f}×MA20\n"
+        # SAR abaixo do preço
+        sar_ok = sar[i] < close_now
+
+        # Distância percentual à MA200 (para mensagem)
+        dist_200 = (close_now / max(ma200_now,1e-12) - 1.0) * 100.0
+
+        if (near_200 and crossed_recent and early_trend and rsi_ok and vol_ok and bb_ok and sar_ok
+            and allowed(symbol, f"TEND_{timeframe_tag}")):
+            msg = (f"🚀 {symbol} — INÍCIO DE TENDÊNCIA REAL ({timeframe_tag})\n"
+                   f"• RSI: {rsi_now:.1f} | Faixa din.: {rsi_low:.0f}–{rsi_high:.0f}\n"
+                   f"• Vol: {vols[-1]/max(avg_vol20,1e-12):.2f}×MA20 (mult alvo {vol_mult:.2f}×)\n"
+                   f"• Distância MA200: {dist_200:+.2f}% | EMA9>EMA20 | SAR abaixo | Bollinger>média\n"
                    f"💰 {fmt_price(close_now)}\n🕒 {now_br()}\n──────────────────────────────")
             await tg(session, msg)
-            mark(symbol, f"TEND_{timeframe}")
+            mark(symbol, f"TEND_{timeframe_tag}")
+
     except:
         return
 
@@ -187,23 +301,17 @@ async def scan_symbol(session, symbol):
         # 3m
         k3 = await get_klines(session, symbol, "3m", limit=210)
         if len(k3) >= 210:
-            c3 = [float(k[4]) for k in k3]
-            v3 = [float(k[5]) for k in k3]
-            await detectar_inicio_real(session, symbol, c3, v3, calc_rsi(c3,14), ema(c3,9), ema(c3,20), sma(c3,50), sma(c3,200), "3M")
+            await detectar_tendencia_flex(session, symbol, k3, "3m")
 
         # 5m
         k5 = await get_klines(session, symbol, "5m", limit=210)
         if len(k5) >= 210:
-            c5 = [float(k[4]) for k in k5]
-            v5 = [float(k[5]) for k in k5]
-            await detectar_inicio_real(session, symbol, c5, v5, calc_rsi(c5,14), ema(c5,9), ema(c5,20), sma(c5,50), sma(c5,200), "5M")
+            await detectar_tendencia_flex(session, symbol, k5, "5m")
 
         # 15m
         k15 = await get_klines(session, symbol, "15m", limit=210)
         if len(k15) >= 210:
-            c15 = [float(k[4]) for k in k15]
-            v15 = [float(k[5]) for k in k15]
-            await detectar_inicio_real(session, symbol, c15, v15, calc_rsi(c15,14), ema(c15,9), ema(c15,20), sma(c15,50), sma(c15,200), "15M")
+            await detectar_tendencia_flex(session, symbol, k15, "15m")
 
     except:
         return
