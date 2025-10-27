@@ -123,7 +123,8 @@ async def get_top_usdt_symbols(session):
         "UP", "DOWN", "BULL", "BEAR",
         "BUSD", "FDUSD", "TUSD", "USDC", "USDP", "USD1", "USDE", "XUSD", "USDX", "GUSD", "BFUSD",
         "EUR", "EURS", "CEUR", "BRL", "TRY",
-        "PERP", "_PERP", "STABLE", "TEST"
+        "PERP", "_PERP", "STABLE", "TEST",
+        "HIFI", "BAKE"  # Bloqueia HIFIUSDT e BAKEUSDT
     )
     pares = []
     for d in data:
@@ -236,6 +237,16 @@ async def scan_symbol(session, symbol):
         volatility_5m = calculate_volatility(c5[-20:])
         i5 = len(c5) - 1
 
+        # Calcule MACD
+        if len(c5) >= 26:
+            exp1 = ema(c5, 12)
+            exp2 = ema(c5, 26)
+            dif = [exp1[i] - exp2[i] for i in range(len(exp1))]
+            dea = ema(dif, 9)
+            macd_line = dif[-1] - dea[-1] if len(dif) > 0 and len(dea) > 0 else 0
+        else:
+            macd_line = 0
+
         cross_up_9_50_5 = (ema9_5[i5-1] <= ma50_5[i5-1]) and (ema9_5[i5] > ma50_5[i5])
         bb_open_5 = widening_now(upper5, mid5, lower5)
         if len(ema9_5) > 2:
@@ -258,8 +269,8 @@ async def scan_symbol(session, symbol):
                        f"──────────────────────────────")
                 await tg(session, msg)
                 mark(symbol, "CONF_5M")
-            # Novo alerta para pumps (sem alterar o original)
-            if rsi5[-1] > 65 and v5[-1] >= 2.0 * (vma20_5 + 1e-12) and allowed(symbol, "PUMP_5M"):
+            # Novo alerta para pumps com filtros adicionais
+            if rsi5[-1] > 65 and v5[-1] >= 2.0 * (vma20_5 + 1e-12) and macd_line > 0 and c5[-1] > ema9_5[-1] and allowed(symbol, "PUMP_5M"):
                 stop_loss = c5[i5] * 0.95  # 5% stop loss fixo
                 take_profit = c5[i5] * 1.20  # 20% take profit fixo
                 msg = (f"🚀 {symbol} ⬆️ Pump Detectado (5m)\n"
