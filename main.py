@@ -258,6 +258,18 @@ async def scan_symbol(session, symbol):
                        f"──────────────────────────────")
                 await tg(session, msg)
                 mark(symbol, "CONF_5M")
+            # Novo alerta para pumps (sem alterar o original)
+            if rsi5[-1] > 65 and v5[-1] >= 2.0 * (vma20_5 + 1e-12) and allowed(symbol, "PUMP_5M"):
+                stop_loss = c5[i5] * 0.95  # 5% stop loss fixo
+                take_profit = c5[i5] * 1.20  # 20% take profit fixo
+                msg = (f"🚀 {symbol} ⬆️ Pump Detectado (5m)\n"
+                       f"💰 Preço: {fmt_price(c5[i5])}\n"
+                       f"🛑 Stop Loss: {fmt_price(stop_loss)} (-5%)\n"
+                       f"🎯 Take Profit: {fmt_price(take_profit)} (+20%)\n"
+                       f"🕒 {now_br()} (UTC-3) | Volatilidade: {volatility_5m:.2f}%\n"
+                       f"──────────────────────────────")
+                await tg(session, msg)
+                mark(symbol, "PUMP_5M")
 
         # -------- 15m (Confirmação Final) --------
         k15 = await get_klines(session, symbol, "15m", limit=210)
