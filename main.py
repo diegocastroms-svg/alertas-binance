@@ -1,45 +1,29 @@
-# main_hibrido_vflex.py
-# ✅ Versão final consolidada — inclui ajustes de volume, allowlist, top400 e inicialização corrigida
+# main_breakout_v1_render_hibrido.py
+# ✅ Híbrido (3m + 5m + 15m) com confirmação multi-tempo
+# ✅ Breakout (entrada) nos 3m, 5m e 15m, todos abaixo da MA200
+# ✅ Apenas pares spot reais em USDT
+# ✅ Cooldown 8 minutos
 
-import os, asyncio, aiohttp, time, math, statistics, traceback
+import os, asyncio, aiohttp, time, math, statistics
 from datetime import datetime, timedelta
 from flask import Flask
 import threading
 
 # ---------------- CONFIG ----------------
 BINANCE_HTTP = "https://api.binance.com"
-COOLDOWN_SEC = 8 * 60
-TOP_N = 400
+COOLDOWN_SEC = 8 * 60          # 8 minutos
+TOP_N = 50
 REQ_TIMEOUT = 8
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 CHAT_ID = os.getenv("CHAT_ID", "").strip()
-
-# ---------------- PARÂMETROS ----------------
-MIN_VOL_24H = 3_000_000
-NAME_BLOCKLIST = (
-    "PEPE","FLOKI","BONK","SHIB","DOGE",
-    "HIFI","BAKE","WIF","MEME","1000","ORDI","ZK","ZRO","SAGA"
-)
-HYPE_SUBSTRINGS = ("AI","GPT","BOT")
-ALLOWLIST = ("DIAUSDT",)  # sempre escaneada
-
-# Sensibilidades
-BAND_200_BASE = 0.012
-VOL_MULT_MIN  = 1.05
-VOL_MULT_MAX  = 1.30
-RSI_CENTER_WIN = 20
-RSI_BAND = 5
-RSI_MIN_FLOOR = 42
-RSI_MAX_CEIL = 63
-DEBUG = True
 
 # ---------------- FLASK ----------------
 app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return "✅ Scanner ativo (3m,5m,15m) — INÍCIO DE TENDÊNCIA (foco 3m) — Aurora", 200
+    return "✅ Scanner ativo (3m, 5m + 15m híbrido) — breakout abaixo MA200 | 🇧🇷", 200
 
 # ---------------- UTILS ----------------
 def now_br():
@@ -59,7 +43,8 @@ def fmt_price(x: float) -> str:
     s = f"{x:.8f}".rstrip("0").rstrip(".")
     return s if s else "0"
 
-def clamp(x, lo, hi): return max(lo, min(hi, x))
+def cross_up(a_prev, a_now, b_prev, b_now) -> bool:
+    return a_prev <= b_prev and a_now > b_now
 
 def sma(seq, n):
     out, s = [], 0.0
@@ -81,154 +66,202 @@ def ema(seq, span):
         out.append(e)
     return out
 
+def bollinger_bands(seq, n=20, mult=2):
+    if len(seq) < n: return [], [], []
+    out_mid, out_upper, out_lower = [], [], []
+    for i in range(len(seq)):
+        window = seq[max(0, i-n+1):i+1]
+        m = sum(window)/len(window)
+        s = statistics.pstdev(window)
+        out_mid.append(m)
+        out_upper.append(m + mult*s)
+        out_lower.append(m - mult*s)
+    return out_upper, out_mid, out_lower
+
 def calc_rsi(seq, period=14):
-    if len(seq) < period + 1: return [50.0]*len(seq)
+    if len(seq) < period + 1:
+        return [50.0] * len(seq)
     gains, losses = [], []
     for i in range(1, len(seq)):
         diff = seq[i] - seq[i-1]
-        gains.append(max(diff,0))
-        losses.append(abs(min(diff,0)))
+        gains.append(max(diff, 0))
+        losses.append(abs(min(diff, 0)))
     rsi = []
-    avg_gain = sum(gains[:period])/period
-    avg_loss = sum(losses[:period])/period
-    rs = avg_gain/(avg_loss+1e-12)
-    rsi.append(100-(100/(1+rs)))
+    avg_gain = sum(gains[:period]) / period
+    avg_loss = sum(losses[:period]) / period
+    rs = avg_gain / (avg_loss + 1e-12)
+    rsi.append(100 - (100 / (1 + rs)))
     for i in range(period, len(seq)-1):
-        diff = seq[i]-seq[i-1]
-        gain, loss = max(diff,0), abs(min(diff,0))
-        avg_gain=(avg_gain*(period-1)+gain)/period
-        avg_loss=(avg_loss*(period-1)+loss)/period
-        rs=avg_gain/(avg_loss+1e-12)
-        rsi.append(100-(100/(1+rs)))
-    return [50.0]*(len(seq)-len(rsi))+rsi
-
-def bollinger_bands(seq, n=20, mult=2.0):
-    if len(seq)<n: return [],[],[]
-    mid,up,low=[],[],[]
-    for i in range(len(seq)):
-        w=seq[max(0,i-n+1):i+1]
-        m=sum(w)/len(w)
-        s=statistics.pstdev(w)
-        mid.append(m); up.append(m+mult*s); low.append(m-mult*s)
-    return up,mid,low
-
-def calc_sar(highs,lows,step=0.02,max_step=0.2):
-    if len(highs)<2: return [0.0]*len(highs)
-    sar=[0.0]*len(highs)
-    uptrend=True; af=step; ep=highs[0]; sar[0]=lows[0]
-    for i in range(1,len(highs)):
-        prev=sar[i-1]
-        if uptrend:
-            c=prev+af*(ep-prev)
-            sar[i]=min(c,lows[i-1],lows[i])
-            if highs[i]>ep: ep=highs[i]; af=min(af+step,max_step)
-            if lows[i]<sar[i]: uptrend=False; sar[i]=ep; af=step; ep=lows[i]
-        else:
-            c=prev+af*(ep-prev)
-            sar[i]=max(c,highs[i-1],highs[i])
-            if lows[i]<ep: ep=lows[i]; af=min(af+step,max_step)
-            if highs[i]>sar[i]: uptrend=True; sar[i]=ep; af=step; ep=highs[i]
-    return sar
-
-# ---------------- COOLDOWN ----------------
-LAST_HIT={}
-def allowed(s,k): return (time.time()-LAST_HIT.get((s,k),0))>=COOLDOWN_SEC
-def mark(s,k): LAST_HIT[(s,k)]=time.time()
+        diff = seq[i] - seq[i-1]
+        gain = max(diff, 0)
+        loss = abs(min(diff, 0))
+        avg_gain = (avg_gain * (period-1) + gain) / period
+        avg_loss = (avg_loss * (period-1) + loss) / period
+        rs = avg_gain / (avg_loss + 1e-12)
+        rsi.append(100 - (100 / (1 + rs)))
+    return [50.0]*(len(seq)-len(rsi)) + rsi
 
 # ---------------- BINANCE ----------------
-async def get_klines(session,symbol,interval,limit=210):
-    url=f"{BINANCE_HTTP}/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
+async def get_klines(session, symbol, interval, limit=210):
+    url = f"{BINANCE_HTTP}/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
     try:
-        async with session.get(url,timeout=REQ_TIMEOUT) as r:
-            d=await r.json()
-            return d if isinstance(d,list) else []
-    except: return []
+        async with session.get(url, timeout=REQ_TIMEOUT) as r:
+            data = await r.json()
+            if isinstance(data, list):
+                return data
+            return []
+    except:
+        return []
 
 async def get_top_usdt_symbols(session):
-    url=f"{BINANCE_HTTP}/api/v3/ticker/24hr"
-    async with session.get(url,timeout=REQ_TIMEOUT) as r:
-        data=await r.json()
-    blocked=("UP","DOWN","BULL","BEAR","BUSD","FDUSD","TUSD","USDC","USDP",
-             "USD1","USDE","XUSD","USDX","GUSD","BFUSD","EUR","EURS","CEUR",
-             "BRL","TRY","PERP","_PERP","STABLE","TEST")
-    pares=[]
+    url = f"{BINANCE_HTTP}/api/v3/ticker/24hr"
+    async with session.get(url, timeout=REQ_TIMEOUT) as r:
+        data = await r.json()
+    blocked = (
+        # alavancados / leveraged
+        "UP", "DOWN", "BULL", "BEAR",
+        # stablecoins / sintéticos / paralelos
+        "BUSD", "FDUSD", "TUSD", "USDC", "USDP", "USD1", "USDE", "XUSD", "USDX", "GUSD", "BFUSD",
+        # fiat / outros mercados
+        "EUR", "EURS", "CEUR", "BRL", "TRY",
+        # perp / testes
+        "PERP", "_PERP", "STABLE", "TEST"
+    )
+    pares = []
     for d in data:
-        s=d.get("symbol","")
-        if not s.endswith("USDT"): continue
-        if any(x in s for x in blocked): continue
-        if any(x in s for x in NAME_BLOCKLIST): continue
-        if any(h in s for h in HYPE_SUBSTRINGS): continue
-        try: qv=float(d.get("quoteVolume","0")or 0.0)
-        except: qv=0.0
-        if (qv>=MIN_VOL_24H) or (s in ALLOWLIST):
-            pares.append((s,qv))
-    pares.sort(key=lambda x:x[1],reverse=True)
-    syms=[s for s,_ in pares[:TOP_N]]
-    for s in ALLOWLIST:
-        if s not in syms: syms.append(s)
-    if DEBUG: print(f"{now_br()} - {len(syms)} pares ativos")
-    return syms
+        s = d.get("symbol", "")
+        if not s.endswith("USDT"):
+            continue
+        if any(x in s for x in blocked):
+            continue
+        try:
+            qv = float(d.get("quoteVolume", "0") or 0.0)
+        except:
+            qv = 0.0
+        pares.append((s, qv))
+    pares.sort(key=lambda x: x[1], reverse=True)
+    return [s for s, _ in pares[:TOP_N]]
 
-# ---------------- ALERTA ----------------
-async def detectar_inicio(session,symbol,k,tag):
+# ---------------- ALERT STATE ----------------
+LAST_HIT = {}
+
+def allowed(symbol, kind):
+    ts = LAST_HIT.get((symbol, kind), 0.0)
+    return (time.time() - ts) >= COOLDOWN_SEC
+
+def mark(symbol, kind):
+    LAST_HIT[(symbol, kind)] = time.time()
+
+# ---------------- CHECK HELPERS ----------------
+def band_width(upper, mid, lower):
+    if not upper or not mid or not lower: return 0.0
+    return (upper[-1] - lower[-1]) / (mid[-1] + 1e-12)
+
+def widening_now(upper, mid, lower):
+    if len(upper) < 2: return False
+    bw_now = (upper[-1] - lower[-1]) / (mid[-1] + 1e-12)
+    bw_prev = (upper[-2] - lower[-2]) / (mid[-2] + 1e-12)
+    return bw_now > bw_prev
+
+def touches_and_closes_above(low, close, ref):
+    return (low <= ref) and (close > ref)
+
+def touches_and_closes_below(high, close, ref):
+    return (high >= ref) and (close < ref)
+
+def candle_green(close_, open_): return close_ > open_
+def candle_red(close_, open_):   return close_ < open_
+
+# ---------------- WORKER ----------------
+async def scan_symbol(session, symbol):
     try:
-        if len(k)<60: return
-        closes=[float(x[4]) for x in k]; highs=[float(x[2]) for x in k]; lows=[float(x[3]) for x in k]; vols=[float(x[5]) for x in k]
-        i=len(closes)-1
-        ema9v=ema(closes,9); ema20v=ema(closes,20); ma50v=sma(closes,50); ma200v=sma(closes,200)
-        rsi=calc_rsi(closes,14); bb_u,bb_m,bb_l=bollinger_bands(closes); sar=calc_sar(highs,lows)
-        close=closes[i]; ma200=ma200v[i]; ema9=ema9v[i]; ema20=ema20v[i]; ma50=ma50v[i]; rsi_now=rsi[-1]; bbm=bb_m[i]
-        win=closes[-20:]; mean=sum(win)/len(win); dev=statistics.pstdev(win); vol_norm=dev/max(mean,1e-12)
-        band200=clamp(BAND_200_BASE*(1+8*vol_norm),0.007,0.025)
-        near=(close<=ma200*(1+band200))
-        crossed=False
-        if ema9>ema20:
-            for off in (1,2,3):
-                if i-off<0: break
-                if ema9v[i-off]<=ema20v[i-off]: crossed=True; break
-        early=ma50<ma200
-        rsi_c=sum(rsi[-RSI_CENTER_WIN:])/len(rsi[-RSI_CENTER_WIN:]) if len(rsi)>=RSI_CENTER_WIN else 50
-        rlo=clamp(rsi_c-RSI_BAND,RSI_MIN_FLOOR,RSI_MAX_CEIL-2)
-        rhi=clamp(rsi_c+RSI_BAND,rlo+2,RSI_MAX_CEIL)
-        rsi_ok=rsi_now>=rlo and rsi_now<=rhi
-        avg20=sum(vols[-20:])/20; vol_mult=clamp(VOL_MULT_MIN+15*vol_norm,VOL_MULT_MIN,VOL_MULT_MAX)
-        vol_ok=vols[-1]>=vol_mult*(avg20+1e-12)
-        bb_ok=close>bbm; sar_ok=sar[i]<close
-        if near and crossed and early and rsi_ok and vol_ok and bb_ok and sar_ok and allowed(symbol,f"TEND_{tag}"):
-            msg=(f"🚀 {symbol} — INÍCIO DE TENDÊNCIA REAL ({tag})\n"
-                 f"• RSI {rsi_now:.1f} ({rlo:.0f}-{rhi:.0f})\n"
-                 f"• Vol {vols[-1]/max(avg20,1):.2f}× (alvo {vol_mult:.2f})\n"
-                 f"• EMA9>EMA20 | SAR↓ | Boll↑ | MA50<{ma200:.2f}\n"
-                 f"💰 {fmt_price(close)}\n🕒 {now_br()}\n──────────────────────────────")
-            await tg(session,msg); mark(symbol,f"TEND_{tag}")
-    except Exception as e:
-        if DEBUG: print(f"{now_br()} - erro {symbol} {tag}: {e}")
-        traceback.print_exc()
+        # -------- 3m (Sinal Inicial) --------
+        k3 = await get_klines(session, symbol, "3m", limit=210)
+        if len(k3) >= 210:
+            c3 = [float(k[4]) for k in k3]
+            v3 = [float(k[5]) for k in k3]
+            ema9_3 = ema(c3, 9)
+            ma200_3 = sma(c3, 200)
+            rsi3 = calc_rsi(c3, 14)
+            vol_ma20_3 = sum(v3[-20:]) / 20.0
+            i = len(ema9_3) - 1
+            if len(ema9_3) > 2 and c3[-1] < ma200_3[-1]:
+                cruza = ema9_3[i-1] <= ma200_3[i-1] and ema9_3[i] > ma200_3[i]
+                encostar = abs(ema9_3[i] - ma200_3[i]) / (ma200_3[i] + 1e-12) <= 0.001
+                if (cruza or encostar) and rsi3[-1] > 50 and v3[-1] >= 1.1 * (vol_ma20_3 + 1e-12) and allowed(symbol, "SIG_3M"):
+                    msg = f"🟢 {symbol} ⬆️ Sinal Inicial (3m)\n💰 {fmt_price(c3[i])}\n🕒 {now_br()} (UTC-3)\n──────────────────────────────"
+                    await tg(session, msg)
+                    mark(symbol, "SIG_3M")
 
-# ---------------- LOOP ----------------
-async def scan_symbol(session,symbol):
-    try:
-        for tf in ("3m","5m","15m"):
-            k=await get_klines(session,symbol,tf,limit=210)
-            if k: await detectar_inicio(session,symbol,k,tf)
-    except Exception as e:
-        if DEBUG: print(f"{now_br()} - scan_symbol {symbol}: {e}")
+        # -------- 5m (Confirmação Intermediária) --------
+        k5 = await get_klines(session, symbol, "5m", limit=210)
+        if len(k5) < 210: return
+        o5 = [float(k[1]) for k in k5]
+        h5 = [float(k[2]) for k in k5]
+        l5 = [float(k[3]) for k in k5]
+        c5 = [float(k[4]) for k in k5]
+        v5 = [float(k[5]) for k in k5]
 
+        ema9_5  = ema(c5, 9)
+        ma50_5  = sma(c5, 50)
+        ma200_5 = sma(c5, 200)
+        upper5, mid5, lower5 = bollinger_bands(c5, 20, 2)
+        rsi5 = calc_rsi(c5, 14)
+        vma20_5 = sum(v5[-20:]) / 20.0
+        i5 = len(c5) - 1
+
+        cross_up_9_50_5 = (ema9_5[i5-1] <= ma50_5[i5-1]) and (ema9_5[i5] > ma50_5[i5])
+        bb_open_5 = widening_now(upper5, mid5, lower5)
+        if len(ema9_5) > 2 and c5[-1] < ma200_5[-1]:
+            if cross_up_9_50_5 and rsi5[-1] > 50 and v5[-1] >= 1.2 * (vma20_5 + 1e-12) and bb_open_5 and allowed(symbol, "CONF_5M"):
+                msg = f"🔵 {symbol} ⬆️ Confirmação Intermediária (5m)\n💰 {fmt_price(c5[i5])}\n🕒 {now_br()} (UTC-3)\n──────────────────────────────"
+                await tg(session, msg)
+                mark(symbol, "CONF_5M")
+
+        # -------- 15m (Confirmação Final) --------
+        k15 = await get_klines(session, symbol, "15m", limit=210)
+        if len(k15) < 210: return
+        o15 = [float(k[1]) for k in k15]
+        h15 = [float(k[2]) for k in k15]
+        l15 = [float(k[3]) for k in k15]
+        c15 = [float(k[4]) for k in k15]
+        v15 = [float(k[5]) for k in k15]
+
+        ema9_15  = ema(c15, 9)
+        ma50_15  = sma(c15, 50)
+        ma200_15 = sma(c15, 200)
+        upper15, mid15, lower15 = bollinger_bands(c15, 20, 2)
+        rsi15 = calc_rsi(c15, 14)
+        vma20_15 = sum(v15[-20:]) / 20.0
+        j = len(c15) - 1
+        sar = [float(k[8]) for k in k15]  # SAR Parabólico
+        if len(ema9_15) > 2 and c15[-1] < ma200_15[-1]:
+            if ema9_15[j] > ma50_15[j] and rsi15[-1] > 60 and sar[-1] < c15[-1] and v15[-1] >= 1.2 * (vma20_15 + 1e-12) and allowed(symbol, "CONF_15M"):
+                msg = f"🚀 {symbol} ⬆️ Confirmação Final (15m)\n💰 {fmt_price(c15[j])}\n🕒 {now_br()} (UTC-3)\n──────────────────────────────"
+                await tg(session, msg)
+                mark(symbol, "CONF_15M")
+
+    except:
+        return
+
+# ---------------- MAIN LOOP ----------------
 async def main_loop():
     async with aiohttp.ClientSession() as session:
-        syms=await get_top_usdt_symbols(session)
-        await tg(session,f"✅ Scanner ativo | {len(syms)} pares | {now_br()} 🇧🇷")
+        symbols = await get_top_usdt_symbols(session)
+        await tg(session, f"✅ Scanner ativo | {len(symbols)} pares | cooldown 8m | {now_br()} (UTC-3)\n──────────────────────────────")
+        if not symbols: return
         while True:
-            await asyncio.gather(*[scan_symbol(session,s) for s in syms])
+            tasks = [scan_symbol(session, s) for s in symbols]
+            await asyncio.gather(*tasks)
             await asyncio.sleep(10)
 
 # ---------------- RUN ----------------
 def start_bot():
-    loop=asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    loop.create_task(main_loop())
-    threading.Thread(target=loop.run_forever,daemon=True).start()
-    app.run(host="0.0.0.0",port=int(os.getenv("PORT",10000)))
+    while True:
+        try:
+            asyncio.run(main_loop())
+        except Exception:
+            time.sleep(5)
 
-if __name__=="__main__":
-    start_bot()
+threading.Thread(target=start_bot, daemon=True).start()
+app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
