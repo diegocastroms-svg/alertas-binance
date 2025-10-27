@@ -4,6 +4,7 @@
 # ✅ Apenas pares spot reais em USDT
 # ✅ Cooldown 8 minutos
 # ✅ Inclui stop loss e take profit
+# ✅ Adaptação dinâmica à volatilidade do mercado
 
 import os, asyncio, aiohttp, time, math, statistics
 from datetime import datetime, timedelta
@@ -24,7 +25,7 @@ app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return "✅ Scanner ativo (3m, 5m + 15m híbrido) — breakout perto MA200 | 🇧🇷", 200
+    return "✅ Scanner ativo (3m, 5m + 15m híbrido) — breakout perto MA200 | Adaptação à volatilidade | 🇧🇷", 200
 
 # ---------------- UTILS ----------------
 def now_br():
@@ -169,6 +170,16 @@ def touches_and_closes_below(high, close, ref):
 def candle_green(close_, open_): return close_ > open_
 def candle_red(close_, open_):   return close_ < open_
 
+def calculate_volatility(prices):
+    if len(prices) < 2:
+        return 0.0
+    mean_price = sum(prices) / len(prices)
+    if mean_price == 0:
+        return 0.0
+    std_dev = statistics.pstdev(prices)
+    # Volatilidade percentual por hora (ajustada pelo timeframe)
+    return (std_dev / mean_price) * 100 * (60 / 15)  # Assume 15m como base, ajuste para outros
+
 # ---------------- WORKER ----------------
 async def scan_symbol(session, symbol):
     try:
@@ -182,20 +193,27 @@ async def scan_symbol(session, symbol):
             ma200_3 = sma(c3, 200)
             rsi3 = calc_rsi(c3, 14)
             vol_ma20_3 = sum(v3[-20:]) / 20.0
+            volatility_3m = calculate_volatility(c3[-20:])
             i = len(ema9_3) - 1
             if len(ema9_3) > 2:
                 ma200_tolerance = ma200_3[-1] * 0.05  # 5% de tolerância
                 within_ma200 = abs(c3[-1] - ma200_3[-1]) <= ma200_tolerance
                 cruza = ema9_3[i-1] <= ma200_3[i-1] and ema9_3[i] > ma200_3[i]
                 encostar = abs(ema9_3[i] - ma200_3[i]) / (ma200_3[i] + 1e-12) <= 0.001
-                if (cruza or encostar) and 40 <= rsi3[-1] <= 60 and v3[-1] >= 1.5 * (vol_ma20_3 + 1e-12) and within_ma200 and allowed(symbol, "SIG_3M"):
-                    stop_loss = c3[i] * 0.98  # -2%
-                    take_profit = c3[i] * 1.05  # +5%
+                # Ajuste dinâmico
+                rsi_min = 30 if volatility_3m > 2.0 else (40 if volatility_3m < 0.5 else 35)
+                rsi_max = 50 if volatility_3m > 2.0 else (60 if volatility_3m < 0.5 else 55)
+                vol_multiplier = 1.8 if volatility_3m > 2.0 else (1.2 if volatility_3m < 0.5 else 1.5)
+                stop_loss_factor = 0.96 if volatility_3m > 2.0 else (0.98 if volatility_3m < 0.5 else 0.97)
+                take_profit_factor = 1.15 if volatility_3m > 2.0 else (1.05 if volatility_3m < 0.5 else 1.10)
+                if (cruza or encostar) and rsi_min <= rsi3[-1] <= rsi_max and v3[-1] >= vol_multiplier * (vol_ma20_3 + 1e-12) and within_ma200 and allowed(symbol, "SIG_3M"):
+                    stop_loss = c3[i] * stop_loss_factor
+                    take_profit = c3[i] * take_profit_factor
                     msg = (f"🟢 {symbol} ⬆️ Sinal Inicial (3m)\n"
                            f"💰 Preço: {fmt_price(c3[i])}\n"
-                           f"🛑 Stop Loss: {fmt_price(stop_loss)} (-2%)\n"
-                           f"🎯 Take Profit: {fmt_price(take_profit)} (+5%)\n"
-                           f"🕒 {now_br()} (UTC-3)\n"
+                           f"🛑 Stop Loss: {fmt_price(stop_loss)} ({(1-stop_loss_factor)*100:.0f}%)\n"
+                           f"🎯 Take Profit: {fmt_price(take_profit)} (+{(take_profit_factor-1)*100:.0f}%)\n"
+                           f"🕒 {now_br()} (UTC-3) | Volatilidade: {volatility_3m:.2f}%\n"
                            f"──────────────────────────────")
                     await tg(session, msg)
                     mark(symbol, "SIG_3M")
@@ -215,6 +233,7 @@ async def scan_symbol(session, symbol):
         upper5, mid5, lower5 = bollinger_bands(c5, 20, 2)
         rsi5 = calc_rsi(c5, 14)
         vma20_5 = sum(v5[-20:]) / 20.0
+        volatility_5m = calculate_volatility(c5[-20:])
         i5 = len(c5) - 1
 
         cross_up_9_50_5 = (ema9_5[i5-1] <= ma50_5[i5-1]) and (ema9_5[i5] > ma50_5[i5])
@@ -222,14 +241,20 @@ async def scan_symbol(session, symbol):
         if len(ema9_5) > 2:
             ma200_tolerance = ma200_5[-1] * 0.05
             within_ma200 = abs(c5[-1] - ma200_5[-1]) <= ma200_tolerance
-            if cross_up_9_50_5 and 40 <= rsi5[-1] <= 60 and v5[-1] >= 1.5 * (vma20_5 + 1e-12) and bb_open_5 and within_ma200 and allowed(symbol, "CONF_5M"):
-                stop_loss = c5[i5] * 0.98  # -2%
-                take_profit = c5[i5] * 1.05  # +5%
+            # Ajuste dinâmico
+            rsi_min = 30 if volatility_5m > 2.0 else (40 if volatility_5m < 0.5 else 35)
+            rsi_max = 50 if volatility_5m > 2.0 else (60 if volatility_5m < 0.5 else 55)
+            vol_multiplier = 1.8 if volatility_5m > 2.0 else (1.2 if volatility_5m < 0.5 else 1.5)
+            stop_loss_factor = 0.96 if volatility_5m > 2.0 else (0.98 if volatility_5m < 0.5 else 0.97)
+            take_profit_factor = 1.15 if volatility_5m > 2.0 else (1.05 if volatility_5m < 0.5 else 1.10)
+            if cross_up_9_50_5 and rsi_min <= rsi5[-1] <= rsi_max and v5[-1] >= vol_multiplier * (vma20_5 + 1e-12) and bb_open_5 and within_ma200 and allowed(symbol, "CONF_5M"):
+                stop_loss = c5[i5] * stop_loss_factor
+                take_profit = c5[i5] * take_profit_factor
                 msg = (f"🔵 {symbol} ⬆️ Confirmação Intermediária (5m)\n"
                        f"💰 Preço: {fmt_price(c5[i5])}\n"
-                       f"🛑 Stop Loss: {fmt_price(stop_loss)} (-2%)\n"
-                       f"🎯 Take Profit: {fmt_price(take_profit)} (+5%)\n"
-                       f"🕒 {now_br()} (UTC-3)\n"
+                       f"🛑 Stop Loss: {fmt_price(stop_loss)} ({(1-stop_loss_factor)*100:.0f}%)\n"
+                       f"🎯 Take Profit: {fmt_price(take_profit)} (+{(take_profit_factor-1)*100:.0f}%)\n"
+                       f"🕒 {now_br()} (UTC-3) | Volatilidade: {volatility_5m:.2f}%\n"
                        f"──────────────────────────────")
                 await tg(session, msg)
                 mark(symbol, "CONF_5M")
@@ -250,18 +275,25 @@ async def scan_symbol(session, symbol):
         upper15, mid15, lower15 = bollinger_bands(c15, 20, 2)
         rsi15 = calc_rsi(c15, 14)
         vma20_15 = sum(v15[-20:]) / 20.0
+        volatility_15m = calculate_volatility(c15[-20:])
         j = len(c15) - 1
         if len(ema9_15) > 2:
             ma200_tolerance = ma200_15[-1] * 0.05
             within_ma200 = abs(c15[-1] - ma200_15[-1]) <= ma200_tolerance
-            if ema9_15[j] > ma50_15[j] and 40 <= rsi15[-1] <= 60 and sar[-1] < c15[-1] and v15[-1] >= 1.5 * (vma20_15 + 1e-12) and within_ma200 and allowed(symbol, "CONF_15M"):
-                stop_loss = c15[j] * 0.98  # -2%
-                take_profit = c15[j] * 1.10  # +10%
+            # Ajuste dinâmico
+            rsi_min = 30 if volatility_15m > 2.0 else (40 if volatility_15m < 0.5 else 35)
+            rsi_max = 50 if volatility_15m > 2.0 else (60 if volatility_15m < 0.5 else 55)
+            vol_multiplier = 1.8 if volatility_15m > 2.0 else (1.2 if volatility_15m < 0.5 else 1.5)
+            stop_loss_factor = 0.96 if volatility_15m > 2.0 else (0.98 if volatility_15m < 0.5 else 0.97)
+            take_profit_factor = 1.15 if volatility_15m > 2.0 else (1.05 if volatility_15m < 0.5 else 1.10)
+            if ema9_15[j] > ma50_15[j] and rsi_min <= rsi15[-1] <= rsi_max and sar[-1] < c15[-1] and v15[-1] >= vol_multiplier * (vma20_15 + 1e-12) and within_ma200 and allowed(symbol, "CONF_15M"):
+                stop_loss = c15[j] * stop_loss_factor
+                take_profit = c15[j] * take_profit_factor
                 msg = (f"🚀 {symbol} ⬆️ Confirmação Final (15m)\n"
                        f"💰 Preço: {fmt_price(c15[j])}\n"
-                       f"🛑 Stop Loss: {fmt_price(stop_loss)} (-2%)\n"
-                       f"🎯 Take Profit: {fmt_price(take_profit)} (+10%)\n"
-                       f"🕒 {now_br()} (UTC-3)\n"
+                       f"🛑 Stop Loss: {fmt_price(stop_loss)} ({(1-stop_loss_factor)*100:.0f}%)\n"
+                       f"🎯 Take Profit: {fmt_price(take_profit)} (+{(take_profit_factor-1)*100:.0f}%)\n"
+                       f"🕒 {now_br()} (UTC-3) | Volatilidade: {volatility_15m:.2f}%\n"
                        f"──────────────────────────────")
                 await tg(session, msg)
                 mark(symbol, "CONF_15M")
