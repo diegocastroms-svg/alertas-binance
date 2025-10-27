@@ -1,8 +1,9 @@
 # main_breakout_v1_render_hibrido.py
 # ✅ Híbrido (3m + 5m + 15m) com confirmação multi-tempo
-# ✅ Breakout (entrada) nos 3m, 5m e 15m, todos abaixo da MA200
+# ✅ Breakout (entrada) nos 3m, 5m e 15m, dentro de 5% da MA200
 # ✅ Apenas pares spot reais em USDT
 # ✅ Cooldown 8 minutos
+# ✅ Inclui stop loss e take profit
 
 import os, asyncio, aiohttp, time, math, statistics
 from datetime import datetime, timedelta
@@ -23,7 +24,7 @@ app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return "✅ Scanner ativo (3m, 5m + 15m híbrido) — breakout abaixo MA200 | 🇧🇷", 200
+    return "✅ Scanner ativo (3m, 5m + 15m híbrido) — breakout perto MA200 | 🇧🇷", 200
 
 # ---------------- UTILS ----------------
 def now_br():
@@ -118,13 +119,9 @@ async def get_top_usdt_symbols(session):
     async with session.get(url, timeout=REQ_TIMEOUT) as r:
         data = await r.json()
     blocked = (
-        # alavancados / leveraged
         "UP", "DOWN", "BULL", "BEAR",
-        # stablecoins / sintéticos / paralelos
         "BUSD", "FDUSD", "TUSD", "USDC", "USDP", "USD1", "USDE", "XUSD", "USDX", "GUSD", "BFUSD",
-        # fiat / outros mercados
         "EUR", "EURS", "CEUR", "BRL", "TRY",
-        # perp / testes
         "PERP", "_PERP", "STABLE", "TEST"
     )
     pares = []
@@ -180,16 +177,26 @@ async def scan_symbol(session, symbol):
         if len(k3) >= 210:
             c3 = [float(k[4]) for k in k3]
             v3 = [float(k[5]) for k in k3]
+            o3 = [float(k[1]) for k in k3]
             ema9_3 = ema(c3, 9)
             ma200_3 = sma(c3, 200)
             rsi3 = calc_rsi(c3, 14)
             vol_ma20_3 = sum(v3[-20:]) / 20.0
             i = len(ema9_3) - 1
-            if len(ema9_3) > 2 and c3[-1] < ma200_3[-1]:
+            if len(ema9_3) > 2:
+                ma200_tolerance = ma200_3[-1] * 0.05  # 5% de tolerância
+                within_ma200 = abs(c3[-1] - ma200_3[-1]) <= ma200_tolerance
                 cruza = ema9_3[i-1] <= ma200_3[i-1] and ema9_3[i] > ma200_3[i]
                 encostar = abs(ema9_3[i] - ma200_3[i]) / (ma200_3[i] + 1e-12) <= 0.001
-                if (cruza or encostar) and rsi3[-1] > 50 and v3[-1] >= 1.1 * (vol_ma20_3 + 1e-12) and allowed(symbol, "SIG_3M"):
-                    msg = f"🟢 {symbol} ⬆️ Sinal Inicial (3m)\n💰 {fmt_price(c3[i])}\n🕒 {now_br()} (UTC-3)\n──────────────────────────────"
+                if (cruza or encostar) and 40 <= rsi3[-1] <= 60 and v3[-1] >= 1.5 * (vol_ma20_3 + 1e-12) and within_ma200 and allowed(symbol, "SIG_3M"):
+                    stop_loss = c3[i] * 0.98  # -2%
+                    take_profit = c3[i] * 1.05  # +5%
+                    msg = (f"🟢 {symbol} ⬆️ Sinal Inicial (3m)\n"
+                           f"💰 Preço: {fmt_price(c3[i])}\n"
+                           f"🛑 Stop Loss: {fmt_price(stop_loss)} (-2%)\n"
+                           f"🎯 Take Profit: {fmt_price(take_profit)} (+5%)\n"
+                           f"🕒 {now_br()} (UTC-3)\n"
+                           f"──────────────────────────────")
                     await tg(session, msg)
                     mark(symbol, "SIG_3M")
 
@@ -212,9 +219,18 @@ async def scan_symbol(session, symbol):
 
         cross_up_9_50_5 = (ema9_5[i5-1] <= ma50_5[i5-1]) and (ema9_5[i5] > ma50_5[i5])
         bb_open_5 = widening_now(upper5, mid5, lower5)
-        if len(ema9_5) > 2 and c5[-1] < ma200_5[-1]:
-            if cross_up_9_50_5 and rsi5[-1] > 50 and v5[-1] >= 1.2 * (vma20_5 + 1e-12) and bb_open_5 and allowed(symbol, "CONF_5M"):
-                msg = f"🔵 {symbol} ⬆️ Confirmação Intermediária (5m)\n💰 {fmt_price(c5[i5])}\n🕒 {now_br()} (UTC-3)\n──────────────────────────────"
+        if len(ema9_5) > 2:
+            ma200_tolerance = ma200_5[-1] * 0.05
+            within_ma200 = abs(c5[-1] - ma200_5[-1]) <= ma200_tolerance
+            if cross_up_9_50_5 and 40 <= rsi5[-1] <= 60 and v5[-1] >= 1.5 * (vma20_5 + 1e-12) and bb_open_5 and within_ma200 and allowed(symbol, "CONF_5M"):
+                stop_loss = c5[i5] * 0.98  # -2%
+                take_profit = c5[i5] * 1.05  # +5%
+                msg = (f"🔵 {symbol} ⬆️ Confirmação Intermediária (5m)\n"
+                       f"💰 Preço: {fmt_price(c5[i5])}\n"
+                       f"🛑 Stop Loss: {fmt_price(stop_loss)} (-2%)\n"
+                       f"🎯 Take Profit: {fmt_price(take_profit)} (+5%)\n"
+                       f"🕒 {now_br()} (UTC-3)\n"
+                       f"──────────────────────────────")
                 await tg(session, msg)
                 mark(symbol, "CONF_5M")
 
@@ -226,6 +242,7 @@ async def scan_symbol(session, symbol):
         l15 = [float(k[3]) for k in k15]
         c15 = [float(k[4]) for k in k15]
         v15 = [float(k[5]) for k in k15]
+        sar = [float(k[8]) for k in k15]  # SAR Parabólico
 
         ema9_15  = ema(c15, 9)
         ma50_15  = sma(c15, 50)
@@ -234,10 +251,18 @@ async def scan_symbol(session, symbol):
         rsi15 = calc_rsi(c15, 14)
         vma20_15 = sum(v15[-20:]) / 20.0
         j = len(c15) - 1
-        sar = [float(k[8]) for k in k15]  # SAR Parabólico
-        if len(ema9_15) > 2 and c15[-1] < ma200_15[-1]:
-            if ema9_15[j] > ma50_15[j] and rsi15[-1] > 60 and sar[-1] < c15[-1] and v15[-1] >= 1.2 * (vma20_15 + 1e-12) and allowed(symbol, "CONF_15M"):
-                msg = f"🚀 {symbol} ⬆️ Confirmação Final (15m)\n💰 {fmt_price(c15[j])}\n🕒 {now_br()} (UTC-3)\n──────────────────────────────"
+        if len(ema9_15) > 2:
+            ma200_tolerance = ma200_15[-1] * 0.05
+            within_ma200 = abs(c15[-1] - ma200_15[-1]) <= ma200_tolerance
+            if ema9_15[j] > ma50_15[j] and 40 <= rsi15[-1] <= 60 and sar[-1] < c15[-1] and v15[-1] >= 1.5 * (vma20_15 + 1e-12) and within_ma200 and allowed(symbol, "CONF_15M"):
+                stop_loss = c15[j] * 0.98  # -2%
+                take_profit = c15[j] * 1.10  # +10%
+                msg = (f"🚀 {symbol} ⬆️ Confirmação Final (15m)\n"
+                       f"💰 Preço: {fmt_price(c15[j])}\n"
+                       f"🛑 Stop Loss: {fmt_price(stop_loss)} (-2%)\n"
+                       f"🎯 Take Profit: {fmt_price(take_profit)} (+10%)\n"
+                       f"🕒 {now_br()} (UTC-3)\n"
+                       f"──────────────────────────────")
                 await tg(session, msg)
                 mark(symbol, "CONF_15M")
 
