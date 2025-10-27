@@ -1,10 +1,10 @@
 # main_breakout_v1_render_hibrido.py
 # ✅ Híbrido (3m + 5m + 15m) com confirmação multi-tempo
-# ✅ Breakout (entrada) nos 3m, 5m e 15m, dentro de 5% da MA200
+# ✅ Breakout (entrada) nos 3m, 5m e 15m, dentro de 10% da MA200
 # ✅ Apenas pares spot reais em USDT
 # ✅ Cooldown 8 minutos
 # ✅ Inclui stop loss e take profit
-# ✅ Adaptação dinâmica à volatilidade do mercado
+# ✅ Adaptação dinâmica à volatilidade (relaxada)
 # ✅ Monitora as 50 moedas com maior volume
 
 import os, asyncio, aiohttp, time, math, statistics
@@ -179,8 +179,7 @@ def calculate_volatility(prices):
     if mean_price == 0:
         return 0.0
     std_dev = statistics.pstdev(prices)
-    # Volatilidade percentual por hora (ajustada pelo timeframe)
-    return (std_dev / mean_price) * 100 * (60 / 15)  # Assume 15m como base, ajuste para outros
+    return (std_dev / mean_price) * 100 * (60 / 15)  # Ajustado para 15m como base
 
 # ---------------- WORKER ----------------
 async def scan_symbol(session, symbol):
@@ -198,14 +197,14 @@ async def scan_symbol(session, symbol):
             volatility_3m = calculate_volatility(c3[-20:])
             i = len(ema9_3) - 1
             if len(ema9_3) > 2:
-                ma200_tolerance = ma200_3[-1] * 0.05  # 5% de tolerância
+                ma200_tolerance = ma200_3[-1] * 0.10  # 10% de tolerância
                 within_ma200 = abs(c3[-1] - ma200_3[-1]) <= ma200_tolerance
                 cruza = ema9_3[i-1] <= ma200_3[i-1] and ema9_3[i] > ma200_3[i]
                 encostar = abs(ema9_3[i] - ma200_3[i]) / (ma200_3[i] + 1e-12) <= 0.001
-                # Ajuste dinâmico
-                rsi_min = 30 if volatility_3m > 2.0 else (40 if volatility_3m < 0.5 else 35)
-                rsi_max = 50 if volatility_3m > 2.0 else (60 if volatility_3m < 0.5 else 55)
-                vol_multiplier = 1.8 if volatility_3m > 2.0 else (1.2 if volatility_3m < 0.5 else 1.5)
+                # Ajuste dinâmico relaxado
+                rsi_min = 25 if volatility_3m > 2.0 else (35 if volatility_3m < 0.5 else 30)
+                rsi_max = 70 if volatility_3m > 2.0 else (65 if volatility_3m < 0.5 else 60)
+                vol_multiplier = 1.5 if volatility_3m > 2.0 else (1.2 if volatility_3m < 0.5 else 1.3)
                 stop_loss_factor = 0.96 if volatility_3m > 2.0 else (0.98 if volatility_3m < 0.5 else 0.97)
                 take_profit_factor = 1.15 if volatility_3m > 2.0 else (1.05 if volatility_3m < 0.5 else 1.10)
                 if (cruza or encostar) and rsi_min <= rsi3[-1] <= rsi_max and v3[-1] >= vol_multiplier * (vol_ma20_3 + 1e-12) and within_ma200 and allowed(symbol, "SIG_3M"):
@@ -251,12 +250,12 @@ async def scan_symbol(session, symbol):
         cross_up_9_50_5 = (ema9_5[i5-1] <= ma50_5[i5-1]) and (ema9_5[i5] > ma50_5[i5])
         bb_open_5 = widening_now(upper5, mid5, lower5)
         if len(ema9_5) > 2:
-            ma200_tolerance = ma200_5[-1] * 0.05
+            ma200_tolerance = ma200_5[-1] * 0.10  # 10% de tolerância
             within_ma200 = abs(c5[-1] - ma200_5[-1]) <= ma200_tolerance
-            # Ajuste dinâmico
-            rsi_min = 30 if volatility_5m > 2.0 else (40 if volatility_5m < 0.5 else 35)
-            rsi_max = 50 if volatility_5m > 2.0 else (60 if volatility_5m < 0.5 else 55)
-            vol_multiplier = 1.8 if volatility_5m > 2.0 else (1.2 if volatility_5m < 0.5 else 1.5)
+            # Ajuste dinâmico relaxado
+            rsi_min = 25 if volatility_5m > 2.0 else (35 if volatility_5m < 0.5 else 30)
+            rsi_max = 70 if volatility_5m > 2.0 else (65 if volatility_5m < 0.5 else 60)
+            vol_multiplier = 1.5 if volatility_5m > 2.0 else (1.2 if volatility_5m < 0.5 else 1.3)
             stop_loss_factor = 0.96 if volatility_5m > 2.0 else (0.98 if volatility_5m < 0.5 else 0.97)
             take_profit_factor = 1.15 if volatility_5m > 2.0 else (1.05 if volatility_5m < 0.5 else 1.10)
             if cross_up_9_50_5 and rsi_min <= rsi5[-1] <= rsi_max and v5[-1] >= vol_multiplier * (vma20_5 + 1e-12) and bb_open_5 and within_ma200 and allowed(symbol, "CONF_5M"):
@@ -270,8 +269,8 @@ async def scan_symbol(session, symbol):
                        f"──────────────────────────────")
                 await tg(session, msg)
                 mark(symbol, "CONF_5M")
-            # Novo alerta para pumps com filtros adicionais
-            if rsi5[-1] > 65 and v5[-1] >= 2.0 * (vma20_5 + 1e-12) and macd_line > 0 and c5[-1] > ema9_5[-1] and allowed(symbol, "PUMP_5M"):
+            # Alerta de pump relaxado
+            if rsi5[-1] > 60 and v5[-1] >= 1.5 * (vma20_5 + 1e-12) and macd_line > 0 and c5[-1] > ema9_5[-1] and allowed(symbol, "PUMP_5M"):
                 stop_loss = c5[i5] * 0.95  # 5% stop loss fixo
                 take_profit = c5[i5] * 1.20  # 20% take profit fixo
                 msg = (f"🚀 {symbol} ⬆️ Pump Detectado (5m)\n"
@@ -302,12 +301,12 @@ async def scan_symbol(session, symbol):
         volatility_15m = calculate_volatility(c15[-20:])
         j = len(c15) - 1
         if len(ema9_15) > 2:
-            ma200_tolerance = ma200_15[-1] * 0.05
+            ma200_tolerance = ma200_15[-1] * 0.10  # 10% de tolerância
             within_ma200 = abs(c15[-1] - ma200_15[-1]) <= ma200_tolerance
-            # Ajuste dinâmico
-            rsi_min = 30 if volatility_15m > 2.0 else (40 if volatility_15m < 0.5 else 35)
-            rsi_max = 50 if volatility_15m > 2.0 else (60 if volatility_15m < 0.5 else 55)
-            vol_multiplier = 1.8 if volatility_15m > 2.0 else (1.2 if volatility_15m < 0.5 else 1.5)
+            # Ajuste dinâmico relaxado
+            rsi_min = 25 if volatility_15m > 2.0 else (35 if volatility_15m < 0.5 else 30)
+            rsi_max = 70 if volatility_15m > 2.0 else (65 if volatility_15m < 0.5 else 60)
+            vol_multiplier = 1.5 if volatility_15m > 2.0 else (1.2 if volatility_15m < 0.5 else 1.3)
             stop_loss_factor = 0.96 if volatility_15m > 2.0 else (0.98 if volatility_15m < 0.5 else 0.97)
             take_profit_factor = 1.15 if volatility_15m > 2.0 else (1.05 if volatility_15m < 0.5 else 1.10)
             if ema9_15[j] > ma50_15[j] and rsi_min <= rsi15[-1] <= rsi_max and sar[-1] < c15[-1] and v15[-1] >= vol_multiplier * (vma20_15 + 1e-12) and within_ma200 and allowed(symbol, "CONF_15M"):
