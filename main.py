@@ -5,6 +5,7 @@
 # ✅ Cooldown 8 minutos
 # ✅ Inclui stop loss e take profit
 # ✅ Adaptação dinâmica à volatilidade do mercado
+# ✅ Monitora as 50 moedas com maior volume
 
 import os, asyncio, aiohttp, time, math, statistics
 from datetime import datetime, timedelta
@@ -25,7 +26,7 @@ app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return "✅ Scanner ativo (3m, 5m + 15m híbrido) — breakout perto MA200 | Adaptação à volatilidade | 🇧🇷", 200
+    return "✅ Scanner ativo (3m, 5m + 15m híbrido) — breakout perto MA200 | Adaptação à volatilidade | 🇧🇷 | 50 maiores volumes", 200
 
 # ---------------- UTILS ----------------
 def now_br():
