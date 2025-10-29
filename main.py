@@ -1,6 +1,6 @@
 # main_breakout_v1_render_hibrido.py
-# V4 - PUMP INTELIGENTE (5m) | SÓ ALTA REAL | 15 MIN COOLDOWN
-# MENSAGEM CORRIGIDA | NÃO DISPARA EM QUEDA
+# V4.3 - MOEDA SIM | TIPO DE ALTA LIMPO (sem nomes)
+# SÓ ALTA REAL | 15 min | 50 pares
 
 import os, asyncio, aiohttp, time
 from datetime import datetime, timedelta
@@ -12,7 +12,7 @@ BINANCE_HTTP = "https://api.binance.com"
 COOLDOWN_SEC = 15 * 60
 TOP_N = 50
 REQ_TIMEOUT = 8
-VERSION = "V4 - PUMP INTELIGENTE"
+VERSION = "V4.3 - MOEDA SIM, TIPO LIMPO"
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 CHAT_ID = os.getenv("CHAT_ID", "").strip()
@@ -21,7 +21,7 @@ CHAT_ID = os.getenv("CHAT_ID", "").strip()
 app = Flask(__name__)
 @app.route("/")
 def home():
-    return f"{VERSION} | 5m | 15 min | 50 pares | SÓ ALTA REAL", 200
+    return f"{VERSION} | 5m | 15 min | 50 pares", 200
 
 # ---------------- UTILS ----------------
 def now_br():
@@ -148,14 +148,25 @@ async def scan_symbol(session, symbol):
         # 7. COOLDOWN
         if not allowed(symbol, "PUMP_INT"): return
 
-        # ALERTA
+        # --- TIPO DE ALTA (LIMPO, SEM NOME DE MOEDA) ---
+        if candle_rise >= 0.015:
+            tipo_alta = "PUMP EXPLOSIVO"
+        elif net_up_5 >= 0.03:
+            tipo_alta = "PUMP FORTE"
+        elif net_up_5 >= 0.015:
+            tipo_alta = "PUMP MÉDIO"
+        else:
+            tipo_alta = "ALTA GRADUAL"
+
+        # --- ALERTA ---
         stop = min(l5[i], ema(c5, 21)[i])
         risco = c5[i] - stop
         alvo = c5[i] + 2.5 * risco
 
         msg = (f"<b>PUMP INTELIGENTE!</b>\n"
-               f"<b>{symbol}</b>\n"
+               f"<b>{symbol}</b>\n"  # ← MOEDA APARECE AQUI
                f"Preço: <b>{fmt_price(c5[i])}</b>\n"
+               f"<b>{tipo_alta}</b>\n"  # ← SEM NOME DE MOEDA
                f"+{net_up_5*100:.1f}% em 5c | +{candle_rise*100:.1f}% agora\n"
                f"Stop: <code>{fmt_price(stop)}</code>\n"
                f"Alvo 1:2.5: <code>{fmt_price(alvo)}</code>\n"
@@ -172,7 +183,7 @@ async def main_loop():
         symbols = await get_top_usdt_symbols(session)
         await tg(session, f"<b>{VERSION} ATIVO</b>\n"
                          f"5m | 15 min | {len(symbols)} pares\n"
-                         f"SÓ ALTA REAL\n"
+                         f"TIPOS: GRADUAL / MÉDIO / FORTE / EXPLOSIVO\n"
                          f"{now_br()}\n"
                          f"──────────────────────────────")
         while True:
