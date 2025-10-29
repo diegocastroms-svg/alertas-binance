@@ -1,11 +1,11 @@
 # main_breakout_v1_render_hibrido.py
-# ✅ Híbrido (3m + 5m + 15m) com confirmação multi-tempo
-# ✅ Breakout (entrada) nos 3m, 5m e 15m, dentro de 10% da MA200
-# ✅ Apenas pares spot reais em USDT
-# ✅ Cooldown 8 minutos
-# ✅ Inclui stop loss e take profit
-# ✅ Adaptação dinâmica à volatilidade (relaxada)
-# ✅ Monitora as 50 moedas com maior volume
+# Híbrido (3m + 5m + 15m) com confirmação multi-tempo
+# Breakout (entrada) nos 3m, 5m e 15m, dentro de 10% da MA200
+# Apenas pares spot reais em USDT
+# Cooldown 8 minutos
+# Inclui stop loss e take profit
+# Adaptação dinâmica à volatilidade (relaxada)
+# Monitora as 50 moedas com maior volume
 
 import os, asyncio, aiohttp, time, math, statistics
 from datetime import datetime, timedelta
@@ -21,16 +21,28 @@ REQ_TIMEOUT = 8
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 CHAT_ID = os.getenv("CHAT_ID", "").strip()
 
+# ---------------- CONFIG PUMP 3M DINÂMICO (FAIXAS SEGURAS) ----------------
+PUMP_RANGES = {
+    "quiet_candles": (6, 12),           # Entre 6 e 12 candles de consolidação
+    "max_range_pct": (0.8, 1.8),        # Range médio da consolidação (ex: 0.8% a 1.8%)
+    "vol_multiplier": (10, 25),         # Volume entre 10x e 25x a média
+    "min_rise_pct": (2.5, 6.0),         # Alta do candle entre 2.5% e 6%
+    "rsi_min": (30, 50),               # RSI antes do pump (evita sobrecomprado)
+    "stop_loss_pct": (0.95, 0.98),      # Stop entre -5% e -2%
+    "take_profit_pct": (1.15, 1.35),    # TP entre +15% e +35%
+    "cooldown_kind": "PUMP_3M"
+}
+
 # ---------------- FLASK ----------------
 app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return "✅ Scanner ativo (3m, 5m + 15m híbrido) — breakout perto MA200 | Adaptação à volatilidade | 🇧🇷 | 50 maiores volumes", 200
+    return "Scanner ativo (3m, 5m + 15m híbrido) — breakout perto MA200 | Pump 3m dinâmico | 50 maiores volumes", 200
 
 # ---------------- UTILS ----------------
 def now_br():
-    return (datetime.utcnow() - timedelta(hours=3)).strftime("%Y-%m-%d %H:%M:%S") + " 🇧🇷"
+    return (datetime.utcnow() - timedelta(hours=3)).strftime("%Y-%m-%d %H:%M:%S") + " Brasil"
 
 async def tg(session, text: str):
     if not (TELEGRAM_TOKEN and CHAT_ID):
@@ -125,7 +137,7 @@ async def get_top_usdt_symbols(session):
         "BUSD", "FDUSD", "TUSD", "USDC", "USDP", "USD1", "USDE", "XUSD", "USDX", "GUSD", "BFUSD",
         "EUR", "EURS", "CEUR", "BRL", "TRY",
         "PERP", "_PERP", "STABLE", "TEST",
-        "HIFI", "BAKE"  # Bloqueia HIFIUSDT e BAKEUSDT
+        "HIFI", "BAKE"
     )
     pares = []
     for d in data:
@@ -179,7 +191,7 @@ def calculate_volatility(prices):
     if mean_price == 0:
         return 0.0
     std_dev = statistics.pstdev(prices)
-    return (std_dev / mean_price) * 100 * (60 / 15)  # Ajustado para 15m como base
+    return (std_dev / mean_price) * 100 * (60 / 15)
 
 # ---------------- WORKER ----------------
 async def scan_symbol(session, symbol):
@@ -197,11 +209,10 @@ async def scan_symbol(session, symbol):
             volatility_3m = calculate_volatility(c3[-20:])
             i = len(ema9_3) - 1
             if len(ema9_3) > 2:
-                ma200_tolerance = ma200_3[-1] * 0.10  # 10% de tolerância
+                ma200_tolerance = ma200_3[-1] * 0.10
                 within_ma200 = abs(c3[-1] - ma200_3[-1]) <= ma200_tolerance
                 cruza = ema9_3[i-1] <= ma200_3[i-1] and ema9_3[i] > ma200_3[i]
                 encostar = abs(ema9_3[i] - ma200_3[i]) / (ma200_3[i] + 1e-12) <= 0.001
-                # Ajuste dinâmico relaxado
                 rsi_min = 25 if volatility_3m > 2.0 else (35 if volatility_3m < 0.5 else 30)
                 rsi_max = 70 if volatility_3m > 2.0 else (65 if volatility_3m < 0.5 else 60)
                 vol_multiplier = 1.5 if volatility_3m > 2.0 else (1.2 if volatility_3m < 0.5 else 1.3)
@@ -210,11 +221,11 @@ async def scan_symbol(session, symbol):
                 if (cruza or encostar) and rsi_min <= rsi3[-1] <= rsi_max and v3[-1] >= vol_multiplier * (vol_ma20_3 + 1e-12) and within_ma200 and allowed(symbol, "SIG_3M"):
                     stop_loss = c3[i] * stop_loss_factor
                     take_profit = c3[i] * take_profit_factor
-                    msg = (f"🟢 {symbol} ⬆️ Sinal Inicial (3m)\n"
-                           f"💰 Preço: {fmt_price(c3[i])}\n"
-                           f"🛑 Stop Loss: {fmt_price(stop_loss)} ({(1-stop_loss_factor)*100:.0f}%)\n"
-                           f"🎯 Take Profit: {fmt_price(take_profit)} (+{(take_profit_factor-1)*100:.0f}%)\n"
-                           f"🕒 {now_br()} (UTC-3) | Volatilidade: {volatility_3m:.2f}%\n"
+                    msg = (f"{symbol} Sinal Inicial (3m)\n"
+                           f"Preço: {fmt_price(c3[i])}\n"
+                           f"Stop Loss: {fmt_price(stop_loss)} ({(1-stop_loss_factor)*100:.0f}%)\n"
+                           f"Take Profit: {fmt_price(take_profit)} (+{(take_profit_factor-1)*100:.0f}%)\n"
+                           f"{now_br()} (UTC-3) | Volatilidade: {volatility_3m:.2f}%\n"
                            f"──────────────────────────────")
                     await tg(session, msg)
                     mark(symbol, "SIG_3M")
@@ -237,7 +248,6 @@ async def scan_symbol(session, symbol):
         volatility_5m = calculate_volatility(c5[-20:])
         i5 = len(c5) - 1
 
-        # Calcule MACD
         if len(c5) >= 26:
             exp1 = ema(c5, 12)
             exp2 = ema(c5, 26)
@@ -250,9 +260,8 @@ async def scan_symbol(session, symbol):
         cross_up_9_50_5 = (ema9_5[i5-1] <= ma50_5[i5-1]) and (ema9_5[i5] > ma50_5[i5])
         bb_open_5 = widening_now(upper5, mid5, lower5)
         if len(ema9_5) > 2:
-            ma200_tolerance = ma200_5[-1] * 0.10  # 10% de tolerância
+            ma200_tolerance = ma200_5[-1] * 0.10
             within_ma200 = abs(c5[-1] - ma200_5[-1]) <= ma200_tolerance
-            # Ajuste dinâmico relaxado
             rsi_min = 25 if volatility_5m > 2.0 else (35 if volatility_5m < 0.5 else 30)
             rsi_max = 70 if volatility_5m > 2.0 else (65 if volatility_5m < 0.5 else 60)
             vol_multiplier = 1.5 if volatility_5m > 2.0 else (1.2 if volatility_5m < 0.5 else 1.3)
@@ -261,26 +270,81 @@ async def scan_symbol(session, symbol):
             if cross_up_9_50_5 and rsi_min <= rsi5[-1] <= rsi_max and v5[-1] >= vol_multiplier * (vma20_5 + 1e-12) and bb_open_5 and within_ma200 and allowed(symbol, "CONF_5M"):
                 stop_loss = c5[i5] * stop_loss_factor
                 take_profit = c5[i5] * take_profit_factor
-                msg = (f"🔵 {symbol} ⬆️ Confirmação Intermediária (5m)\n"
-                       f"💰 Preço: {fmt_price(c5[i5])}\n"
-                       f"🛑 Stop Loss: {fmt_price(stop_loss)} ({(1-stop_loss_factor)*100:.0f}%)\n"
-                       f"🎯 Take Profit: {fmt_price(take_profit)} (+{(take_profit_factor-1)*100:.0f}%)\n"
-                       f"🕒 {now_br()} (UTC-3) | Volatilidade: {volatility_5m:.2f}%\n"
+                msg = (f"{symbol} Confirmação Intermediária (5m)\n"
+                       f"Preço: {fmt_price(c5[i5])}\n"
+                       f"Stop Loss: {fmt_price(stop_loss)} ({(1-stop_loss_factor)*100:.0f}%)\n"
+                       f"Take Profit: {fmt_price(take_profit)} (+{(take_profit_factor-1)*100:.0f}%)\n"
+                       f"{now_br()} (UTC-3) | Volatilidade: {volatility_5m:.2f}%\n"
                        f"──────────────────────────────")
                 await tg(session, msg)
                 mark(symbol, "CONF_5M")
-            # Alerta de pump relaxado
-            if rsi5[-1] > 60 and v5[-1] >= 1.5 * (vma20_5 + 1e-12) and macd_line > 0 and c5[-1] > ema9_5[-1] and allowed(symbol, "PUMP_5M"):
-                stop_loss = c5[i5] * 0.95  # 5% stop loss fixo
-                take_profit = c5[i5] * 1.20  # 20% take profit fixo
-                msg = (f"🚀 {symbol} ⬆️ Pump Detectado (5m)\n"
-                       f"💰 Preço: {fmt_price(c5[i5])}\n"
-                       f"🛑 Stop Loss: {fmt_price(stop_loss)} (-5%)\n"
-                       f"🎯 Take Profit: {fmt_price(take_profit)} (+20%)\n"
-                       f"🕒 {now_br()} (UTC-3) | Volatilidade: {volatility_5m:.2f}%\n"
+
+        # -------- ALERTA DE PUMP 3M — 100% DINÂMICO E SEGURO --------
+        if len(k3) >= 210:
+            c3 = [float(k[4]) for k in k3]
+            v3 = [float(k[5]) for k in k3]
+            o3 = [float(k[1]) for k in k3]
+            h3 = [float(k[2]) for k in k3]
+            l3 = [float(k[3]) for k in k3]
+
+            cfg = PUMP_RANGES
+
+            volatility_3m = calculate_volatility(c3[-30:])
+            vol_factor = 1.0
+            if volatility_3m > 3.0:      vol_factor = 0.7
+            elif volatility_3m < 1.0:    vol_factor = 1.3
+
+            quiet_min, quiet_max = [int(x * vol_factor) for x in cfg["quiet_candles"]]
+            range_min, range_max = [x * vol_factor for x in cfg["max_range_pct"]]
+            vol_min, vol_max = [x * (0.8 if volatility_3m > 2 else 1.2) for x in cfg["vol_multiplier"]]
+            rise_min, rise_max = [x * (0.8 if volatility_3m > 2 else 1.2) for x in cfg["min_rise_pct"]]
+            rsi_min_val, _ = cfg["rsi_min"]
+            sl_min, sl_max = cfg["stop_loss_pct"]
+            tp_min, tp_max = cfg["take_profit_pct"]
+
+            quiet_candles = max(quiet_min, min(quiet_max, 10))
+            range_list = [(h3[i] - l3[i]) / l3[i] * 100 for i in range(-quiet_candles, 0)]
+            avg_range = sum(range_list) / len(range_list)
+            in_accumulation = range_min <= avg_range <= range_max
+
+            vol_medio = sum(v3[-20:]) / 20.0
+            current_rise = (c3[-1] - o3[-1]) / o3[-1] * 100
+            volume_ratio = v3[-1] / (vol_medio + 1e-12)
+            volume_exploded = vol_min <= volume_ratio <= vol_max
+            strong_rise = rise_min <= current_rise <= rise_max
+            green_candle = c3[-1] > o3[-1]
+
+            ema9 = EMR(c3, 9)
+            rsi3 = calc_rsi(c3, 14)
+            above_ema9 = len(ema9) > 0 and c3[-1] > ema9[-1]
+            rsi_ok = len(rsi3) > 0 and rsi3[-1] >= rsi_min_val
+
+            pump_detected = (
+                in_accumulation and
+                volume_exploded and
+                strong_rise and
+                green_candle and
+                above_ema9 and
+                rsi_ok and
+                allowed(symbol, cfg["cooldown_kind"])
+            )
+
+            if pump_detected:
+                sl_pct = (sl_min + sl_max) / 2
+                tp_pct = (tp_min + tp_max) / 2
+                stop_loss = c3[-1] * sl_pct
+                take_profit = c3[-1] * tp_pct
+
+                msg = (f"{symbol} PUMP DETECTADO (3m)\n"
+                       f"Preço: {fmt_price(c3[-1])}\n"
+                       f"Alta: +{current_rise:.1f}% | Vol: x{volume_ratio:.1f}\n"
+                       f"Range: {avg_range:.2f}% (acumulação)\n"
+                       f"SL: {fmt_price(stop_loss)} ({(1-sl_pct)*100:.1f}%)\n"
+                       f"TP: {fmt_price(take_profit)} ({(tp_pct-1)*100:.0f}%)\n"
+                       f"Volatilidade: {volatility_3m:.1f}% | {now_br()}\n"
                        f"──────────────────────────────")
                 await tg(session, msg)
-                mark(symbol, "PUMP_5M")
+                mark(symbol, cfg["cooldown_kind"])
 
         # -------- 15m (Confirmação Final) --------
         k15 = await get_klines(session, symbol, "15m", limit=210)
@@ -290,7 +354,7 @@ async def scan_symbol(session, symbol):
         l15 = [float(k[3]) for k in k15]
         c15 = [float(k[4]) for k in k15]
         v15 = [float(k[5]) for k in k15]
-        sar = [float(k[8]) for k in k15]  # SAR Parabólico
+        sar = [float(k[8]) for k in k15]
 
         ema9_15  = ema(c15, 9)
         ma50_15  = sma(c15, 50)
@@ -301,9 +365,8 @@ async def scan_symbol(session, symbol):
         volatility_15m = calculate_volatility(c15[-20:])
         j = len(c15) - 1
         if len(ema9_15) > 2:
-            ma200_tolerance = ma200_15[-1] * 0.10  # 10% de tolerância
+            ma200_tolerance = ma200_15[-1] * 0.10
             within_ma200 = abs(c15[-1] - ma200_15[-1]) <= ma200_tolerance
-            # Ajuste dinâmico relaxado
             rsi_min = 25 if volatility_15m > 2.0 else (35 if volatility_15m < 0.5 else 30)
             rsi_max = 70 if volatility_15m > 2.0 else (65 if volatility_15m < 0.5 else 60)
             vol_multiplier = 1.5 if volatility_15m > 2.0 else (1.2 if volatility_15m < 0.5 else 1.3)
@@ -312,11 +375,12 @@ async def scan_symbol(session, symbol):
             if ema9_15[j] > ma50_15[j] and rsi_min <= rsi15[-1] <= rsi_max and sar[-1] < c15[-1] and v15[-1] >= vol_multiplier * (vma20_15 + 1e-12) and within_ma200 and allowed(symbol, "CONF_15M"):
                 stop_loss = c15[j] * stop_loss_factor
                 take_profit = c15[j] * take_profit_factor
-                msg = (f"🚀 {symbol} ⬆️ Confirmação Final (15m)\n"
-                       f"💰 Preço: {fmt_price(c15[j])}\n"
-                       f"🛑 Stop Loss: {fmt_price(stop_loss)} ({(1-stop_loss_factor)*100:.0f}%)\n"
-                       f"🎯 Take Profit: {fmt_price(take_profit)} (+{(take_profit_factor-1)*100:.0f}%)\n"
-                       f"🕒 {now_br()} (UTC-3) | Volatilidade: {volatility_15m:.2f}%\n"
+                msg = (f"{symbol} Confirmação Final (15m)\n"
+                       f"Preço: {fmt_price(c15[j])}\n"
+                       f"Stop Loss: {fmt_price(stop_loss)} ({(1-stop_loss_factor)*100:.0f}%)\n"
+
+                       f"Take Profit: {fmt_price(take_profit)} (+{(take_profit_factor-1)*100:.0f}%)\n"
+                       f"{now_br()} (UTC-3) | Volatilidade: {volatility_15m:.2f}%\n"
                        f"──────────────────────────────")
                 await tg(session, msg)
                 mark(symbol, "CONF_15M")
@@ -328,7 +392,7 @@ async def scan_symbol(session, symbol):
 async def main_loop():
     async with aiohttp.ClientSession() as session:
         symbols = await get_top_usdt_symbols(session)
-        await tg(session, f"✅ Scanner ativo | {len(symbols)} pares | cooldown 8m | {now_br()} (UTC-3)\n──────────────────────────────")
+        await tg(session, f"Scanner ativo | {len(symbols)} pares | Pump 3m dinâmico | {now_br()}\n──────────────────────────────")
         if not symbols: return
         while True:
             tasks = [scan_symbol(session, s) for s in symbols]
