@@ -279,6 +279,47 @@ async def scan_symbol(session, symbol):
                 await tg(session, msg)
                 mark(symbol, "CONF_5M")
 
+        # -------- GRADUAL PUMP 5M — ENTRADA ANTECIPADA (QUALQUER POSIÇÃO, TOLERA 2 CORREÇÕES) --------
+        if len(k5) >= 210:
+            c5 = [float(k[4]) for k in k5]
+            v5 = [float(k[5]) for k in k5]
+            o5 = [float(k[1]) for k in k5]
+
+            # 1. Últimos 5 candles: média 0.5–1.5%, tolera até 2 vermelhos/dojis
+            rises = [(c5[i] - o5[i]) / o5[i] * 100 for i in range(-5, 0)]
+            avg_rise = sum(rises) / 5
+            weak_count = sum(1 for r in rises if r <= 0.1)  # vermelho ou doji
+            valid_trend = (0.5 <= avg_rise <= 1.5) and (weak_count <= 2)
+
+            # 2. Volume crescendo suavemente (x3 a x20) — ANTES do FOMO
+            vol_medio_20 = sum(v5[-20:-1]) / 19.0 if len(v5) >= 20 else sum(v5[:-1]) / (len(v5)-1)
+            recent_vol_ratio = v5[-1] / (vol_medio_20 + 1e-12)
+            volume_rising = 3 <= recent_vol_ratio <= 20
+
+            # 3. Preço acima da EMA9 (confirma momentum)
+            ema9_val = ema(c5, 9)[-1]
+            above_ema9 = c5[-1] > ema9_val
+
+            # 4. Preço subiu nos últimos 5 candles (fechamento > abertura 5 candles atrás)
+            net_up = c5[-1] > c5[-6]
+
+            # 5. SINAL FINAL
+            if (valid_trend and volume_rising and above_ema9 and net_up 
+                and allowed(symbol, "GRADUAL_PUMP_5M")):
+                
+                sl = c5[-1] * 0.955   # -4.5%
+                tp = c5[-1] * 1.20    # +20%
+                msg = (f"{symbol} GRADUAL PUMP (5m)\n"
+                       f"Média: <b>+{avg_rise:.2f}%</b> (5 candles)\n"
+                       f"Volume: <b>x{recent_vol_ratio:.1f}</b>\n"
+                       f"Preço: <b>{fmt_price(c5[-1])}</b>\n"
+                       f"SL: <code>{fmt_price(sl)}</code> (-4.5%)\n"
+                       f"TP: <code>{fmt_price(tp)}</code> (+20%)\n"
+                       f"{now_br()}\n"
+                       f"──────────────────────────────")
+                await tg(session, msg)
+                mark(symbol, "GRADUAL_PUMP_5M")
+
         # -------- ALERTA DE PUMP 3M — 100% DINÂMICO E SEGURO --------
         if len(k3) >= 210:
             c3 = [float(k[4]) for k in k3]
@@ -314,7 +355,7 @@ async def scan_symbol(session, symbol):
             strong_rise = rise_min <= current_rise <= rise_max
             green_candle = c3[-1] > o3[-1]
 
-            ema9 = EMR(c3, 9)
+            ema9 = ema(c3, 9)  # CORRIGIDO: era EMR
             rsi3 = calc_rsi(c3, 14)
             above_ema9 = len(ema9) > 0 and c3[-1] > ema9[-1]
             rsi_ok = len(rsi3) > 0 and rsi3[-1] >= rsi_min_val
@@ -378,7 +419,6 @@ async def scan_symbol(session, symbol):
                 msg = (f"{symbol} Confirmação Final (15m)\n"
                        f"Preço: {fmt_price(c15[j])}\n"
                        f"Stop Loss: {fmt_price(stop_loss)} ({(1-stop_loss_factor)*100:.0f}%)\n"
-
                        f"Take Profit: {fmt_price(take_profit)} (+{(take_profit_factor-1)*100:.0f}%)\n"
                        f"{now_br()} (UTC-3) | Volatilidade: {volatility_15m:.2f}%\n"
                        f"──────────────────────────────")
