@@ -387,43 +387,109 @@ async def scan_symbol(session, symbol):
                 await tg(session, msg)
                 mark(symbol, cfg["cooldown_kind"])
 
-        # -------- 15m (Confirmação Final) --------
+        # ==================================================
+        # 15m SUBSTITUÍDO: FOGUETE + TARTARUGA (2 ALERTAS)
+        # ==================================================
         k15 = await get_klines(session, symbol, "15m", limit=210)
-        if len(k15) < 210: return
+        if len(k15) < 210:
+            return
+
         o15 = [float(k[1]) for k in k15]
         h15 = [float(k[2]) for k in k15]
         l15 = [float(k[3]) for k in k15]
         c15 = [float(k[4]) for k in k15]
         v15 = [float(k[5]) for k in k15]
-        sar = [float(k[8]) for k in k15]
 
-        ema9_15  = ema(c15, 9)
-        ma50_15  = sma(c15, 50)
-        ma200_15 = sma(c15, 200)
-        upper15, mid15, lower15 = bollinger_bands(c15, 20, 2)
-        rsi15 = calc_rsi(c15, 14)
-        vma20_15 = sum(v15[-20:]) / 20.0
-        volatility_15m = calculate_volatility(c15[-20:])
-        j = len(c15) - 1
-        if len(ema9_15) > 2:
-            ma200_tolerance = ma200_15[-1] * 0.10
-            within_ma200 = abs(c15[-1] - ma200_15[-1]) <= ma200_tolerance
-            rsi_min = 25 if volatility_15m > 2.0 else (35 if volatility_15m < 0.5 else 30)
-            rsi_max = 70 if volatility_15m > 2.0 else (65 if volatility_15m < 0.5 else 60)
-            vol_multiplier = 1.5 if volatility_15m > 2.0 else (1.2 if volatility_15m < 0.5 else 1.3)
-            stop_loss_factor = 0.96 if volatility_15m > 2.0 else (0.98 if volatility_15m < 0.5 else 0.97)
-            take_profit_factor = 1.15 if volatility_15m > 2.0 else (1.05 if volatility_15m < 0.5 else 1.10)
-            if ema9_15[j] > ma50_15[j] and rsi_min <= rsi15[-1] <= rsi_max and sar[-1] < c15[-1] and v15[-1] >= vol_multiplier * (vma20_15 + 1e-12) and within_ma200 and allowed(symbol, "CONF_15M"):
-                stop_loss = c15[j] * stop_loss_factor
-                take_profit = c15[j] * take_profit_factor
-                msg = (f"{symbol} Confirmação Final (15m)\n"
-                       f"Preço: {fmt_price(c15[j])}\n"
-                       f"Stop Loss: {fmt_price(stop_loss)} ({(1-stop_loss_factor)*100:.0f}%)\n"
-                       f"Take Profit: {fmt_price(take_profit)} (+{(take_profit_factor-1)*100:.0f}%)\n"
-                       f"{now_br()} (UTC-3) | Volatilidade: {volatility_15m:.2f}%\n"
-                       f"──────────────────────────────")
-                await tg(session, msg)
-                mark(symbol, "CONF_15M")
+        # --- Indicadores ---
+        ema9_15   = ema(c15, 9)
+        ema21_15  = ema(c15, 21)
+        ma200_15  = sma(c15, 200)
+        rsi15     = calc_rsi(c15, 14)
+        ema12_15  = ema(c15, 12)
+        ema26_15  = ema(c15, 26)
+
+        # --- Resistência local: máxima dos últimos 5 candles ---
+        resistencia_local = max(h15[-5:])
+
+        # --- Volume médio dos últimos 10 candles ---
+        vol_med_10 = sum(v15[-10:]) / 10.0 if len(v15) >= 10 else v15[-1]
+
+        # --- Índice atual ---
+        i = len(c15) - 1
+        if i < 5:
+            return
+
+        # --- Condições comuns ---
+        acima_ou_encostou_ema200 = (
+            c15[i] > ma200_15[i] or 
+            (l15[i] <= ma200_15[i] <= c15[i])
+        )
+
+        # =============================================
+        # 1. ALERTA FOGUETE (rompimento explosivo)
+        # =============================================
+        rompimento_forte = c15[i] > resistencia_local
+        volume_forte = v15[i] > vol_med_10 * 1.3
+
+        # Sinais verdes (2 de 3)
+        cruzou_9_21 = (len(ema9_15) > 1 and len(ema21_15) > 1 and
+                       ema9_15[i-1] <= ema21_15[i-1] and ema9_15[i] > ema21_15[i])
+        rsi_saindo_fundo = (len(rsi15) > 1 and rsi15[i-1] <= 40 and rsi15[i] > 40)
+        macd_hist = ema12_15[i] - ema26_15[i] if i < len(ema12_15) and i < len(ema26_15) else 0
+        macd_hist_ant = ema12_15[i-1] - ema26_15[i-1] if i > 0 else 0
+        macd_vira_positivo = macd_hist > 0 and macd_hist_ant <= 0
+
+        sinais_verdes = sum([cruzou_9_21, rsi_saindo_fundo, macd_vira_positivo])
+        dois_sinais_verdes = sinais_verdes >= 2
+
+        if (acima_ou_encostou_ema200 and rompimento_forte and 
+            volume_forte and dois_sinais_verdes and 
+            allowed(symbol, "FOGUETE_15M")):
+
+            stop = min(l15[i], ma200_15[i])
+            risco = c15[i] - stop
+            alvo = c15[i] + 2 * risco
+
+            msg = (f"<b>{symbol} FOGUETE LANÇADO! (15m)</b>\n"
+                   f"Preço: <b>{fmt_price(c15[i])}</b>\n"
+                   f"Stop: <code>{fmt_price(stop)}</code>\n"
+                   f"Alvo 1:2 → <code>{fmt_price(alvo)}</code>\n"
+                   f"Volume: <b>x{v15[i]/vol_med_10:.1f}</b> | Rompeu {fmt_price(resistencia_local)}\n"
+                   f"{now_br()}\n"
+                   f"──────────────────────────────")
+            await tg(session, msg)
+            mark(symbol, "FOGUETE_15M")
+
+        # =============================================
+        # 2. ALERTA TARTARUGA (alta lenta e sustentável)
+        # =============================================
+        ultimos_5_fechamentos = c15[-5:]
+        subindo_devagar = all(ultimos_5_fechamentos[k] > ultimos_5_fechamentos[k+1] for k in range(3))
+
+        # Cruzou EMA200 nos últimos 5 candles
+        cruzou_ema200_recent = any(c15[j] > ma200_15[j] for j in range(i-4, i+1))
+
+        volume_crescente = v15[i] > vol_med_10 * 1.1
+        rsi_moderado = 45 < rsi15[i] < 65
+
+        if (cruzou_ema200_recent and subindo_devagar and 
+            volume_crescente and rsi_moderado and 
+            acima_ou_encostou_ema200 and 
+            allowed(symbol, "TARTARUGA_15M")):
+
+            stop = ma200_15[i]
+            alvo = c15[i] + 3 * (c15[i] - stop)  # 1:3
+
+            msg = (f"<b>{symbol} TARTARUGA SUBINDO! (15m)</b>\n"
+                   f"Preço: <b>{fmt_price(c15[i])}</b>\n"
+                   f"Alta lenta: 4 candles seguidos subindo\n"
+                   f"Stop: <code>{fmt_price(stop)}</code> (EMA 200)\n"
+                   f"Alvo 1:3 → <code>{fmt_price(alvo)}</code>\n"
+                   f"Volume crescendo | RSI {rsi15[i]:.1f}\n"
+                   f"{now_br()}\n"
+                   f"──────────────────────────────")
+            await tg(session, msg)
+            mark(symbol, "TARTARUGA_15M")
 
     except:
         return
