@@ -1,5 +1,5 @@
 # main_breakout_v1_render_hibrido.py
-# V4.3 - MOEDA SIM | TIPO DE ALTA LIMPO | EMOJI DE RISCO + PROBABILIDADE
+# V4.3 - MOEDA SIM | TIPO DE ALTA LIMPO | BOLINHAS COLORIDAS + PROBABILIDADE
 # SÓ ALTA REAL | 15 min | 50 pares
 
 import os, asyncio, aiohttp, time
@@ -167,7 +167,7 @@ async def scan_symbol(session, symbol):
         }
         probabilidade = prob_map.get(tipo_alta, 75)
 
-        # --- EMOJI DE RISCO ---
+        # --- EMOJI DE RISCO (BOLINHAS COLORIDAS) ---
         if probabilidade >= 80:
             risco_emoji = "VERDE"
         elif probabilidade >= 75:
@@ -182,23 +182,23 @@ async def scan_symbol(session, symbol):
         alvo_2 = c5[i] + 5.0 * risco
         tp_parcial = c5[i] + risco  # 1:1
 
-        # --- ALERTA DETALHADO COM EMOJI E PROBABILIDADE ---
+        # --- ALERTA FINAL: BOLINHAS + STOP COM PREÇO E % + TUDO POR EXTENSO ---
         msg = (
             f"<b>{symbol}</b>\n"
             f"Preço: <b>{fmt_price(c5[i])}</b>\n\n"
             f"<b>{tipo_alta} {risco_emoji}</b>\n"
-            f"+{net_up_5*100:.1f}% em 5c | +{candle_rise*100:.1f}% agora\n\n"
-            f"Stop: <code>{fmt_price(stop)}</code> (-{(risco/c5[i]*100):.1f}%)\n"
-            f"Alvo 1 (1:2.5): <code>{fmt_price(alvo_1)}</code> (+{(alvo_1/c5[i]-1)*100:.1f}%)\n"
-            f"Alvo 2 (1:5): <code>{fmt_price(alvo_2)}</code> (+{(alvo_2/c5[i]-1)*100:.1f}%)\n\n"
-            f"TP Parcial: 50% em <code>{fmt_price(tp_parcial)}</code> (+{(tp_parcial/c5[i]-1)*100:.1f}%)\n"
+            f"+{net_up_5*100:.1f}% em 5 velas | +{candle_rise*100:.1f}% no último candle\n\n"
+            f"Stop Loss: <code>{fmt_price(stop)}</code> (-{(risco/c5[i]*100):.1f}%)\n"
+            f"Alvo 1 (risco:recompensa 1:2.5): <code>{fmt_price(alvo_1)}</code> (+{(alvo_1/c5[i]-1)*100:.1f}%)\n"
+            f"Alvo 2 (risco:recompensa 1:5): <code>{fmt_price(alvo_2)}</code> (+{(alvo_2/c5[i]-1)*100:.1f}%)\n\n"
+            f"Take Profit Parcial (50% da posição): <code>{fmt_price(tp_parcial)}</code> (+{(tp_parcial/c5[i]-1)*100:.1f}%)\n"
             f"RSI: {rsi:.1f} | Volume: +{((v5[i]/vol_med_10)-1)*100:.0f}%\n"
-            f"<b>Probabilidade: {probabilidade}%</b>\n\n"
+            f"<b>Probabilidade de acerto: {probabilidade}%</b>\n\n"
             f"Entrada: <b>AGORA</b>\n"
-            f"Tempo estimado: 15–45 min\n\n"
-            f"Suporte: <code>{fmt_price(min(l5[i-4:i+1]))}</code>\n"
-            f"Resistência: <code>{fmt_price(max(h5[i-4:i+1]))}</code>\n\n"
-            f"V4.3: 5/5 condições confirmadas\n"
+            f"Tempo estimado para alvo: 15 a 45 minutos\n\n"
+            f"Suporte mais próximo: <code>{fmt_price(min(l5[i-4:i+1]))}</code>\n"
+            f"Resistência mais próxima: <code>{fmt_price(max(h5[i-4:i+1]))}</code>\n\n"
+            f"Versão 4.3: 5 de 5 condições confirmadas\n"
             f"{now_br()}\n"
             f"──────────────────────────────"
         )
