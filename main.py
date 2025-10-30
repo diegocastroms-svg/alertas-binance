@@ -143,7 +143,7 @@ async def scan_symbol(session, symbol):
 
         # 6. RSI
         rsi = calc_rsi(c5, 14)[i]
-        if rsi < 35 or rsi > 68: return
+        if rsi < 30 or rsi > 75: return
 
         # 7. COOLDOWN
         if not allowed(symbol, "PUMP_INT"): return
@@ -227,3 +227,4 @@ def start_bot():
 
 threading.Thread(target=start_bot, daemon=True).start()
 app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
+
