@@ -204,7 +204,70 @@ async def scan_symbol(session, symbol):
         )
         await tg(session, msg)
         mark(symbol, "PUMP_INT")
+    # =========================================================
+    # ALERTAS ADICIONAIS – PUMP EXTREMO & ALTA GRADUAL
+    # =========================================================
 
+    # --- ⚡ PUMP EXTREMO ---
+    candle_rise = (c5[i] - o5[i]) / o5[i]
+    vol_med_10 = sum(v5[-10:]) / 10
+    if rsi >= 75 and candle_rise >= 0.05 and v5[i] >= vol_med_10 * 3:
+        if allowed(symbol, "PUMP_EXT"):
+            stop = min(l5[i-1], ema(c5, 21)[i])
+            risco = c5[i] - stop
+            alvo_1 = c5[i] + 2.5 * risco
+            alvo_2 = c5[i] + 5.0 * risco
+            tp_parcial = c5[i] + risco
+
+            msg = (
+                f"🚀 <b>{symbol}</b> – <b>PUMP EXTREMO</b>\n"
+                f"Preço: <b>{fmt_price(c5[i])}</b>\n\n"
+                f"🔥 Candle: +{candle_rise*100:.1f}% | RSI: {rsi:.1f}\n"
+                f"Volume: +{((v5[i]/vol_med_10)-1)*100:.0f}% sobre média\n\n"
+                f"Stop Loss: <code>{fmt_price(stop)}</code> (-{(risco/c5[i]*100):.1f}%)\n"
+                f"Alvo 1 (1:2.5): <code>{fmt_price(alvo_1)}</code> (+{(alvo_1/c5[i]-1)*100:.1f}%)\n"
+                f"Alvo 2 (1:5): <code>{fmt_price(alvo_2)}</code> (+{(alvo_2/c5[i]-1)*100:.1f}%)\n"
+                f"Take Parcial (1:1): <code>{fmt_price(tp_parcial)}</code> (+{(tp_parcial/c5[i]-1)*100:.1f}%)\n\n"
+                f"Probabilidade estimada: 70%\n"
+                f"Tempo estimado para alvo: 10 a 25 minutos\n\n"
+                f"Versão: V4.4 – PUMP EXTREMO | {now_br()}\n"
+                f"──────────────────────────────"
+            )
+            await tg(session, msg)
+            mark(symbol, "PUMP_EXT")
+
+    # --- 📈 ALTA GRADUAL / TENDENCIAL ---
+    ema9_val = ema(c5, 9)[i]
+    ema20_val = ema(c5, 20)[i]
+    ema50_val = ema(c5, 50)[i]
+    ema200_val = ema(c5, 200)[i]
+    if ema9_val > ema20_val > ema50_val > ema200_val:
+        if 55 <= rsi <= 70 and v5[i] > vol_med_10 * 1.5:
+            verdes = sum(1 for j in range(i-6, i) if c5[j] > o5[j])
+            if verdes >= 4 and allowed(symbol, "TENDENCIA"):
+                stop = min(l5[i-1], ema(c5, 21)[i])
+                risco = c5[i] - stop
+                alvo_1 = c5[i] + 2.5 * risco
+                alvo_2 = c5[i] + 5.0 * risco
+                tp_parcial = c5[i] + risco
+
+                msg = (
+                    f"📈 <b>{symbol}</b> – <b>ALTA GRADUAL / TENDENCIAL</b>\n"
+                    f"Preço: <b>{fmt_price(c5[i])}</b>\n\n"
+                    f"RSI: {rsi:.1f} | EMA9: {fmt_price(ema9_val)} | EMA20: {fmt_price(ema20_val)}\n"
+                    f"Volume: +{((v5[i]/vol_med_10)-1)*100:.0f}% sobre média\n"
+                    f"Alta constante nos últimos 6 candles ({verdes}/6 verdes)\n\n"
+                    f"Stop Loss: <code>{fmt_price(stop)}</code> (-{(risco/c5[i]*100):.1f}%)\n"
+                    f"Alvo 1 (1:2.5): <code>{fmt_price(alvo_1)}</code> (+{(alvo_1/c5[i]-1)*100:.1f}%)\n"
+                    f"Alvo 2 (1:5): <code>{fmt_price(alvo_2)}</code> (+{(alvo_2/c5[i]-1)*100:.1f}%)\n"
+                    f"Take Parcial (1:1): <code>{fmt_price(tp_parcial)}</code> (+{(tp_parcial/c5[i]-1)*100:.1f}%)\n\n"
+                    f"Probabilidade estimada: 80%\n"
+                    f"Tempo estimado para alvo: 30 a 90 minutos\n\n"
+                    f"Versão: V4.4 – ALTA GRADUAL | {now_br()}\n"
+                    f"──────────────────────────────"
+                )
+                await tg(session, msg)
+                mark(symbol, "TENDENCIA")
     except: pass
 
 # ---------------- MAIN ----------------
@@ -227,4 +290,5 @@ def start_bot():
 
 threading.Thread(target=start_bot, daemon=True).start()
 app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
+
 
