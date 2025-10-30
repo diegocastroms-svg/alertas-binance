@@ -1,6 +1,5 @@
 # main_breakout_v1_render_hibrido.py
-# V4.5 – SETUP OURO CONFLUENTE (3m, 5m, 15m, 1h, MACD com preço, stop e alvos)
-# Estrutura original mantida – apenas substituição e ampliação dos alertas
+# V4.6 – SETUP OURO CONFLUENTE (ajuste RSI e volume no alerta MACD)
 
 import os, asyncio, aiohttp, time
 from datetime import datetime, timedelta
@@ -12,7 +11,7 @@ BINANCE_HTTP = "https://api.binance.com"
 COOLDOWN_SEC = 15 * 60
 TOP_N = 50
 REQ_TIMEOUT = 8
-VERSION = "V4.5 - OURO CONFLUENTE"
+VERSION = "V4.6 - OURO CONFLUENTE"
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 CHAT_ID = os.getenv("CHAT_ID", "").strip()
@@ -142,13 +141,15 @@ async def scan_symbol(session, symbol):
 
         # --- ALERTAS ---
         # 3M – Pré-Ignição
-        if ema9_3 > ema20_3 and rsi3 > 60:
+        if ema9_3 > ema20_3 and rsi3 > 62:
             if can_alert(symbol, "3m", 15*60):
                 bola = rsi_bolinha(rsi3)
-                msg = (f"{bola} <b>[3m] Pré-Ignição Detectada</b>\n"
-                       f"⏰ {now_br()} | {symbol}\n"
-                       f"📊 RSI: {rsi3:.1f}\n"
-                       f"🔗 https://www.binance.com/pt-BR/trade/{symbol}?type=spot")
+                msg = (
+                    f"{bola} <b>[3m] Pré-Ignição Detectada</b>\n"
+                    f"⏰ {now_br()} | {symbol}\n"
+                    f"📊 RSI: {rsi3:.1f}\n"
+                    f"🔗 https://www.binance.com/pt-BR/trade/{symbol}?type=spot"
+                )
                 await tg(session, msg)
 
         # 5M – Ignição
@@ -177,8 +178,8 @@ async def scan_symbol(session, symbol):
             if can_alert(symbol, "1h", 60*60):
                 print(f"[1h] ✅ Tendência macro positiva | {symbol}")
 
-        # 💎 CONFLUÊNCIA MACD COMPLETO
-        if ema20_1h > ema50_1h and ema9_15 > ema20_15 and ema9_5 > ema20_5 and rsi15 > 60:
+        # 💎 CONFLUÊNCIA MACD (ajustado RSI + volume)
+        if ema20_1h > ema50_1h and ema9_15 > ema20_15 and ema9_5 > ema20_5 and rsi15 > 65 and v5[i5] > 1.5 * volmed5:
             if can_alert(symbol, "MACD_CONFLUENCIA", 15*60):
                 bola = rsi_bolinha(rsi15)
                 preco = c5[-1]
@@ -230,5 +231,3 @@ def start_bot():
 
 threading.Thread(target=start_bot, daemon=True).start()
 app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
-
-
