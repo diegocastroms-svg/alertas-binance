@@ -143,7 +143,7 @@ async def scan_symbol(session, symbol):
         # --- ALERTAS ---
         # 3M – Pré-Ignição
         if ema9_3 > ema20_3 and rsi3 > 58:
-            if can_alert(symbol, "3m", 10*60):
+            if can_alert(symbol, "3m", 15*60):
                 bola = rsi_bolinha(rsi3)
                 msg = (f"{bola} <b>[3m] Pré-Ignição Detectada</b>\n"
                        f"⏰ {now_br()} | {symbol}\n"
@@ -230,3 +230,4 @@ def start_bot():
 
 threading.Thread(target=start_bot, daemon=True).start()
 app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
+
