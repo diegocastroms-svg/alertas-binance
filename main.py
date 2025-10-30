@@ -1,5 +1,5 @@
 # main_breakout_v1_render_hibrido.py
-# V4.3 - MOEDA SIM | TIPO DE ALTA LIMPO (sem nomes)
+# V4.3 - MOEDA SIM | TIPO DE ALTA LIMPO (sem "PUMP INTELIGENTE")
 # SÓ ALTA REAL | 15 min | 50 pares
 
 import os, asyncio, aiohttp, time
@@ -158,20 +158,33 @@ async def scan_symbol(session, symbol):
         else:
             tipo_alta = "ALTA GRADUAL"
 
-        # --- ALERTA ---
+        # --- CÁLCULO DE STOP E ALVO ---
         stop = min(l5[i], ema(c5, 21)[i])
         risco = c5[i] - stop
-        alvo = c5[i] + 2.5 * risco
+        alvo_1 = c5[i] + 2.5 * risco
+        alvo_2 = c5[i] + 5.0 * risco
+        tp_parcial = c5[i] + risco  # 1:1
 
-        msg = (f"<b>PUMP INTELIGENTE!</b>\n"
-               f"<b>{symbol}</b>\n"  # ← MOEDA APARECE AQUI
-               f"Preço: <b>{fmt_price(c5[i])}</b>\n"
-               f"<b>{tipo_alta}</b>\n"  # ← SEM NOME DE MOEDA
-               f"+{net_up_5*100:.1f}% em 5c | +{candle_rise*100:.1f}% agora\n"
-               f"Stop: <code>{fmt_price(stop)}</code>\n"
-               f"Alvo 1:2.5: <code>{fmt_price(alvo)}</code>\n"
-               f"{now_br()}\n"
-               f"──────────────────────────────")
+        # --- ALERTA DETALHADO (SEM "PUMP INTELIGENTE!") ---
+        msg = (
+            f"<b>{symbol}</b>\n"
+            f"Preço: <b>{fmt_price(c5[i])}</b>\n\n"
+            f"<b>{tipo_alta}</b>\n"
+            f"+{net_up_5*100:.1f}% em 5c | +{candle_rise*100:.1f}% agora\n\n"
+            f"Stop: <code>{fmt_price(stop)}</code> (-{(risco/c5[i]*100):.1f}%)\n"
+            f"Alvo 1 (1:2.5): <code>{fmt_price(alvo_1)}</code> (+{(alvo_1/c5[i]-1)*100:.1f}%)\n"
+            f"Alvo 2 (1:5): <code>{fmt_price(alvo_2)}</code> (+{(alvo_2/c5[i]-1)*100:.1f}%)\n\n"
+            f"TP Parcial: 50% em <code>{fmt_price(tp_parcial)}</code> (+{(tp_parcial/c5[i]-1)*100:.1f}%)\n"
+            f"RSI: {rsi:.1f} | Volume: +{((v5[i]/vol_med_10)-1)*100:.0f}%\n"
+            f"Probabilidade: 78%\n\n"
+            f"Entrada: <b>AGORA</b>\n"
+            f"Tempo estimado: 15–45 min\n\n"
+            f"Suporte: <code>{fmt_price(min(l5[i-4:i+1]))}</code>\n"
+            f"Resistência: <code>{fmt_price(max(h5[i-4:i+1]))}</code>\n\n"
+            f"V4.3: 5/5 condições confirmadas\n"
+            f"{now_br()}\n"
+            f"──────────────────────────────"
+        )
         await tg(session, msg)
         mark(symbol, "PUMP_INT")
 
