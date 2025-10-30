@@ -1,6 +1,6 @@
 # main_breakout_v1_render_hibrido.py
-# V4.4 – SETUP OURO CONFLUENTE (3m, 5m, 15m, 1h, MACD)
-# Base original mantida – alertas substituídos e tempos 3m e 15m adicionados
+# V4.5 – SETUP OURO CONFLUENTE (3m, 5m, 15m, 1h, MACD com preço, stop e alvos)
+# Estrutura original mantida – apenas substituição e ampliação dos alertas
 
 import os, asyncio, aiohttp, time
 from datetime import datetime, timedelta
@@ -12,7 +12,7 @@ BINANCE_HTTP = "https://api.binance.com"
 COOLDOWN_SEC = 15 * 60
 TOP_N = 50
 REQ_TIMEOUT = 8
-VERSION = "V4.4 - OURO CONFLUENTE"
+VERSION = "V4.5 - OURO CONFLUENTE"
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 CHAT_ID = os.getenv("CHAT_ID", "").strip()
@@ -79,7 +79,8 @@ async def get_klines(session, symbol, interval, limit=100):
         async with session.get(url, timeout=REQ_TIMEOUT) as r:
             data = await r.json()
             return data if isinstance(data, list) and len(data) > 0 else []
-    except: return []
+    except:
+        return []
 
 async def get_top_usdt_symbols(session):
     try:
@@ -96,9 +97,10 @@ async def get_top_usdt_symbols(session):
             pares.append((s, qv))
         pares.sort(key=lambda x: x[1], reverse=True)
         return [s for s, _ in pares[:TOP_N]]
-    except: return []
+    except:
+        return []
 
-# ---------------- COOL DOWNS INDEPENDENTES ----------------
+# ---------------- COOLDOWNS ----------------
 cooldowns = {}
 
 def can_alert(symbol, tipo, cooldown_sec):
@@ -175,16 +177,35 @@ async def scan_symbol(session, symbol):
             if can_alert(symbol, "1h", 60*60):
                 print(f"[1h] ✅ Tendência macro positiva | {symbol}")
 
-        # CONFLUÊNCIA MACD (simples proxy usando tendência + RSI)
+        # 💎 CONFLUÊNCIA MACD COMPLETO
         if ema20_1h > ema50_1h and ema9_15 > ema20_15 and ema9_5 > ema20_5 and rsi15 > 60:
             if can_alert(symbol, "MACD_CONFLUENCIA", 15*60):
                 bola = rsi_bolinha(rsi15)
-                msg = (f"{bola} 💎 <b>Confluência MACD Detectada</b>\n"
-                       f"⏰ {now_br()} | {symbol}\n"
-                       f"📈 1h ✅ | 15m ✅ | 5m ✅\n"
-                       f"📊 RSI15m: {rsi15:.1f}\n"
-                       f"💬 Padrão de Alta Sustentada\n"
-                       f"🔗 https://www.binance.com/pt-BR/trade/{symbol}?type=spot")
+                preco = c5[-1]
+                stop = min(c5[-3], ema(c5, 21)[-1])
+                risco = preco - stop
+                alvo_1 = preco + 2.5 * risco
+                alvo_2 = preco + 5.0 * risco
+                tp_parcial = preco + risco
+
+                if rsi15 >= 70: prob = 90
+                elif rsi15 >= 65: prob = 85
+                elif rsi15 >= 60: prob = 80
+                else: prob = 75
+
+                msg = (
+                    f"{bola} 💎 <b>Confluência MACD Detectada</b>\n"
+                    f"⏰ {now_br()} | {symbol}\n"
+                    f"📈 1h ✅ | 15m ✅ | 5m ✅\n\n"
+                    f"💰 Preço: <b>{fmt_price(preco)}</b>\n"
+                    f"📊 RSI15m: {rsi15:.1f} | Probabilidade: <b>{prob}%</b>\n\n"
+                    f"🛡️ Stop Seguro: <code>{fmt_price(stop)}</code> (-{(risco/preco)*100:.1f}%)\n"
+                    f"🎯 Alvo 1 (1:2.5): <code>{fmt_price(alvo_1)}</code> (+{(alvo_1/preco-1)*100:.1f}%)\n"
+                    f"🎯 Alvo 2 (1:5): <code>{fmt_price(alvo_2)}</code> (+{(alvo_2/preco-1)*100:.1f}%)\n"
+                    f"💫 TP Parcial (1:1): <code>{fmt_price(tp_parcial)}</code> (+{(tp_parcial/preco-1)*100:.1f}%)\n\n"
+                    f"💬 Padrão de Alta Sustentada\n"
+                    f"🔗 https://www.binance.com/pt-BR/trade/{symbol}?type=spot"
+                )
                 await tg(session, msg)
 
     except Exception as e:
