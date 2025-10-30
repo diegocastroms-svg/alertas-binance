@@ -1,5 +1,5 @@
 # main_breakout_v1_render_hibrido.py
-# V4.6 – SETUP OURO CONFLUENTE (ajuste RSI e volume no alerta MACD)
+# V4.7 – AJUSTE DE FILTROS (3m, 5m, 15m otimizados)
 
 import os, asyncio, aiohttp, time
 from datetime import datetime, timedelta
@@ -11,7 +11,7 @@ BINANCE_HTTP = "https://api.binance.com"
 COOLDOWN_SEC = 15 * 60
 TOP_N = 50
 REQ_TIMEOUT = 8
-VERSION = "V4.6 - OURO CONFLUENTE"
+VERSION = "V4.7 - OURO CONFLUENTE AJUSTADO"
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 CHAT_ID = os.getenv("CHAT_ID", "").strip()
@@ -140,8 +140,9 @@ async def scan_symbol(session, symbol):
         volmed3, volmed5, volmed15 = sum(v3[-10:])/10, sum(v5[-10:])/10, sum(v15[-10:])/10
 
         # --- ALERTAS ---
-        # 3M – Pré-Ignição
-        if ema9_3 > ema20_3 and rsi3 > 62:
+
+        # 3M – Pré-Ignição (ajustado RSI e volume)
+        if ema9_3 > ema20_3 and rsi3 > 66 and v3[i3] > 1.3 * volmed3:
             if can_alert(symbol, "3m", 15*60):
                 bola = rsi_bolinha(rsi3)
                 msg = (
@@ -152,8 +153,8 @@ async def scan_symbol(session, symbol):
                 )
                 await tg(session, msg)
 
-        # 5M – Ignição
-        if ema9_5 > ema20_5 > ema50_5 and rsi5 > 60 and v5[i5] > 2*volmed5:
+        # 5M – Ignição (ajustado RSI e volume)
+        if ema9_5 > ema20_5 > ema50_5 and rsi5 > 58 and v5[i5] > 1.5 * volmed5:
             if can_alert(symbol, "5m", 15*60):
                 bola = rsi_bolinha(rsi5)
                 mult = v5[i5] / volmed5
@@ -163,8 +164,8 @@ async def scan_symbol(session, symbol):
                        f"🔗 https://www.binance.com/pt-BR/trade/{symbol}?type=spot")
                 await tg(session, msg)
 
-        # 15M – Continuação
-        if ema9_15 > ema20_15 > ema50_15 and rsi15 > 65:
+        # 15M – Continuação (ajustado RSI)
+        if ema9_15 > ema20_15 > ema50_15 and rsi15 > 60:
             if can_alert(symbol, "15m", 30*60):
                 bola = rsi_bolinha(rsi15)
                 msg = (f"{bola} <b>[15m] Continuação de Alta</b>\n"
@@ -178,7 +179,7 @@ async def scan_symbol(session, symbol):
             if can_alert(symbol, "1h", 60*60):
                 print(f"[1h] ✅ Tendência macro positiva | {symbol}")
 
-        # 💎 CONFLUÊNCIA MACD (ajustado RSI + volume)
+        # 💎 CONFLUÊNCIA MACD (mantido com RSI+volume 65/1.5x)
         if ema20_1h > ema50_1h and ema9_15 > ema20_15 and ema9_5 > ema20_5 and rsi15 > 65 and v5[i5] > 1.5 * volmed5:
             if can_alert(symbol, "MACD_CONFLUENCIA", 15*60):
                 bola = rsi_bolinha(rsi15)
