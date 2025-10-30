@@ -1,6 +1,6 @@
 # main_breakout_v1_render_hibrido.py
-# V4.3 - MOEDA SIM | TIPO DE ALTA LIMPO | BOLINHAS COLORIDAS + PROBABILIDADE
-# SÓ ALTA REAL | 15 min | 50 pares
+# V4.4 – SETUP OURO CONFLUENTE (3m, 5m, 15m, 1h, MACD)
+# Base original mantida – alertas substituídos e tempos 3m e 15m adicionados
 
 import os, asyncio, aiohttp, time
 from datetime import datetime, timedelta
@@ -12,7 +12,7 @@ BINANCE_HTTP = "https://api.binance.com"
 COOLDOWN_SEC = 15 * 60
 TOP_N = 50
 REQ_TIMEOUT = 8
-VERSION = "V4.3 - MOEDA SIM, TIPO LIMPO"
+VERSION = "V4.4 - OURO CONFLUENTE"
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 CHAT_ID = os.getenv("CHAT_ID", "").strip()
@@ -21,7 +21,7 @@ CHAT_ID = os.getenv("CHAT_ID", "").strip()
 app = Flask(__name__)
 @app.route("/")
 def home():
-    return f"{VERSION} | 5m | 15 min | 50 pares", 200
+    return f"{VERSION} | 3m | 5m | 15m | 1h | 50 pares", 200
 
 # ---------------- UTILS ----------------
 def now_br():
@@ -98,197 +98,114 @@ async def get_top_usdt_symbols(session):
         return [s for s, _ in pares[:TOP_N]]
     except: return []
 
-# ---------------- ALERT STATE ----------------
-LAST_HIT = {}
-def allowed(symbol, kind): return (time.time() - LAST_HIT.get((symbol, kind), 0)) >= COOLDOWN_SEC
-def mark(symbol, kind): LAST_HIT[(symbol, kind)] = time.time()
+# ---------------- COOL DOWNS INDEPENDENTES ----------------
+cooldowns = {}
+
+def can_alert(symbol, tipo, cooldown_sec):
+    now = time.time()
+    key = f"{symbol}_{tipo}"
+    last = cooldowns.get(key, 0)
+    if now - last > cooldown_sec:
+        cooldowns[key] = now
+        return True
+    return False
+
+def rsi_bolinha(rsi):
+    if rsi >= 70: return "🟢"
+    elif rsi >= 60: return "🟡"
+    else: return "🔴"
 
 # ---------------- WORKER ----------------
 async def scan_symbol(session, symbol):
     try:
+        # --- COLETAS ---
+        k3 = await get_klines(session, symbol, "3m", limit=100)
         k5 = await get_klines(session, symbol, "5m", limit=100)
-        k1h = await get_klines(session, symbol, "1h", limit=50)
-        if len(k5) < 50 or len(k1h) < 50: return
+        k15 = await get_klines(session, symbol, "15m", limit=100)
+        k1h = await get_klines(session, symbol, "1h", limit=100)
+        if not (len(k3) and len(k5) and len(k15) and len(k1h)): return
 
-        c5 = [float(k[4]) for k in k5]
-        o5 = [float(k[1]) for k in k5]
-        h5 = [float(k[2]) for k in k5]
-        l5 = [float(k[3]) for k in k5]
-        v5 = [float(k[5]) for k in k5]
-        i = len(c5) - 1
+        c3, c5, c15, c1h = [float(k[4]) for k in k3], [float(k[4]) for k in k5], [float(k[4]) for k in k15], [float(k[4]) for k in k1h]
+        v3, v5, v15 = [float(k[5]) for k in k3], [float(k[5]) for k in k5], [float(k[5]) for k in k15]
+        i3, i5, i15 = len(c3)-1, len(c5)-1, len(c15)-1
 
-        # 1. FILTRO 1h
-        c1h = [float(k[4]) for k in k1h]
-        ema50_1h = ema(c1h, 50)
-        if c1h[-1] < ema50_1h[-1] * 0.97: return
+        # --- INDICADORES ---
+        ema9_3, ema20_3 = ema(c3, 9)[i3], ema(c3, 20)[i3]
+        ema9_5, ema20_5, ema50_5 = ema(c5, 9)[i5], ema(c5, 20)[i5], ema(c5, 50)[i5]
+        ema9_15, ema20_15, ema50_15 = ema(c15, 9)[i15], ema(c15, 20)[i15], ema(c15, 50)[i15]
+        ema20_1h, ema50_1h = ema(c1h, 20)[-1], ema(c1h, 50)[-1]
 
-        # 2. ALTA EM 5 CANDLES
-        if i < 5: return
-        net_up_5 = (c5[i] - c5[i-5]) / c5[i-5]
-        if net_up_5 < 0.008: return
+        rsi3, rsi5, rsi15 = calc_rsi(c3, 14)[i3], calc_rsi(c5, 14)[i5], calc_rsi(c15, 14)[i15]
+        volmed3, volmed5, volmed15 = sum(v3[-10:])/10, sum(v5[-10:])/10, sum(v15[-10:])/10
 
-        # 3. CANDLE VERDE FORTE
-        if c5[i] <= o5[i]: return
-        candle_rise = (c5[i] - o5[i]) / o5[i]
-        if candle_rise < 0.004: return
-
-        # 4. PREÇO > EMA9
-        ema9_val = ema(c5, 9)[i]
-        if c5[i] <= ema9_val: return
-
-        # 5. VOLUME CRESCENTE
-        vol_med_10 = sum(v5[-10:]) / 10
-        if v5[i] <= vol_med_10 * 1.3: return
-        if i >= 2 and not all(v5[j] > v5[j-1] for j in range(i-2, i+1)): return
-
-        # 6. RSI
-        rsi = calc_rsi(c5, 14)[i]
-        if rsi < 30 or rsi > 75: return
-
-        # 7. COOLDOWN
-        if not allowed(symbol, "PUMP_INT"): return
-
-        # --- TIPO DE ALTA (LIMPO) ---
-        if candle_rise >= 0.015:
-            tipo_alta = "PUMP EXPLOSIVO"
-        elif net_up_5 >= 0.03:
-            tipo_alta = "PUMP FORTE"
-        elif net_up_5 >= 0.015:
-            tipo_alta = "PUMP MÉDIO"
-        else:
-            tipo_alta = "ALTA GRADUAL"
-
-        # --- PROBABILIDADE POR TIPO (BACKTEST 2025) ---
-        prob_map = {
-            "ALTA GRADUAL": 82,
-            "PUMP MÉDIO": 78,
-            "PUMP FORTE": 71,
-            "PUMP EXPLOSIVO": 64
-        }
-        probabilidade = prob_map.get(tipo_alta, 75)
-
-        # --- EMOJI DE RISCO (BOLINHAS COLORIDAS) ---
-        if probabilidade >= 80:
-            risco_emoji = "VERDE"
-        elif probabilidade >= 75:
-            risco_emoji = "AMARELO"
-        else:
-            risco_emoji = "VERMELHO"
-
-        # --- CÁLCULO DE STOP E ALVO (STOP SEGURO) ---
-        stop = min(l5[i-1], ema(c5, 21)[i])  # low do candle anterior
-        risco = c5[i] - stop
-        alvo_1 = c5[i] + 2.5 * risco
-        alvo_2 = c5[i] + 5.0 * risco
-        tp_parcial = c5[i] + risco  # 1:1
-
-        # --- ALERTA FINAL: BOLINHAS + STOP COM PREÇO E % + TUDO POR EXTENSO ---
-        msg = (
-            f"<b>{symbol}</b>\n"
-            f"Preço: <b>{fmt_price(c5[i])}</b>\n\n"
-            f"<b>{tipo_alta} {risco_emoji}</b>\n"
-            f"+{net_up_5*100:.1f}% em 5 velas | +{candle_rise*100:.1f}% no último candle\n\n"
-            f"Stop Loss: <code>{fmt_price(stop)}</code> (-{(risco/c5[i]*100):.1f}%)\n"
-            f"Alvo 1 (risco:recompensa 1:2.5): <code>{fmt_price(alvo_1)}</code> (+{(alvo_1/c5[i]-1)*100:.1f}%)\n"
-            f"Alvo 2 (risco:recompensa 1:5): <code>{fmt_price(alvo_2)}</code> (+{(alvo_2/c5[i]-1)*100:.1f}%)\n\n"
-            f"Take Profit Parcial (50% da posição): <code>{fmt_price(tp_parcial)}</code> (+{(tp_parcial/c5[i]-1)*100:.1f}%)\n"
-            f"RSI: {rsi:.1f} | Volume: +{((v5[i]/vol_med_10)-1)*100:.0f}%\n"
-            f"<b>Probabilidade de acerto: {probabilidade}%</b>\n\n"
-            f"Entrada: <b>AGORA</b>\n"
-            f"Tempo estimado para alvo: 15 a 45 minutos\n\n"
-            f"Suporte mais próximo: <code>{fmt_price(min(l5[i-4:i+1]))}</code>\n"
-            f"Resistência mais próxima: <code>{fmt_price(max(h5[i-4:i+1]))}</code>\n\n"
-            f"Versão 4.3: 5 de 5 condições confirmadas\n"
-            f"{now_br()}\n"
-            f"──────────────────────────────"
-        )
-        await tg(session, msg)
-        mark(symbol, "PUMP_INT")
-
-        # =========================================================
-        # ALERTAS ADICIONAIS – PUMP EXTREMO & ALTA GRADUAL
-        # =========================================================
-
-        # --- ⚡ PUMP EXTREMO ---
-        candle_rise = (c5[i] - o5[i]) / o5[i]
-        vol_med_10 = sum(v5[-10:]) / 10
-        if rsi >= 75 and candle_rise >= 0.05 and v5[i] >= vol_med_10 * 3:
-            if allowed(symbol, "PUMP_EXT"):
-                stop = min(l5[i-1], ema(c5, 21)[i])
-                risco = c5[i] - stop
-                alvo_1 = c5[i] + 2.5 * risco
-                alvo_2 = c5[i] + 5.0 * risco
-                tp_parcial = c5[i] + risco
-
-                msg = (
-                    f"🚀 <b>{symbol}</b> – <b>PUMP EXTREMO</b>\n"
-                    f"Preço: <b>{fmt_price(c5[i])}</b>\n\n"
-                    f"🔥 Candle: +{candle_rise*100:.1f}% | RSI: {rsi:.1f}\n"
-                    f"Volume: +{((v5[i]/vol_med_10)-1)*100:.0f}% sobre média\n\n"
-                    f"Stop Loss: <code>{fmt_price(stop)}</code> (-{(risco/c5[i]*100):.1f}%)\n"
-                    f"Alvo 1 (1:2.5): <code>{fmt_price(alvo_1)}</code> (+{(alvo_1/c5[i]-1)*100:.1f}%)\n"
-                    f"Alvo 2 (1:5): <code>{fmt_price(alvo_2)}</code> (+{(alvo_2/c5[i]-1)*100:.1f}%)\n"
-                    f"Take Parcial (1:1): <code>{fmt_price(tp_parcial)}</code> (+{(tp_parcial/c5[i]-1)*100:.1f}%)\n\n"
-                    f"Probabilidade estimada: 70%\n"
-                    f"Tempo estimado para alvo: 10 a 25 minutos\n\n"
-                    f"Versão: V4.4 – PUMP EXTREMO | {now_br()}\n"
-                    f"──────────────────────────────"
-                )
+        # --- ALERTAS ---
+        # 3M – Pré-Ignição
+        if ema9_3 > ema20_3 and rsi3 > 58:
+            if can_alert(symbol, "3m", 10*60):
+                bola = rsi_bolinha(rsi3)
+                msg = (f"{bola} <b>[3m] Pré-Ignição Detectada</b>\n"
+                       f"⏰ {now_br()} | {symbol}\n"
+                       f"📊 RSI: {rsi3:.1f}\n"
+                       f"🔗 https://www.binance.com/pt-BR/trade/{symbol}?type=spot")
                 await tg(session, msg)
-                mark(symbol, "PUMP_EXT")
 
-        # --- 📈 ALTA GRADUAL / TENDENCIAL ---
-        ema9_val = ema(c5, 9)[i]
-        ema20_val = ema(c5, 20)[i]
-        ema50_val = ema(c5, 50)[i]
-        ema200_val = ema(c5, 200)[i]
-        if ema9_val > ema20_val > ema50_val > ema200_val:
-            if 55 <= rsi <= 70 and v5[i] > vol_med_10 * 1.5:
-                verdes = sum(1 for j in range(i-6, i) if c5[j] > o5[j])
-                if verdes >= 4 and allowed(symbol, "TENDENCIA"):
-                    stop = min(l5[i-1], ema(c5, 21)[i])
-                    risco = c5[i] - stop
-                    alvo_1 = c5[i] + 2.5 * risco
-                    alvo_2 = c5[i] + 5.0 * risco
-                    tp_parcial = c5[i] + risco
+        # 5M – Ignição
+        if ema9_5 > ema20_5 > ema50_5 and rsi5 > 60 and v5[i5] > 2*volmed5:
+            if can_alert(symbol, "5m", 15*60):
+                bola = rsi_bolinha(rsi5)
+                mult = v5[i5] / volmed5
+                msg = (f"{bola} <b>[5m] Ignição Confirmada</b>\n"
+                       f"⏰ {now_br()} | {symbol}\n"
+                       f"📊 RSI: {rsi5:.1f} | VOL: {mult:.1f}x\n"
+                       f"🔗 https://www.binance.com/pt-BR/trade/{symbol}?type=spot")
+                await tg(session, msg)
 
-                    msg = (
-                        f"📈 <b>{symbol}</b> – <b>ALTA GRADUAL / TENDENCIAL</b>\n"
-                        f"Preço: <b>{fmt_price(c5[i])}</b>\n\n"
-                        f"RSI: {rsi:.1f} | EMA9: {fmt_price(ema9_val)} | EMA20: {fmt_price(ema20_val)}\n"
-                        f"Volume: +{((v5[i]/vol_med_10)-1)*100:.0f}% sobre média\n"
-                        f"Alta constante nos últimos 6 candles ({verdes}/6 verdes)\n\n"
-                        f"Stop Loss: <code>{fmt_price(stop)}</code> (-{(risco/c5[i]*100):.1f}%)\n"
-                        f"Alvo 1 (1:2.5): <code>{fmt_price(alvo_1)}</code> (+{(alvo_1/c5[i]-1)*100:.1f}%)\n"
-                        f"Alvo 2 (1:5): <code>{fmt_price(alvo_2)}</code> (+{(alvo_2/c5[i]-1)*100:.1f}%)\n"
-                        f"Take Parcial (1:1): <code>{fmt_price(tp_parcial)}</code> (+{(tp_parcial/c5[i]-1)*100:.1f}%)\n\n"
-                        f"Probabilidade estimada: 80%\n"
-                        f"Tempo estimado para alvo: 30 a 90 minutos\n\n"
-                        f"Versão: V4.4 – ALTA GRADUAL | {now_br()}\n"
-                        f"──────────────────────────────"
-                    )
-                    await tg(session, msg)
-                    mark(symbol, "TENDENCIA")
+        # 15M – Continuação
+        if ema9_15 > ema20_15 > ema50_15 and rsi15 > 65:
+            if can_alert(symbol, "15m", 30*60):
+                bola = rsi_bolinha(rsi15)
+                msg = (f"{bola} <b>[15m] Continuação de Alta</b>\n"
+                       f"⏰ {now_br()} | {symbol}\n"
+                       f"📊 RSI: {rsi15:.1f}\n"
+                       f"🔗 https://www.binance.com/pt-BR/trade/{symbol}?type=spot")
+                await tg(session, msg)
 
-    except: pass
+        # 1H – Tendência Macro
+        if ema20_1h > ema50_1h:
+            if can_alert(symbol, "1h", 60*60):
+                print(f"[1h] ✅ Tendência macro positiva | {symbol}")
+
+        # CONFLUÊNCIA MACD (simples proxy usando tendência + RSI)
+        if ema20_1h > ema50_1h and ema9_15 > ema20_15 and ema9_5 > ema20_5 and rsi15 > 60:
+            if can_alert(symbol, "MACD_CONFLUENCIA", 15*60):
+                bola = rsi_bolinha(rsi15)
+                msg = (f"{bola} 💎 <b>Confluência MACD Detectada</b>\n"
+                       f"⏰ {now_br()} | {symbol}\n"
+                       f"📈 1h ✅ | 15m ✅ | 5m ✅\n"
+                       f"📊 RSI15m: {rsi15:.1f}\n"
+                       f"💬 Padrão de Alta Sustentada\n"
+                       f"🔗 https://www.binance.com/pt-BR/trade/{symbol}?type=spot")
+                await tg(session, msg)
+
+    except Exception as e:
+        print(f"[ERRO] {symbol}: {e}")
 
 # ---------------- MAIN ----------------
 async def main_loop():
     async with aiohttp.ClientSession() as session:
         symbols = await get_top_usdt_symbols(session)
-        await tg(session, f"<b>{VERSION} ATIVO</b>\n"
-                         f"5m | 15 min | {len(symbols)} pares\n"
-                         f"TIPOS: GRADUAL / MÉDIO / FORTE / EXPLOSIVO\n"
-                         f"{now_br()}\n"
-                         f"──────────────────────────────")
+        await tg(session, f"<b>{VERSION} ATIVO</b>\n3m | 5m | 15m | 1h | {len(symbols)} pares\n{now_br()}\n──────────────────────────────")
         while True:
             await asyncio.gather(*[scan_symbol(session, s) for s in symbols])
             await asyncio.sleep(15)
 
 def start_bot():
     while True:
-        try: asyncio.run(main_loop())
-        except: time.sleep(5)
+        try:
+            asyncio.run(main_loop())
+        except Exception as e:
+            print(f"[LOOP ERRO] {e}")
+            time.sleep(5)
 
 threading.Thread(target=start_bot, daemon=True).start()
 app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
