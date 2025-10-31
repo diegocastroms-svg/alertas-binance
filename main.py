@@ -1,5 +1,5 @@
 # main_breakout_v1_render_hibrido.py
-# V6.0 – CRUZAMENTO 5M FECHADO + HIST > 0.01 (SEM ROUND, SEM FALSOS)
+# V6.0 – CRUZAMENTO 5M FECHADO + HIST > 0.01 (SEM ROUND, COM TELEGRAM FUNCIONANDO)
 
 import os, asyncio, aiohttp, time
 from datetime import datetime, timedelta
@@ -11,7 +11,7 @@ BINANCE_HTTP = "https://api.binance.com"
 COOLDOWN_SEC = 15 * 60
 TOP_N = 90
 REQ_TIMEOUT = 8
-VERSION = "V6.0 - CRUZAMENTO 5M FECHADO + HIST > 0.01 (SEM ROUND)"
+VERSION = "V6.0 - CRUZAMENTO 5M FECHADO + HIST > 0.01 (TELEGRAM OK)"
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 CHAT_ID = os.getenv("CHAT_ID", "").strip()
@@ -28,13 +28,23 @@ def now_br():
 
 async def tg(session, text: str):
     if not (TELEGRAM_TOKEN and CHAT_ID):
-        print(f"[TG] {text}")
+        print(f"[TG SIMULADO] {text}")
         return
     try:
-        url = f"https://api.binance.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        await session.post(url, data={"chat_id": CHAT_ID, "text": text, "parse_mode": "HTML"}, timeout=REQ_TIMEOUT)
+        url = "https://api.telegram.org/bot{}/sendMessage".format(TELEGRAM_TOKEN)  # CORRETO
+        print(f"[TG ENVIANDO] {text[:60]}...")  # LOG
+        async with session.post(
+            url,
+            data={"chat_id": CHAT_ID, "text": text, "parse_mode": "HTML"},
+            timeout=REQ_TIMEOUT
+        ) as resp:
+            result = await resp.json()
+            if result.get("ok"):
+                print(f"[TG OK] Enviado com sucesso!")
+            else:
+                print(f"[TG ERRO] {result}")
     except Exception as e:
-        print(f"[TG ERRO] {e}")
+        print(f"[TG FALHOU] {e}")
 
 def fmt_price(x: float) -> str:
     return f"{x:.8f}".rstrip("0").rstrip(".") or "0"
@@ -42,8 +52,7 @@ def fmt_price(x: float) -> str:
 def ema(seq, span):
     if not seq: return []
     alpha = 2.0 / (span + 1.0)
-    out = [seq[0]]
-    e = seq[0]
+    out = [seq[0]]; e = seq[0]
     for x in seq[1:]:
         e = alpha * x + (1 - alpha) * e
         out.append(e)
@@ -75,21 +84,17 @@ def macd(seq, fast=12, slow=26, signal=9):
     if len(seq) < slow + signal + 1:
         n = len(seq)
         return {"macd": [0.0]*n, "signal": [0.0]*n, "hist": [0.0]*n}
-    ema_fast = ema(seq, fast)
-    ema_slow = ema(seq, slow)
+    ema_fast = ema(seq, fast); ema_slow = ema(seq, slow)
     macd_line = [f - s for f, s in zip(ema_fast, ema_slow)]
     signal_line = ema(macd_line, signal)
-    m = len(macd_line)
-    s = len(signal_line)
-    if s < m:
-        signal_line = [signal_line[0]]*(m - s) + signal_line
+    m, s = len(macd_line), len(signal_line)
+    if s < m: signal_line = [signal_line[0]] * (m - s) + signal_line
     hist = [m_ - s_ for m_, s_ in zip(macd_line, signal_line)]
     return {"macd": macd_line, "signal": signal_line, "hist": hist}
 
 def cruzou_de_baixo(c, p9=9, p20=20):
     if len(c) < p20 + 2: return False
-    e9 = ema(c, p9)
-    e20 = ema(c, p20)
+    e9 = ema(c, p9); e20 = ema(c, p20)
     return e9[-2] <= e20[-2] and e9[-1] > e20[-1]
 
 # ---------------- BINANCE ----------------
@@ -164,7 +169,7 @@ async def scan_symbol(session, symbol, qv):
 
         # === HIST > 0.01 + CRESCENTE (SEM ROUND!) ===
         hist_ok = (
-            len(h5) >= 2  and h5[-1]  > 0.01 and h5[-1]  > h5[-2]  and
+            len(h5)  >= 2 and h5[-1]  > 0.01 and h5[-1]  > h5[-2]  and
             len(h15) >= 2 and h15[-1] > 0.01 and h15[-1] > h15[-2] and
             len(h30) >= 2 and h30[-1] > 0.01 and h30[-1] > h30[-2] and
             len(h1h) >= 2 and h1h[-1] > 0.01 and h1h[-1] > h1h[-2]
@@ -176,24 +181,36 @@ async def scan_symbol(session, symbol, qv):
         ema20_1h = ema(c1h, 20)[i1h] if len(c1h) > 20 else c1h[-1]
         filtro_forte = preco > ema20_1h and 45 <= rsi15 <= 68 and v5[-1] > volmed5 * 1.1
 
-        # === ALERTA SÓ COM TUDO VERDADEIRO ===
-        if cruzou_5m and hist_ok and filtro_forte and can_alert(symbol, "CRUZAMENTO_5M", COOLDOWN_SEC):
-            l5 = [float(k[3]) for k in k5]
-            stop = min(l5[i5-1], ema(c5,21)[i5]) if i5 >= 1 else ema(c5,21)[i5]
-            risco = max(preco - stop, 1e-12)
-            alvo_1 = preco + 2.5 * risco
-            alvo_2 = preco + 5.0 * risco
+        # === TESTE FORÇADO (REMOVA DEPOIS DE TESTAR) ===
+        if symbol == "BTCUSDT":
+            await tg(session, f"<b>TESTE V6.0 FUNCIONANDO!</b>\nBot corrigido e enviando.\n{now_br()}")
+            return
 
-            liq = "Alta" if qv >= 1e8 else "Média" if qv >= 2e7 else "Baixa"
-            msg = (
-                f"<b>CRUZAMENTO 5M FECHADO + MACD FORTE</b>\n"
-                f"{symbol} | Preço: {fmt_price(preco)}\n"
-                f"Stop: {fmt_price(stop)} | Alvo1: {fmt_price(alvo_1)} | Alvo2: {fmt_price(alvo_2)}\n"
-                f"RSI15: {rsi15:.1f} | Vol: +{(v5[-1]/volmed5-1)*100:.1f}%\n"
-                f"Liquidez: {liq} (${qv/1e6:.0f}M)\n"
-                f"{now_br()}"
-            )
-            await tg(session, msg)
+        # === ALERTA SÓ COM TUDO VERDADEIRO ===
+        if cruzou_5m and hist_ok and filtro_forte:
+            if can_alert(symbol, "CRUZAMENTO_5M", COOLDOWN_SEC):
+                l5 = [float(k[3]) for k in k5]
+                stop = min(l5[i5-1], ema(c5,21)[i5]) if i5 >= 1 else ema(c5,21)[i5]
+                risco = max(preco - stop, 1e-12)
+                alvo_1 = preco + 2.5 * risco
+                alvo_2 = preco + 5.0 * risco
+
+                liq = "Alta" if qv >= 100_000_000 else "Média" if qv >= 20_000_000 else "Baixa"
+                liq_status = f"{liq} (US$ {qv/1_000_000:.1f}M)"
+
+                msg = (
+                    f"<b>CRUZAMENTO 5M + FORÇA REAL!</b>\n"
+                    f"{symbol}\n"
+                    f"MACD > 0.01: 5m 15m 30m 1h\n"
+                    f"RSI15: {rsi15:.1f}\n"
+                    f"Liquidez: {liq_status}\n\n"
+                    f"Preço: {fmt_price(preco)}\n"
+                    f"Stop: {fmt_price(stop)}\n"
+                    f"Alvo1: {fmt_price(alvo_1)} (1:2.5)\n"
+                    f"Alvo2: {fmt_price(alvo_2)} (1:5)\n"
+                    f"{now_br()}"
+                )
+                await tg(session, msg)
 
     except Exception as e:
         print(f"[ERRO] {symbol}: {e}")
@@ -202,20 +219,23 @@ async def scan_symbol(session, symbol, qv):
 async def main_loop():
     async with aiohttp.ClientSession() as session:
         pares = await get_top_usdt_symbols(session)
-        await tg(session, f"<b>{VERSION} ATIVO</b>\nCruzamento 5m FECHADO + MACD > 0.01\n{len(pares)} pares | {now_br()}")
+        await tg(session, f"<b>{VERSION} ATIVO</b>\nCruzamento 5m FECHADO + HIST > 0.01\n{len(pares)} pares\n{now_br()}")
         while True:
             try:
                 await asyncio.gather(*[scan_symbol(session, s, qv) for s, qv in pares])
                 await asyncio.sleep(30)
             except Exception as e:
-                await tg(session, f"<b>ERRO</b>: {e}\nReiniciando...")
+                await tg(session, f"<b>ERRO NO BOT</b>\n{e}\nReiniciando...\n{now_br()}")
+                print(f"[LOOP ERRO] {e}")
                 await asyncio.sleep(10)
 
 def start_bot():
     while True:
         try:
             asyncio.run(main_loop())
-        except: time.sleep(5)
+        except Exception as e:
+            print(f"[LOOP ERRO] {e}")
+            time.sleep(5)
 
 threading.Thread(target=start_bot, daemon=True).start()
 app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
