@@ -1,5 +1,5 @@
 # main_breakout_v1_render_hibrido.py
-# V4.9 – OURO CONFLUENTE TRIPLO (3m, 5m, 15m refinados + MACD completo)
+# V5.0 – OURO CONFLUENTE FINAL (filtros anti-topo aplicados em 3m, 5m e 15m)
 
 import os, asyncio, aiohttp, time
 from datetime import datetime, timedelta
@@ -11,7 +11,7 @@ BINANCE_HTTP = "https://api.binance.com"
 COOLDOWN_SEC = 15 * 60
 TOP_N = 50
 REQ_TIMEOUT = 8
-VERSION = "V4.9 - OURO CONFLUENTE TRIPLO"
+VERSION = "V5.0 - OURO CONFLUENTE FINAL"
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 CHAT_ID = os.getenv("CHAT_ID", "").strip()
@@ -127,7 +127,7 @@ async def scan_symbol(session, symbol):
 
         c3, o3, h3, l3 = [float(k[4]) for k in k3], [float(k[1]) for k in k3], [float(k[2]) for k in k3], [float(k[3]) for k in k3]
         c5, o5 = [float(k[4]) for k in k5], [float(k[1]) for k in k5]
-        c15 = [float(k[4]) for k in k15]
+        c15, o15 = [float(k[4]) for k in k15], [float(k[1]) for k in k15]
         v3, v5, v15 = [float(k[5]) for k in k3], [float(k[5]) for k in k5], [float(k[5]) for k in k15]
         i3, i5, i15 = len(c3)-1, len(c5)-1, len(c15)-1
 
@@ -139,15 +139,17 @@ async def scan_symbol(session, symbol):
         rsi3, rsi5, rsi15 = calc_rsi(c3, 14)[i3], calc_rsi(c5, 14)[i5], calc_rsi(c15, 14)[i15]
         volmed3, volmed5, volmed15 = sum(v3[-10:])/10, sum(v5[-10:])/10, sum(v15[-10:])/10
 
-        # 3M – Pré-Ignição (volume + confirmação 5m)
+        # 3M – Pré-Ignição
         if (
             ema9_3 > ema20_3
             and rsi3 > 62
             and v3[i3] > 1.3 * volmed3
-            and v3[i3] > v3[i3-1] > v3[i3-2]
+            and v3[i3] > v3[i3-1]
             and c3[i3] > o3[i3]
             and ema9_5 > ema20_5 and rsi5 > 55
         ):
+            # ANTI-TOPO
+            if not (rsi3 < 80 and (c3[i3]/ema(c3,20)[i3]) < 1.04 and rsi3 > calc_rsi(c3[:-1],14)[-1] and c3[i3] > o3[i3]): return
             if can_alert(symbol, "3m", 15*60):
                 bola = rsi_bolinha(rsi3)
                 msg = (
@@ -158,20 +160,21 @@ async def scan_symbol(session, symbol):
                 )
                 await tg(session, msg)
 
-        # 5M – Ignição Confirmada (duplo candle + volume)
+        # 5M – Ignição Confirmada
         if (
             ema9_5 > ema20_5
             and ema(c5,9)[i5-1] > ema(c5,20)[i5-1]
             and rsi5 > 56
             and v5[i5] > 1.2 * volmed5
         ):
+            # ANTI-TOPO
+            if not (rsi5 < 80 and (c5[i5]/ema(c5,20)[i5]) < 1.04 and rsi5 > calc_rsi(c5[:-1],14)[-1] and c5[i5] > o5[i5]): return
             if can_alert(symbol, "5m", 15*60):
                 bola = rsi_bolinha(rsi5)
-                mult = v5[i5] / volmed5
                 msg = (
                     f"{bola} <b>[5m] Ignição Confirmada</b>\n"
                     f"⏰ {now_br()} | {symbol}\n"
-                    f"📊 RSI: {rsi5:.1f} | VOL: {mult:.1f}x\n"
+                    f"📊 RSI: {rsi5:.1f} | VOL: +{((v5[i5]/volmed5)-1)*100:.0f}%\n"
                     f"🔗 https://www.binance.com/pt-BR/trade/{symbol}?type=spot"
                 )
                 await tg(session, msg)
@@ -182,6 +185,8 @@ async def scan_symbol(session, symbol):
             and rsi15 > 60
             and v15[i15] > volmed15
         ):
+            # ANTI-TOPO
+            if not (rsi15 < 80 and (c15[i15]/ema(c15,20)[i15]) < 1.04 and rsi15 > calc_rsi(c15[:-1],14)[-1] and c15[i15] > o15[i15]): return
             if can_alert(symbol, "15m", 15*60):
                 bola = rsi_bolinha(rsi15)
                 msg = (
@@ -202,12 +207,7 @@ async def scan_symbol(session, symbol):
                 alvo_1 = preco + 2.5 * risco
                 alvo_2 = preco + 5.0 * risco
                 tp_parcial = preco + risco
-
-                if rsi15 >= 70: prob = 90
-                elif rsi15 >= 65: prob = 85
-                elif rsi15 >= 60: prob = 80
-                else: prob = 75
-
+                prob = 90 if rsi15 >= 70 else 85 if rsi15 >= 65 else 80 if rsi15 >= 60 else 75
                 msg = (
                     f"{bola} 💎 <b>Confluência MACD Detectada</b>\n"
                     f"⏰ {now_br()} | {symbol}\n"
