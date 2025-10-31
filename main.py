@@ -1,5 +1,5 @@
 # main_breakout_v1_render_hibrido.py
-# V5.9 – CONFLUÊNCIA 3M/5M/15M + RSI (45–65) + BLOQUEIO BF
+# V6.0 – CONFLUÊNCIA 3M/5M/15M + RSI + ALERTA DINÂMICO (com stop e alvos detalhados)
 
 import os, asyncio, aiohttp, time
 from datetime import datetime, timedelta
@@ -11,7 +11,7 @@ BINANCE_HTTP = "https://api.binance.com"
 COOLDOWN_SEC = 15 * 60
 TOP_N = 50
 REQ_TIMEOUT = 8
-VERSION = "V5.9 - CONFLUÊNCIA 3/5/15M + RSI + BLOQUEIO BF"
+VERSION = "V6.0 - CONFLUÊNCIA 3/5/15M + RSI + ALERTA DINÂMICO"
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 CHAT_ID = os.getenv("CHAT_ID", "").strip()
@@ -139,10 +139,10 @@ async def scan_symbol(session, symbol, qv):
         c3  = [float(k[4]) for k in k3]
         c5  = [float(k[4]) for k in k5]
         c15 = [float(k[4]) for k in k15]
+        l5  = [float(k[3]) for k in k5]
         v5  = [float(k[5]) for k in k5]
         i5 = len(c5) - 1
 
-        # === INDICADORES ===
         macd3 = macd(c3)
         macd5 = macd(c5)
         macd15 = macd(c15)
@@ -154,30 +154,34 @@ async def scan_symbol(session, symbol, qv):
         hist15_green = macd15["hist"][-1] > 0
         rsi_ok = 45 <= rsi5 <= 65
 
-        # === CONDIÇÃO FINAL ===
         if hist3_green and hist5_green and hist15_green and cruzou and rsi_ok:
             if can_alert(symbol, "CONFLUENCIA_3_5_15", COOLDOWN_SEC):
                 preco = c5[-1]
-                stop = min(float(k5[-2][3]), ema(c5, 21)[i5])
-                risco = max(preco - stop, 1e-12)
+                stop = min(l5[i5-1], ema(c5,21)[i5])
+                risco = preco - stop
                 alvo_1 = preco + 2.5 * risco
                 alvo_2 = preco + 5.0 * risco
                 tp_parcial = preco + risco
 
-                liq = "Alta" if qv >= 100_000_000 else "Média" if qv >= 20_000_000 else "Baixa"
+                pct_stop = (risco/preco)*100
+                pct_alvo1 = ((alvo_1/preco)-1)*100
+                pct_alvo2 = ((alvo_2/preco)-1)*100
+
+                liq = "💎 Alta" if qv >= 100_000_000 else "⚡ Média" if qv >= 20_000_000 else "⚠️ Baixa"
 
                 msg = (
-                    f"<b>CONFLUÊNCIA 3M/5M/15M</b>\n"
+                    f"📈 <b>CONFLUÊNCIA 3M/5M/15M</b>\n"
                     f"{symbol}\n"
-                    f"MACD 3m✅ 5m✅ 15m✅\n"
+                    f"MACD: 3m✅ 5m✅ 15m✅\n"
                     f"RSI5: {rsi5:.1f}\n"
                     f"Liquidez: {liq}\n\n"
-                    f"Preço: {fmt_price(preco)}\n"
-                    f"Stop: {fmt_price(stop)}\n"
-                    f"Alvo1: {fmt_price(alvo_1)} (1:2.5)\n"
-                    f"Alvo2: {fmt_price(alvo_2)} (1:5)\n"
-                    f"Parcial: {fmt_price(tp_parcial)} (1:1)\n"
-                    f"{now_br()}"
+                    f"💰 Preço atual: <b>{fmt_price(preco)}</b>\n"
+                    f"🛡️ Stop: <code>{fmt_price(stop)}</code> (-{pct_stop:.2f}%)\n"
+                    f"🎯 Alvo 1 (1:2.5): <code>{fmt_price(alvo_1)}</code> (+{pct_alvo1:.2f}%)\n"
+                    f"🎯 Alvo 2 (1:5): <code>{fmt_price(alvo_2)}</code> (+{pct_alvo2:.2f}%)\n"
+                    f"💫 Parcial (1:1): <code>{fmt_price(tp_parcial)}</code>\n\n"
+                    f"⏰ {now_br()}\n"
+                    f"──────────────────────────────"
                 )
                 await tg(session, msg)
 
