@@ -166,9 +166,17 @@ async def scan_symbol(session, symbol, qv):
         hist_ok = (macd3["hist"][-1] > 0 and macd5["hist"][-1] > 0 and
                    macd15["hist"][-1] > 0 and macd30["hist"][-1] > 0 and macd1h["hist"][-1] > 0)
 
-        if cond_ema and 45 <= rsi15 <= 68 and hist_ok:
+        # --- FILTRO EXTRA: SÓ ALERTA NO INÍCIO DO MOVIMENTO ---
+        preco = c5[-1]
+        ema20_1h = ema(c1h, 20)[i1h] if len(c1h) > 20 else c1h[-1]
+        filtro_forte = (
+            preco > ema20_1h and
+            48 <= rsi15 <= 65 and
+            v5[-1] > volmed5 * 1.1
+        )
+
+        if cond_ema and 45 <= rsi15 <= 68 and hist_ok and filtro_forte:
             if can_alert(symbol, "CONFLUENCIA_TOTAL", 15*60):
-                preco = c5[-1]
                 # stop/alvos (mantidos)
                 l5 = [float(k[3]) for k in k5]
                 stop = min(l5[i5-1], ema(c5,21)[i5]) if i5 >= 1 else ema(c5,21)[i5]
