@@ -1,5 +1,5 @@
 # main_breakout_v1_render_hibrido.py
-# V6.1 – ALERTA SIMPLES: CRUZAMENTO 3M + RSI 45–65
+# V6.2 – CONFLUÊNCIA SIMPLES (3m MACD, 5m CRUZAMENTO + MACD, 15m MACD)
 
 import os, asyncio, aiohttp, time
 from datetime import datetime, timedelta
@@ -11,7 +11,7 @@ BINANCE_HTTP = "https://api.binance.com"
 COOLDOWN_SEC = 10 * 60  # 10 minutos
 TOP_N = 50
 REQ_TIMEOUT = 8
-VERSION = "V6.1 - ALERTA 3M (EMA9>EMA20 + RSI45–65)"
+VERSION = "V6.2 - CONFLUÊNCIA SIMPLES (3m/5m/15m)"
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 CHAT_ID = os.getenv("CHAT_ID", "").strip()
@@ -20,7 +20,7 @@ CHAT_ID = os.getenv("CHAT_ID", "").strip()
 app = Flask(__name__)
 @app.route("/")
 def home():
-    return f"{VERSION} | Alerta 3m | 50 pares", 200
+    return f"{VERSION} | MACD 3m+15m e Cruzamento 5m | 50 pares", 200
 
 # ---------------- UTILS ----------------
 def now_br():
@@ -49,27 +49,16 @@ def ema(seq, span):
         out.append(e)
     return out
 
-def calc_rsi(seq, period=14):
-    if len(seq) < period + 1: return [50.0] * len(seq)
-    gains, losses = [], []
-    for i in range(1, len(seq)):
-        diff = seq[i] - seq[i-1]
-        gains.append(max(diff, 0))
-        losses.append(abs(min(diff, 0)))
-    rsi = []
-    avg_gain = sum(gains[:period]) / period
-    avg_loss = sum(losses[:period]) / period
-    rs = avg_gain / (avg_loss + 1e-12)
-    rsi.append(100 - (100 / (1 + rs)))
-    for i in range(period, len(seq) - 1):
-        diff = seq[i] - seq[i-1]
-        gain = max(diff, 0)
-        loss = abs(min(diff, 0))
-        avg_gain = (avg_gain * (period - 1) + gain) / period
-        avg_loss = (avg_loss * (period - 1) + loss) / period
-        rs = avg_gain / (avg_loss + 1e-12)
-        rsi.append(100 - (100 / (1 + rs)))
-    return [50.0] * (len(seq) - len(rsi)) + rsi
+def macd(seq, fast=12, slow=26, signal=9):
+    if len(seq) < slow + signal + 1:
+        n = len(seq)
+        return {"macd": [0.0]*n, "signal": [0.0]*n, "hist": [0.0]*n}
+    ema_fast = ema(seq, fast)
+    ema_slow = ema(seq, slow)
+    macd_line = [f - s for f, s in zip(ema_fast, ema_slow)]
+    signal_line = ema(macd_line, signal)
+    hist = [m_ - s_ for m_, s_ in zip(macd_line, signal_line)]
+    return {"macd": macd_line, "signal": signal_line, "hist": hist}
 
 def cruzou_de_baixo(c, p9=9, p20=20):
     if len(c) < p20 + 2: return False
@@ -116,25 +105,42 @@ def can_alert(symbol, tipo, cooldown_sec):
         return True
     return False
 
-# ---------------- WORKER (ALERTA SIMPLES 3M) ----------------
+# ---------------- WORKER (ALERTA NOVO) ----------------
 async def scan_symbol(session, symbol, qv):
     try:
-        k3 = await get_klines(session, symbol, "3m", 100)
-        if not k3: return
-        c3 = [float(k[4]) for k in k3]
-        i3 = len(c3) - 1
+        k3  = await get_klines(session, symbol, "3m", 100)
+        k5  = await get_klines(session, symbol, "5m", 100)
+        k15 = await get_klines(session, symbol, "15m", 100)
+        if not (len(k3) and len(k5) and len(k15)): return
 
-        cruzou = cruzou_de_baixo(c3)
-        rsi = calc_rsi(c3, 14)[i3]
+        c3  = [float(k[4]) for k in k3]
+        c5  = [float(k[4]) for k in k5]
+        c15 = [float(k[4]) for k in k15]
 
-        if cruzou and 45 <= rsi <= 65:
-            if can_alert(symbol, "ALERTA_3M", COOLDOWN_SEC):
-                preco = c3[-1]
+        i3, i5, i15 = len(c3)-1, len(c5)-1, len(c15)-1
+
+        # === MACD ===
+        macd3 = macd(c3)
+        macd5 = macd(c5)
+        macd15 = macd(c15)
+
+        macd_3_ok = macd3["hist"][-1] > 0
+        macd_5_ok = macd5["hist"][-1] > 0
+        macd_15_ok = macd15["hist"][-1] > 0
+
+        # === CRUZAMENTO 5M ===
+        cruzou_5m = cruzou_de_baixo(c5)
+
+        # === CONDIÇÃO FINAL ===
+        if macd_3_ok and macd_5_ok and macd_15_ok and cruzou_5m:
+            if can_alert(symbol, "CONFLUENCIA_SIMPLES", COOLDOWN_SEC):
+                preco = c5[-1]
                 msg = (
-                    f"📈 <b>Alerta 3M</b>\n"
+                    f"💎 <b>CONFLUÊNCIA SIMPLES</b>\n"
                     f"{symbol}\n"
-                    f"EMA9 cruzou acima da EMA20\n"
-                    f"RSI: {rsi:.1f}\n"
+                    f"3m: MACD ✅\n"
+                    f"5m: EMA9>EMA20 ✅ + MACD ✅\n"
+                    f"15m: MACD ✅\n"
                     f"Preço: {fmt_price(preco)}\n"
                     f"{now_br()}"
                 )
@@ -146,7 +152,7 @@ async def scan_symbol(session, symbol, qv):
 async def main_loop():
     async with aiohttp.ClientSession() as session:
         pares = await get_top_usdt_symbols(session)
-        await tg(session, f"<b>{VERSION} ATIVO</b>\nAlerta 3m (EMA9>EMA20 + RSI45–65)\n{len(pares)} pares\n{now_br()}\n──────────────────────────────")
+        await tg(session, f"<b>{VERSION} ATIVO</b>\n3m MACD + 5m cruzamento + 15m MACD\n{len(pares)} pares\n{now_br()}\n──────────────────────────────")
         while True:
             try:
                 await asyncio.gather(*[scan_symbol(session, s, qv) for s, qv in pares])
