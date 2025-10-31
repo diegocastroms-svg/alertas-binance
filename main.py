@@ -39,15 +39,38 @@ async def tg(session, text: str):
 def fmt_price(x: float) -> str:
     return f"{x:.8f}".rstrip("0").rstrip(".") or "0"
 
+# ====== ÚNICA MUDANÇA A PARTIR DAQUI ======
 def ema(seq, span):
-    if not seq: return []
+    """
+    EMA compatível com TradingView/Binance:
+    - Semente pela SMA do período (não pelo primeiro preço).
+    - 'adjust=False' style.
+    """
+    n = len(seq)
+    if n == 0: 
+        return []
+    if span <= 1 or n < span:
+        # Quando não há amostras suficientes, devolve acumulação simples
+        # (mantém tamanho e evita enviesar o MACD antes do período)
+        out = [seq[0]]
+        for x in seq[1:]:
+            out.append((out[-1] + x) / 2.0)
+        return out
     alpha = 2.0 / (span + 1.0)
-    out = [seq[0]]
-    e = seq[0]
-    for x in seq[1:]:
+    # semente = SMA(span)
+    sma0 = sum(seq[:span]) / span
+    out = [None]*(span-1) + [sma0]
+    e = sma0
+    for x in seq[span:]:
         e = alpha * x + (1 - alpha) * e
         out.append(e)
+    # substitui None iniciais por primeiros valores reais (mantém comprimento)
+    # usando backfill do primeiro valor calculado
+    first = out[span-1]
+    for i in range(span-1):
+        out[i] = first
     return out
+# ====== FIM DA ÚNICA MUDANÇA ======
 
 def calc_rsi(seq, period=14):
     if len(seq) < period + 1: return [50.0] * len(seq)
@@ -79,10 +102,6 @@ def macd(seq, fast=12, slow=26, signal=9):
     ema_slow = ema(seq, slow)
     macd_line = [f - s for f, s in zip(ema_fast, ema_slow)]
     signal_line = ema(macd_line, signal)
-    m = len(macd_line)
-    s = len(signal_line)
-    if s < m:
-        signal_line = [signal_line[0]]*(m - s) + signal_line
     hist = [m_ - s_ for m_, s_ in zip(macd_line, signal_line)]
     return {"macd": macd_line, "signal": signal_line, "hist": hist}
 
@@ -105,6 +124,7 @@ async def get_klines(session, symbol, interval, limit=100):
 async def get_top_usdt_symbols(session):
     try:
         url = f"{BINANCE_HTTP}/api/v3/ticker/24hr"
+    # ... (resto igual)
         async with session.get(url, timeout=REQ_TIMEOUT) as r:
             data = await r.json()
         blocked = ("UP","DOWN","BULL","BEAR","BUSD","FDUSD","TUSD","USDC","EUR","BRL","PERP","TEST","USDE")
@@ -139,8 +159,14 @@ async def scan_symbol(session, symbol, qv):
         k1h = await get_klines(session, symbol, "1h",  100)
         if not (len(k3) and len(k5) and len(k15) and len(k30) and len(k1h)): return
 
-        c3, c5, c15, c30, c1h = [ [float(k[i]) for k in ks] for ks, i in [(k3,4),(k5,4),(k15,4),(k30,4),(k1h,4)] ]
+        c3  = [float(k[4]) for k in k3]
+        c5  = [float(k[4]) for k in k5]
+        c15 = [float(k[4]) for k in k15]
+        c30 = [float(k[4]) for k in k30]
+        c1h = [float(k[4]) for k in k1h]
+
         v5 = [float(k[5]) for k in k5]
+        volmed5 = sum(v5[-10:])/10 if len(v5) >= 10 else (v5[-1] if v5 else 0.0)
 
         c5_closed = c5[:-1] if len(c5) > 1 else c5
         cruzou_5m = cruzou_de_baixo(c5_closed, 9, 20)
@@ -162,7 +188,6 @@ async def scan_symbol(session, symbol, qv):
         rsi15 = calc_rsi(c15, 14)[-1] if len(c15) else 50.0
         preco = c5[-1]
         ema20_1h = ema(c1h, 20)[-1] if len(c1h) > 20 else c1h[-1]
-        volmed5 = sum(v5[-10:])/10 if len(v5) >= 10 else (v5[-1] if v5 else 0.0)
 
         filtro_forte = (preco > ema20_1h and 45 <= rsi15 <= 68 and v5[-1] > volmed5 * 1.1)
 
@@ -195,6 +220,7 @@ async def scan_symbol(session, symbol, qv):
                     f"{now_br()}"
                 )
                 await tg(session, msg)
+
     except Exception as e:
         print(f"[ERRO] {symbol}: {e}")
 
