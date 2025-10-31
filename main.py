@@ -1,5 +1,5 @@
 # main_breakout_v1_render_hibrido.py
-# V5.4 – OURO CONFLUÊNCIA TOTAL + LIQUIDEZ (sem link Binance)
+# V5.4 – OURO CONFLUÊNCIA TOTAL + LIQUIDEZ (com 1h + MACD hist verde em todos)
 
 import os, asyncio, aiohttp, time
 from datetime import datetime, timedelta
@@ -71,6 +71,24 @@ def calc_rsi(seq, period=14):
         rsi.append(100 - (100 / (1 + rs)))
     return [50.0] * (len(seq) - len(rsi)) + rsi
 
+# >>>>>>>>>>>>>>>>>>>>  NOVO: MACD (para usar histograma)  <<<<<<<<<<<<<<<<<<<<
+def macd(seq, fast=12, slow=26, signal=9):
+    if len(seq) < slow + signal + 1:
+        n = len(seq)
+        return {"macd": [0.0]*n, "signal": [0.0]*n, "hist": [0.0]*n}
+    ema_fast = ema(seq, fast)
+    ema_slow = ema(seq, slow)
+    macd_line = [f - s for f, s in zip(ema_fast, ema_slow)]
+    signal_line = ema(macd_line, signal)
+    # alinhar tamanhos
+    m = len(macd_line)
+    s = len(signal_line)
+    if s < m:
+        signal_line = [signal_line[0]]*(m - s) + signal_line
+    hist = [m_ - s_ for m_, s_ in zip(macd_line, signal_line)]
+    return {"macd": macd_line, "signal": signal_line, "hist": hist}
+# >>>>>>>>>>>>>>>>>>>>  FIM MACD  <<<<<<<<<<<<<<<<<<<<
+
 # ---------------- BINANCE ----------------
 async def get_klines(session, symbol, interval, limit=100):
     url = f"{BINANCE_HTTP}/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
@@ -95,7 +113,7 @@ async def get_top_usdt_symbols(session):
             qv = float(d.get("quoteVolume", 0) or 0)
             pares.append((s, qv))
         pares.sort(key=lambda x: x[1], reverse=True)
-        return pares[:TOP_N]  # agora retorna também o volume
+        return pares[:TOP_N]  # retorna (symbol, quoteVolume)
     except:
         return []
 
@@ -113,38 +131,53 @@ def can_alert(symbol, tipo, cooldown_sec):
 # ---------------- WORKER ----------------
 async def scan_symbol(session, symbol, qv):
     try:
-        k3 = await get_klines(session, symbol, "3m", 100)
-        k5 = await get_klines(session, symbol, "5m", 100)
+        k3  = await get_klines(session, symbol, "3m",  100)
+        k5  = await get_klines(session, symbol, "5m",  100)
         k15 = await get_klines(session, symbol, "15m", 100)
         k30 = await get_klines(session, symbol, "30m", 100)
-        if not (len(k3) and len(k5) and len(k15) and len(k30)): return
+        k1h = await get_klines(session, symbol, "1h",  100)   # <<< NOVO 1h
+        if not (len(k3) and len(k5) and len(k15) and len(k30) and len(k1h)): return
 
-        c3 = [float(k[4]) for k in k3]
-        c5 = [float(k[4]) for k in k5]
+        c3  = [float(k[4]) for k in k3]
+        c5  = [float(k[4]) for k in k5]
         c15 = [float(k[4]) for k in k15]
         c30 = [float(k[4]) for k in k30]
-        v5 = [float(k[5]) for k in k5]
-        i3, i5, i15, i30 = len(c3)-1, len(c5)-1, len(c15)-1, len(c30)-1
-        volmed5 = sum(v5[-10:])/10
+        c1h = [float(k[4]) for k in k1h]  # <<< NOVO 1h
 
-        # 💎 CONFLUÊNCIA TOTAL MACD (RSI 15m 45–68 + Liquidez)
+        v5 = [float(k[5]) for k in k5]
+        i3, i5, i15, i30, i1h = len(c3)-1, len(c5)-1, len(c15)-1, len(c30)-1, len(c1h)-1
+        volmed5 = sum(v5[-10:])/10 if len(v5) >= 10 else (v5[-1] if v5 else 0.0)
+
+        # 💎 CONFLUÊNCIA TOTAL MACD (RSI 15m 45–68 + Liquidez) + HIST VERDE EM TODOS + 1h
         rsi15 = calc_rsi(c15,14)[i15]
-        if (
-            ema(c3,9)[i3] > ema(c3,20)[i3]
-            and ema(c5,9)[i5] > ema(c5,20)[i5]
-            and ema(c15,9)[i15] > ema(c15,20)[i15]
-            and ema(c30,9)[i30] > ema(c30,20)[i30]
-            and 45 <= rsi15 <= 68
-        ):
+
+        # Condições originais de médias 9/20 em 3m,5m,15m,30m (mantidas)
+        cond_ema = (
+            ema(c3,9)[i3]  > ema(c3,20)[i3] and
+            ema(c5,9)[i5]  > ema(c5,20)[i5] and
+            ema(c15,9)[i15] > ema(c15,20)[i15] and
+            ema(c30,9)[i30] > ema(c30,20)[i30]
+        )
+
+        # NOVO: MACD hist verde em 3m, 5m, 15m, 30m e 1h
+        macd3  = macd(c3);   macd5  = macd(c5)
+        macd15 = macd(c15);  macd30 = macd(c30)
+        macd1h = macd(c1h)
+        hist_ok = (macd3["hist"][-1] > 0 and macd5["hist"][-1] > 0 and
+                   macd15["hist"][-1] > 0 and macd30["hist"][-1] > 0 and macd1h["hist"][-1] > 0)
+
+        if cond_ema and 45 <= rsi15 <= 68 and hist_ok:
             if can_alert(symbol, "CONFLUENCIA_TOTAL", 15*60):
                 preco = c5[-1]
-                stop = min(c5[-3], ema(c5,21)[-1])
-                risco = preco - stop
+                # stop/alvos (mantidos)
+                l5 = [float(k[3]) for k in k5]
+                stop = min(l5[i5-1], ema(c5,21)[i5]) if i5 >= 1 else ema(c5,21)[i5]
+                risco = max(preco - stop, 1e-12)
                 alvo_1 = preco + 2.5 * risco
                 alvo_2 = preco + 5.0 * risco
                 tp_parcial = preco + risco
 
-                # Classificação de liquidez
+                # Classificação de liquidez (mantida)
                 if qv >= 100_000_000:
                     liq_status = f"💎 Alta (US$ {qv/1_000_000:.1f}M)"
                 elif qv >= 20_000_000:
@@ -152,10 +185,13 @@ async def scan_symbol(session, symbol, qv):
                 else:
                     liq_status = f"⚠️ Baixa (US$ {qv/1_000_000:.1f}M)"
 
+                # Selo MACD por timeframe
+                macd_checks = f"MACD: 3m✅ 5m✅ 15m✅ 30m✅ 1h✅"
+
                 msg = (
                     f"💎 <b>Confluência Total MACD</b>\n"
                     f"{symbol}\n"
-                    f"3m✅ 5m✅ 15m✅ 30m✅\n"
+                    f"{macd_checks}\n"
                     f"RSI15: {rsi15:.1f}\n"
                     f"Liquidez: {liq_status}\n\n"
                     f"💰 Preço: {fmt_price(preco)}\n"
