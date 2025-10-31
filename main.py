@@ -1,5 +1,5 @@
 # main_breakout_v1_render_hibrido.py
-# V5.2 – OURO CONFLUÊNCIA TOTAL (RSI 45–68)
+# V5.3 – OURO CONFLUÊNCIA TOTAL (somente alerta principal ativo)
 
 import os, asyncio, aiohttp, time
 from datetime import datetime, timedelta
@@ -11,7 +11,7 @@ BINANCE_HTTP = "https://api.binance.com"
 COOLDOWN_SEC = 15 * 60
 TOP_N = 50
 REQ_TIMEOUT = 8
-VERSION = "V5.2 - OURO CONFLUÊNCIA TOTAL"
+VERSION = "V5.3 - OURO CONFLUÊNCIA TOTAL"
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 CHAT_ID = os.getenv("CHAT_ID", "").strip()
@@ -123,59 +123,9 @@ async def scan_symbol(session, symbol):
         c5 = [float(k[4]) for k in k5]
         c15 = [float(k[4]) for k in k15]
         c30 = [float(k[4]) for k in k30]
-        o3 = [float(k[1]) for k in k3]
-        o5 = [float(k[1]) for k in k5]
-        o15 = [float(k[1]) for k in k15]
-        v3 = [float(k[5]) for k in k3]
         v5 = [float(k[5]) for k in k5]
-        v15 = [float(k[5]) for k in k15]
-        v30 = [float(k[5]) for k in k30]
-
         i3, i5, i15, i30 = len(c3)-1, len(c5)-1, len(c15)-1, len(c30)-1
-        volmed3, volmed5, volmed15 = sum(v3[-10:])/10, sum(v5[-10:])/10, sum(v15[-10:])/10
-
-        # 3M – Cruzamento 9/20
-        if (
-            ema(c3,9)[i3-1] < ema(c3,20)[i3-1]
-            and ema(c3,9)[i3] > ema(c3,20)[i3]
-            and v3[i3] > 1.3 * volmed3
-            and c3[i3] > o3[i3]
-        ):
-            if can_alert(symbol, "3m_cruzamento", 15*60):
-                msg = (
-                    f"⚡ <b>[3m] Cruzamento 9/20 Detectado</b>\n"
-                    f"{symbol} | RSI e Volume crescentes\n"
-                    f"⏰ {now_br()}\n"
-                    f"🔗 https://www.binance.com/pt-BR/trade/{symbol}?type=spot"
-                )
-                await tg(session, msg)
-
-        # 5M – Cruzamento 20/50
-        if (
-            ema(c5,20)[i5-1] < ema(c5,50)[i5-1]
-            and ema(c5,20)[i5] > ema(c5,50)[i5]
-            and v5[i5] > 1.3 * volmed5
-            and c5[i5] > o5[i5]
-        ):
-            if can_alert(symbol, "5m_cruzamento", 15*60):
-                msg = (
-                    f"🟢 <b>[5m] Cruzamento 20/50 Confirmado</b>\n"
-                    f"{symbol} | Tendência curta virando pra alta\n"
-                    f"⏰ {now_br()}\n"
-                    f"🔗 https://www.binance.com/pt-BR/trade/{symbol}?type=spot"
-                )
-                await tg(session, msg)
-
-        # 15M – Continuação (EMA9>20>50)
-        if ema(c15,9)[i15] > ema(c15,20)[i15] > ema(c15,50)[i15]:
-            if can_alert(symbol, "15m_tendencia", 15*60):
-                msg = (
-                    f"📈 <b>[15m] Continuação de Alta</b>\n"
-                    f"{symbol} | Médias alinhadas 9>20>50\n"
-                    f"⏰ {now_br()}\n"
-                    f"🔗 https://www.binance.com/pt-BR/trade/{symbol}?type=spot"
-                )
-                await tg(session, msg)
+        volmed5 = sum(v5[-10:])/10
 
         # 💎 CONFLUÊNCIA TOTAL MACD (RSI 15m 45–68)
         rsi15 = calc_rsi(c15,14)[i15]
@@ -215,7 +165,7 @@ async def scan_symbol(session, symbol):
 async def main_loop():
     async with aiohttp.ClientSession() as session:
         symbols = await get_top_usdt_symbols(session)
-        await tg(session, f"<b>{VERSION} ATIVO</b>\n3m | 5m | 15m | 30m | 1h | {len(symbols)} pares\n{now_br()}\n──────────────────────────────")
+        await tg(session, f"<b>{VERSION} ATIVO</b>\nApenas alerta de Confluência Total MACD\n{len(symbols)} pares\n{now_br()}\n──────────────────────────────")
         while True:
             await asyncio.gather(*[scan_symbol(session, s) for s in symbols])
             await asyncio.sleep(15)
