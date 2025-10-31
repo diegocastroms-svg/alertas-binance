@@ -1,5 +1,5 @@
 # main_breakout_v1_render_hibrido.py
-# V5.6 – CRUZAMENTO 5M + CONFLUÊNCIA AJUSTADA (HIST CRESCENTE 30m/1h)
+# V5.8 – CRUZAMENTO 5M (FECHADO) + CONFLUÊNCIA DINÂMICA (3m/15m/30m/1h em tempo real)
 
 import os, asyncio, aiohttp, time
 from datetime import datetime, timedelta
@@ -11,7 +11,7 @@ BINANCE_HTTP = "https://api.binance.com"
 COOLDOWN_SEC = 15 * 60
 TOP_N = 50
 REQ_TIMEOUT = 8
-VERSION = "V5.6 - CRUZAMENTO 5M + CONFLUÊNCIA AJUSTADA"
+VERSION = "V5.8 - CRUZAMENTO 5M FECHADO + CONFLUÊNCIA DINÂMICA"
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 CHAT_ID = os.getenv("CHAT_ID", "").strip()
@@ -20,7 +20,7 @@ CHAT_ID = os.getenv("CHAT_ID", "").strip()
 app = Flask(__name__)
 @app.route("/")
 def home():
-    return f"{VERSION} | CRUZAMENTO 5M + HIST 30/1H | 50 pares", 200
+    return f"{VERSION} | CRUZAMENTO 5m FECHADO + MACD dinâmico (3m/15m/30m/1h) | 50 pares", 200
 
 # ---------------- UTILS ----------------
 def now_br():
@@ -86,11 +86,14 @@ def macd(seq, fast=12, slow=26, signal=9):
     hist = [m_ - s_ for m_, s_ in zip(macd_line, signal_line)]
     return {"macd": macd_line, "signal": signal_line, "hist": hist}
 
+# ---------------- FUNÇÃO DE CRUZAMENTO (SÓ NO 5M FECHADO) ----------------
 def cruzou_de_baixo(c, p9=9, p20=20):
-    if len(c) < p20 + 1: return False
+    # 'c' deve ser a série FECHADA (sem o último candle em formação)
+    if len(c) < p20 + 2:
+        return False
     e9 = ema(c, p9)
     e20 = ema(c, p20)
-    return e9[-1] > e20[-1] and e9[-2] <= e20[-2]
+    return e9[-2] <= e20[-2] and e9[-1] > e20[-1]
 
 # ---------------- BINANCE ----------------
 async def get_klines(session, symbol, interval, limit=100):
@@ -107,7 +110,7 @@ async def get_top_usdt_symbols(session):
         url = f"{BINANCE_HTTP}/api/v3/ticker/24hr"
         async with session.get(url, timeout=REQ_TIMEOUT) as r:
             data = await r.json()
-        blocked = ("UP","DOWN","BULL","BEAR","BUSD","FDUSD","TUSD","USDC","EUR","BRL","PERP","TEST", "USDE")
+        blocked = ("UP","DOWN","BULL","BEAR","BUSD","FDUSD","TUSD","USDC","EUR","BRL","PERP","TEST","USDE")
         pares = []
         for d in data:
             s = d.get("symbol", "")
@@ -131,7 +134,7 @@ def can_alert(symbol, tipo, cooldown_sec):
         return True
     return False
 
-# ---------------- WORKER ----------------
+# ---------------- WORKER (5m FECHADO + DEMAIS DINÂMICOS) ----------------
 async def scan_symbol(session, symbol, qv):
     try:
         k3  = await get_klines(session, symbol, "3m",  100)
@@ -141,38 +144,55 @@ async def scan_symbol(session, symbol, qv):
         k1h = await get_klines(session, symbol, "1h",  100)
         if not (len(k3) and len(k5) and len(k15) and len(k30) and len(k1h)): return
 
-        c3, c5, c15, c30, c1h = [list(map(lambda k: float(k[4]), kl)) for kl in [k3, k5, k15, k30, k1h]]
+        c3  = [float(k[4]) for k in k3]
+        c5  = [float(k[4]) for k in k5]
+        c15 = [float(k[4]) for k in k15]
+        c30 = [float(k[4]) for k in k30]
+        c1h = [float(k[4]) for k in k1h]
+
         v5 = [float(k[5]) for k in k5]
         i3, i5, i15, i30, i1h = len(c3)-1, len(c5)-1, len(c15)-1, len(c30)-1, len(c1h)-1
         volmed5 = sum(v5[-10:])/10 if len(v5) >= 10 else (v5[-1] if v5 else 0.0)
 
-        cruzou_5m = cruzou_de_baixo(c5, 9, 20)
+        # === 5m FECHADO para cruzamento e MACD ===
+        c5_closed = c5[:-1] if len(c5) > 1 else c5
+        cruzou_5m = cruzou_de_baixo(c5_closed, 9, 20)
 
-        # === NOVA LÓGICA: EMA até 15m, histograma crescente 30m/1h ===
-        tendencia_ok = (
-            ema(c3,9)[i3] > ema(c3,20)[i3] and
-            ema(c15,9)[i15] > ema(c15,20)[i15]
-        )
+        macd5_closed = macd(c5_closed)
+        h5c = macd5_closed["hist"]
+        h5_green = (len(h5c) >= 1 and round(h5c[-1], 3) > 0)  # 5m precisa estar VERDE (fechado)
 
-        macd3, macd5, macd15, macd30, macd1h = macd(c3), macd(c5), macd(c15), macd(c30), macd(c1h)
-        hist_ok = (
-            macd3["hist"][-1] > 0 and
-            macd5["hist"][-1] > 0 and
-            macd15["hist"][-1] > 0 and
-            macd30["hist"][-1] > 0 and macd30["hist"][-1] > macd30["hist"][-2] and
-            macd1h["hist"][-1] > 0 and macd1h["hist"][-1] > macd1h["hist"][-2]
-        )
+        # === MACD DINÂMICO para 3m/15m/30m/1h (candle atual) ===
+        macd3   = macd(c3)
+        macd15  = macd(c15)
+        macd30  = macd(c30)
+        macd1h  = macd(c1h)
 
-        rsi15 = calc_rsi(c15,14)[i15]
+        h3, h15, h30, h1h = macd3["hist"], macd15["hist"], macd30["hist"], macd1h["hist"]
+        def rounded(v): return round(v, 3)
+
+        # 3m e 15m: só precisam estar VERDES (dinâmicos)
+        h3_green  = (len(h3)  >= 1 and rounded(h3[-1])  > 0)
+        h15_green = (len(h15) >= 1 and rounded(h15[-1]) > 0)
+
+        # 30m e 1h: VERDES e CRESCENTES (dinâmicos)
+        h30_ok = (len(h30) >= 2 and rounded(h30[-1]) > 0 and rounded(h30[-1]) >= rounded(h30[-2]))
+        h1h_ok = (len(h1h) >= 2 and rounded(h1h[-1]) > 0 and rounded(h1h[-1]) >= rounded(h1h[-2]))
+
+        hist_ok = (h5_green and h3_green and h15_green and h30_ok and h1h_ok)
+
+        # === FILTROS DE SEGURANÇA (dinâmicos) ===
+        rsi15 = calc_rsi(c15, 14)[-1] if len(c15) else 50.0
         preco = c5[-1]
-        ema20_1h = ema(c1h,20)[i1h] if len(c1h) > 20 else c1h[-1]
+        ema20_1h = ema(c1h, 20)[i1h] if len(c1h) > 20 else c1h[-1]
         filtro_forte = (
             preco > ema20_1h and
-            48 <= rsi15 <= 65 and
+            45 <= rsi15 <= 68 and
             v5[-1] > volmed5 * 1.1
         )
 
-        if cruzou_5m and tendencia_ok and hist_ok and filtro_forte and 45 <= rsi15 <= 68:
+        # === CONDIÇÃO FINAL ===
+        if cruzou_5m and hist_ok and filtro_forte:
             if can_alert(symbol, "CRUZAMENTO_5M", COOLDOWN_SEC):
                 l5 = [float(k[3]) for k in k5]
                 stop = min(l5[i5-1], ema(c5,21)[i5]) if i5 >= 1 else ema(c5,21)[i5]
@@ -188,12 +208,10 @@ async def scan_symbol(session, symbol, qv):
                 else:
                     liq_status = f"Baixa (US$ {qv/1_000_000:.1f}M)"
 
-                macd_checks = f"MACD: 3m 5m 15m 30m 1h"
-
                 msg = (
-                    f"<b>CRUZAMENTO 5M + CONFLUÊNCIA AJUSTADA!</b>\n"
+                    f"<b>CRUZAMENTO 5M + CONFLUÊNCIA!</b>\n"
                     f"{symbol}\n"
-                    f"{macd_checks}\n"
+                    f"MACD: 3m✅ 5m✅ 15m✅ 30m⬆️ 1h⬆️\n"
                     f"RSI15: {rsi15:.1f}\n"
                     f"Liquidez: {liq_status}\n\n"
                     f"Preço: {fmt_price(preco)}\n"
@@ -212,7 +230,7 @@ async def scan_symbol(session, symbol, qv):
 async def main_loop():
     async with aiohttp.ClientSession() as session:
         pares = await get_top_usdt_symbols(session)
-        await tg(session, f"<b>{VERSION} ATIVO</b>\nCruzamento 5m + Histograma 30m/1h\n{len(pares)} pares\n{now_br()}\n──────────────────────────────")
+        await tg(session, f"<b>{VERSION} ATIVO</b>\nCruzamento 5m FECHADO + Confluência dinâmica\n{len(pares)} pares\n{now_br()}\n──────────────────────────────")
         while True:
             try:
                 await asyncio.gather(*[scan_symbol(session, s, qv) for s, qv in pares])
