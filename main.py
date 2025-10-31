@@ -1,5 +1,5 @@
 # main_breakout_v1_render_hibrido.py
-# V6.2 – CRUZAMENTO 5M FECHADO + CONFLUÊNCIA COM HISTOGRAMA CONFIRMADO (2 candles)
+# V6.3 – CRUZAMENTO 5M + MACD POSITIVO (SEM HISTOGRAMA CRESCENTE)
 
 import os, asyncio, aiohttp, time
 from datetime import datetime, timedelta
@@ -11,7 +11,7 @@ BINANCE_HTTP = "https://api.binance.com"
 COOLDOWN_SEC = 15 * 60
 TOP_N = 50
 REQ_TIMEOUT = 8
-VERSION = "V6.2 - CRUZAMENTO 5M FECHADO + CONFLUÊNCIA (HISTOGRAMA 2x POSITIVO)"
+VERSION = "V6.3 - CRUZAMENTO 5M + MACD POSITIVO (SEM HIST CRESCENTE)"
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 CHAT_ID = os.getenv("CHAT_ID", "").strip()
@@ -20,7 +20,7 @@ CHAT_ID = os.getenv("CHAT_ID", "").strip()
 app = Flask(__name__)
 @app.route("/")
 def home():
-    return f"{VERSION} | Candles fechados + histograma 2x positivo | 50 pares", 200
+    return f"{VERSION} | Cruzamento 5m + MACD verde 3m/5m/15m/30m/1h | 50 pares", 200
 
 # ---------------- UTILS ----------------
 def now_br():
@@ -87,8 +87,7 @@ def macd(seq, fast=12, slow=26, signal=9):
     return {"macd": macd_line, "signal": signal_line, "hist": hist}
 
 def cruzou_de_baixo(c, p9=9, p20=20):
-    if len(c) < p20 + 2:
-        return False
+    if len(c) < p20 + 2: return False
     e9 = ema(c, p9)
     e20 = ema(c, p20)
     return e9[-2] <= e20[-2] and e9[-1] > e20[-1]
@@ -142,16 +141,14 @@ async def scan_symbol(session, symbol, qv):
         k1h = await get_klines(session, symbol, "1h", 100)
         if not (len(k3) and len(k5) and len(k15) and len(k30) and len(k1h)): return
 
-        # 🔒 usa apenas candles fechados (remove último)
-        c3  = [float(k[4]) for k in k3[:-1]]
-        c5  = [float(k[4]) for k in k5[:-1]]
-        c15 = [float(k[4]) for k in k15[:-1]]
-        c30 = [float(k[4]) for k in k30[:-1]]
-        c1h = [float(k[4]) for k in k1h[:-1]]
+        c3  = [float(k[4]) for k in k3]
+        c5  = [float(k[4]) for k in k5]
+        c15 = [float(k[4]) for k in k15]
+        c30 = [float(k[4]) for k in k30]
+        c1h = [float(k[4]) for k in k1h]
+        v5 = [float(k[5]) for k in k5]
 
-        v5 = [float(k[5]) for k in k5[:-1]]
         if len(c5) < 50: return
-
         i3, i5, i15, i30, i1h = len(c3)-1, len(c5)-1, len(c15)-1, len(c30)-1, len(c1h)-1
         volmed5 = sum(v5[-10:])/10 if len(v5) >= 10 else (v5[-1] if v5 else 0.0)
 
@@ -163,17 +160,14 @@ async def scan_symbol(session, symbol, qv):
         macd30 = macd(c30)
         macd1h = macd(c1h)
 
-        # ✅ agora exige 2 candles fechados consecutivos positivos e crescentes
-        def hist_confirmado(h):
-            return len(h) >= 3 and h[-1] > 0 and h[-2] > 0 and h[-1] > h[-2]
-
-        hist_ok = all([
-            hist_confirmado(macd3["hist"]),
-            hist_confirmado(macd5["hist"]),
-            hist_confirmado(macd15["hist"]),
-            hist_confirmado(macd30["hist"]),
-            hist_confirmado(macd1h["hist"]),
-        ])
+        # ✅ Apenas MACD positivo em todos
+        hist_ok = (
+            macd3["hist"][-1] > 0 and
+            macd5["hist"][-1] > 0 and
+            macd15["hist"][-1] > 0 and
+            macd30["hist"][-1] > 0 and
+            macd1h["hist"][-1] > 0
+        )
 
         rsi15 = calc_rsi(c15, 14)[-1] if len(c15) else 50.0
         preco = c5[-1]
@@ -191,9 +185,9 @@ async def scan_symbol(session, symbol, qv):
                 liq_status = f"Alta (US$ {qv/1_000_000:.1f}M)" if qv >= 100_000_000 else (f"Média (US$ {qv/1_000_000:.1f}M)" if qv >= 20_000_000 else f"Baixa (US$ {qv/1_000_000:.1f}M)")
 
                 msg = (
-                    f"<b>CRUZAMENTO 5M + CONFLUÊNCIA REAL!</b>\n"
+                    f"<b>CRUZAMENTO 5M + CONFLUÊNCIA!</b>\n"
                     f"{symbol}\n"
-                    f"MACD confirmado (2 velas positivas) em 3m/5m/15m/30m/1h\n"
+                    f"MACD: 3m✅ 5m✅ 15m✅ 30m✅ 1h✅\n"
                     f"RSI15: {rsi15:.1f}\n"
                     f"Liquidez: {liq_status}\n\n"
                     f"Preço: {fmt_price(preco)}\n"
@@ -212,7 +206,7 @@ async def scan_symbol(session, symbol, qv):
 async def main_loop():
     async with aiohttp.ClientSession() as session:
         pares = await get_top_usdt_symbols(session)
-        await tg(session, f"<b>{VERSION} ATIVO</b>\nCruzamento 5m FECHADO + Confluência com histograma 2x positivo\n{len(pares)} pares\n{now_br()}\n──────────────────────────────")
+        await tg(session, f"<b>{VERSION} ATIVO</b>\nCruzamento 5m + MACD verde em todos os tempos\n{len(pares)} pares\n{now_br()}\n──────────────────────────────")
         while True:
             try:
                 await asyncio.gather(*[scan_symbol(session, s, qv) for s, qv in pares])
