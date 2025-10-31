@@ -1,5 +1,5 @@
 # main_breakout_v1_render_hibrido.py
-# V5.3 – OURO CONFLUÊNCIA TOTAL (somente alerta principal ativo)
+# V5.4 – OURO CONFLUÊNCIA TOTAL + LIQUIDEZ (sem link Binance)
 
 import os, asyncio, aiohttp, time
 from datetime import datetime, timedelta
@@ -11,7 +11,7 @@ BINANCE_HTTP = "https://api.binance.com"
 COOLDOWN_SEC = 15 * 60
 TOP_N = 50
 REQ_TIMEOUT = 8
-VERSION = "V5.3 - OURO CONFLUÊNCIA TOTAL"
+VERSION = "V5.4 - OURO CONFLUÊNCIA TOTAL + LIQUIDEZ"
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 CHAT_ID = os.getenv("CHAT_ID", "").strip()
@@ -95,7 +95,7 @@ async def get_top_usdt_symbols(session):
             qv = float(d.get("quoteVolume", 0) or 0)
             pares.append((s, qv))
         pares.sort(key=lambda x: x[1], reverse=True)
-        return [s for s, _ in pares[:TOP_N]]
+        return pares[:TOP_N]  # agora retorna também o volume
     except:
         return []
 
@@ -111,7 +111,7 @@ def can_alert(symbol, tipo, cooldown_sec):
     return False
 
 # ---------------- WORKER ----------------
-async def scan_symbol(session, symbol):
+async def scan_symbol(session, symbol, qv):
     try:
         k3 = await get_klines(session, symbol, "3m", 100)
         k5 = await get_klines(session, symbol, "5m", 100)
@@ -127,7 +127,7 @@ async def scan_symbol(session, symbol):
         i3, i5, i15, i30 = len(c3)-1, len(c5)-1, len(c15)-1, len(c30)-1
         volmed5 = sum(v5[-10:])/10
 
-        # 💎 CONFLUÊNCIA TOTAL MACD (RSI 15m 45–68)
+        # 💎 CONFLUÊNCIA TOTAL MACD (RSI 15m 45–68 + Liquidez)
         rsi15 = calc_rsi(c15,14)[i15]
         if (
             ema(c3,9)[i3] > ema(c3,20)[i3]
@@ -143,18 +143,27 @@ async def scan_symbol(session, symbol):
                 alvo_1 = preco + 2.5 * risco
                 alvo_2 = preco + 5.0 * risco
                 tp_parcial = preco + risco
+
+                # Classificação de liquidez
+                if qv >= 100_000_000:
+                    liq_status = f"💎 Alta (US$ {qv/1_000_000:.1f}M)"
+                elif qv >= 20_000_000:
+                    liq_status = f"⚡ Média (US$ {qv/1_000_000:.1f}M)"
+                else:
+                    liq_status = f"⚠️ Baixa (US$ {qv/1_000_000:.1f}M)"
+
                 msg = (
                     f"💎 <b>Confluência Total MACD</b>\n"
                     f"{symbol}\n"
                     f"3m✅ 5m✅ 15m✅ 30m✅\n"
-                    f"RSI15: {rsi15:.1f}\n\n"
+                    f"RSI15: {rsi15:.1f}\n"
+                    f"Liquidez: {liq_status}\n\n"
                     f"💰 Preço: {fmt_price(preco)}\n"
                     f"🛡️ Stop: {fmt_price(stop)}\n"
                     f"🎯 Alvo1: {fmt_price(alvo_1)} (1:2.5)\n"
                     f"🎯 Alvo2: {fmt_price(alvo_2)} (1:5)\n"
-                    f"💫 Parcial: {fmt_price(tp_parcial)} (1:1)\n\n"
-                    f"⏰ {now_br()}\n"
-                    f"🔗 https://www.binance.com/pt-BR/trade/{symbol}?type=spot"
+                    f"💫 Parcial: {fmt_price(tp_parcial)} (1:1)\n"
+                    f"⏰ {now_br()}"
                 )
                 await tg(session, msg)
 
@@ -164,10 +173,10 @@ async def scan_symbol(session, symbol):
 # ---------------- MAIN ----------------
 async def main_loop():
     async with aiohttp.ClientSession() as session:
-        symbols = await get_top_usdt_symbols(session)
-        await tg(session, f"<b>{VERSION} ATIVO</b>\nApenas alerta de Confluência Total MACD\n{len(symbols)} pares\n{now_br()}\n──────────────────────────────")
+        pares = await get_top_usdt_symbols(session)
+        await tg(session, f"<b>{VERSION} ATIVO</b>\nConfluência Total MACD + Liquidez\n{len(pares)} pares\n{now_br()}\n──────────────────────────────")
         while True:
-            await asyncio.gather(*[scan_symbol(session, s) for s in symbols])
+            await asyncio.gather(*[scan_symbol(session, s, qv) for s, qv in pares])
             await asyncio.sleep(15)
 
 def start_bot():
