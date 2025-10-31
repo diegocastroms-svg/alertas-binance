@@ -104,7 +104,7 @@ async def get_top_usdt_symbols(session):
         url = f"{BINANCE_HTTP}/api/v3/ticker/24hr"
         async with session.get(url, timeout=REQ_TIMEOUT) as r:
             data = await r.json()
-        blocked = ("UP","DOWN","BULL","BEAR","BUSD","FDUSD","TUSD","USDC","EUR","BRL","PERP","TEST")
+        blocked = ("UP","DOWN","BULL","BEAR","BUSD","FDUSD","TUSD","USDC","EUR","BRL","PERP","TEST", "USDE")  # ← BLOQUEADO USDE
         pares = []
         for d in data:
             s = d.get("symbol", "")
@@ -148,7 +148,7 @@ async def scan_symbol(session, symbol, qv):
         i3, i5, i15, i30, i1h = len(c3)-1, len(c5)-1, len(c15)-1, len(c30)-1, len(c1h)-1
         volmed5 = sum(v5[-10:])/10 if len(v5) >= 10 else (v5[-1] if v5 else 0.0)
 
-        # 💎 CONFLUÊNCIA TOTAL MACD (RSI 15m 45–68 + Liquidez) + HIST VERDE EM TODOS + 1h
+        # CONFLUÊNCIA TOTAL MACD (RSI 15m 45–68 + Liquidez) + HIST VERDE EM TODOS + 1h
         rsi15 = calc_rsi(c15,14)[i15]
 
         # Condições originais de médias 9/20 em 3m,5m,15m,30m (mantidas)
@@ -179,27 +179,27 @@ async def scan_symbol(session, symbol, qv):
 
                 # Classificação de liquidez (mantida)
                 if qv >= 100_000_000:
-                    liq_status = f"💎 Alta (US$ {qv/1_000_000:.1f}M)"
+                    liq_status = f"Alta (US$ {qv/1_000_000:.1f}M)"
                 elif qv >= 20_000_000:
-                    liq_status = f"⚡ Média (US$ {qv/1_000_000:.1f}M)"
+                    liq_status = f"Média (US$ {qv/1_000_000:.1f}M)"
                 else:
-                    liq_status = f"⚠️ Baixa (US$ {qv/1_000_000:.1f}M)"
+                    liq_status = f"Baixa (US$ {qv/1_000_000:.1f}M)"
 
                 # Selo MACD por timeframe
-                macd_checks = f"MACD: 3m✅ 5m✅ 15m✅ 30m✅ 1h✅"
+                macd_checks = f"MACD: 3m 5m 15m 30m 1h"
 
                 msg = (
-                    f"💎 <b>Confluência Total MACD</b>\n"
+                    f"<b>Confluência Total MACD</b>\n"
                     f"{symbol}\n"
                     f"{macd_checks}\n"
                     f"RSI15: {rsi15:.1f}\n"
                     f"Liquidez: {liq_status}\n\n"
-                    f"💰 Preço: {fmt_price(preco)}\n"
-                    f"🛡️ Stop: {fmt_price(stop)}\n"
-                    f"🎯 Alvo1: {fmt_price(alvo_1)} (1:2.5)\n"
-                    f"🎯 Alvo2: {fmt_price(alvo_2)} (1:5)\n"
-                    f"💫 Parcial: {fmt_price(tp_parcial)} (1:1)\n"
-                    f"⏰ {now_br()}"
+                    f"Preço: {fmt_price(preco)}\n"
+                    f"Stop: {fmt_price(stop)}\n"
+                    f"Alvo1: {fmt_price(alvo_1)} (1:2.5)\n"
+                    f"Alvo2: {fmt_price(alvo_2)} (1:5)\n"
+                    f"Parcial: {fmt_price(tp_parcial)} (1:1)\n"
+                    f"{now_br()}"
                 )
                 await tg(session, msg)
 
@@ -212,8 +212,13 @@ async def main_loop():
         pares = await get_top_usdt_symbols(session)
         await tg(session, f"<b>{VERSION} ATIVO</b>\nConfluência Total MACD + Liquidez\n{len(pares)} pares\n{now_br()}\n──────────────────────────────")
         while True:
-            await asyncio.gather(*[scan_symbol(session, s, qv) for s, qv in pares])
-            await asyncio.sleep(15)
+            try:
+                await asyncio.gather(*[scan_symbol(session, s, qv) for s, qv in pares])
+                await asyncio.sleep(30)  # ← 30 segundos
+            except Exception as e:
+                await tg(session, f"<b>ERRO NO BOT</b>\n{e}\nReiniciando em 10s...\n{now_br()}")
+                print(f"[LOOP ERRO] {e}")
+                await asyncio.sleep(10)
 
 def start_bot():
     while True:
