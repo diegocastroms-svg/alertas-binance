@@ -9,7 +9,7 @@ import threading
 # ---------------- CONFIG ----------------
 BINANCE_HTTP = "https://api.binance.com"
 COOLDOWN_SEC = 15 * 60
-TOP_N = 50
+TOP_N = 80
 REQ_TIMEOUT = 8
 VERSION = "V5.8 - CRUZAMENTO 5M FECHADO + CONFLUÊNCIA DINÂMICA"
 
@@ -160,7 +160,8 @@ async def scan_symbol(session, symbol, qv):
 
         macd5_closed = macd(c5_closed)
         h5c = macd5_closed["hist"]
-        h5_green = (len(h5c) >= 1 and round(h5c[-1], 3) > 0)  # 5m precisa estar VERDE (fechado)
+        EPS = 1e-3  # limiar anti-ruído
+        h5_green = (len(h5c) >= 1 and h5c[-1] > EPS)  # 5m precisa estar VERDE (fechado)
 
         # === MACD DINÂMICO para 3m/15m/30m/1h (candle atual) ===
         macd3   = macd(c3)
@@ -169,15 +170,14 @@ async def scan_symbol(session, symbol, qv):
         macd1h  = macd(c1h)
 
         h3, h15, h30, h1h = macd3["hist"], macd15["hist"], macd30["hist"], macd1h["hist"]
-        def rounded(v): return round(v, 3)
 
-        # 3m e 15m: só precisam estar VERDES (dinâmicos)
-        h3_green  = (len(h3)  >= 1 and rounded(h3[-1])  > 0)
-        h15_green = (len(h15) >= 1 and rounded(h15[-1]) > 0)
+        # 3m e 15m: só precisam estar VERDES (dinâmicos) acima do ruído
+        h3_green  = (len(h3)  >= 1 and h3[-1]  > EPS)
+        h15_green = (len(h15) >= 1 and h15[-1] > EPS)
 
-        # 30m e 1h: VERDES e CRESCENTES (dinâmicos)
-        h30_ok = (len(h30) >= 2 and rounded(h30[-1]) > 0 and rounded(h30[-1]) >= rounded(h30[-2]))
-        h1h_ok = (len(h1h) >= 2 and rounded(h1h[-1]) > 0 and rounded(h1h[-1]) >= rounded(h1h[-2]))
+        # 30m e 1h: VERDES e CRESCENTES (dinâmicos) com folga > EPS
+        h30_ok = (len(h30) >= 2 and h30[-1] > EPS and (h30[-1] - h30[-2]) >= EPS/2)
+        h1h_ok = (len(h1h) >= 2 and h1h[-1] > EPS and (h1h[-1] - h1h[-2]) >= EPS/2)
 
         hist_ok = (h5_green and h3_green and h15_green and h30_ok and h1h_ok)
 
