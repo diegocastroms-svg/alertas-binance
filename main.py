@@ -1,5 +1,5 @@
 # main_breakout_v1_render_hibrido.py
-# V6.3 – CRUZAMENTO 5M + MACD POSITIVO (SEM HISTOGRAMA CRESCENTE)
+# V6.5 – CRUZAMENTO 5M + MACD CONFIRMADO (só candles fechados)
 
 import os, asyncio, aiohttp, time
 from datetime import datetime, timedelta
@@ -11,7 +11,7 @@ BINANCE_HTTP = "https://api.binance.com"
 COOLDOWN_SEC = 15 * 60
 TOP_N = 50
 REQ_TIMEOUT = 8
-VERSION = "V6.3 - CRUZAMENTO 5M + MACD POSITIVO (SEM HIST CRESCENTE)"
+VERSION = "V6.5 - CRUZAMENTO 5M + MACD CONFIRMADO (fechado)"
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 CHAT_ID = os.getenv("CHAT_ID", "").strip()
@@ -20,7 +20,7 @@ CHAT_ID = os.getenv("CHAT_ID", "").strip()
 app = Flask(__name__)
 @app.route("/")
 def home():
-    return f"{VERSION} | Cruzamento 5m + MACD verde 3m/5m/15m/30m/1h | 50 pares", 200
+    return f"{VERSION} | 5m cruzamento fechado + MACD 15m/30m confirmados | 50 pares", 200
 
 # ---------------- UTILS ----------------
 def now_br():
@@ -79,13 +79,10 @@ def macd(seq, fast=12, slow=26, signal=9):
     ema_slow = ema(seq, slow)
     macd_line = [f - s for f, s in zip(ema_fast, ema_slow)]
     signal_line = ema(macd_line, signal)
-    m = len(macd_line)
-    s = len(signal_line)
-    if s < m:
-        signal_line = [signal_line[0]]*(m - s) + signal_line
     hist = [m_ - s_ for m_, s_ in zip(macd_line, signal_line)]
     return {"macd": macd_line, "signal": signal_line, "hist": hist}
 
+# ---------------- CRUZAMENTO 5M ----------------
 def cruzou_de_baixo(c, p9=9, p20=20):
     if len(c) < p20 + 2: return False
     e9 = ema(c, p9)
@@ -120,7 +117,7 @@ async def get_top_usdt_symbols(session):
     except:
         return []
 
-# ---------------- COOLDOWNS ----------------
+# ---------------- COOLDOWN ----------------
 cooldowns = {}
 def can_alert(symbol, tipo, cooldown_sec):
     now = time.time()
@@ -134,67 +131,61 @@ def can_alert(symbol, tipo, cooldown_sec):
 # ---------------- WORKER ----------------
 async def scan_symbol(session, symbol, qv):
     try:
-        k3  = await get_klines(session, symbol, "3m", 100)
         k5  = await get_klines(session, symbol, "5m", 100)
         k15 = await get_klines(session, symbol, "15m", 100)
         k30 = await get_klines(session, symbol, "30m", 100)
-        k1h = await get_klines(session, symbol, "1h", 100)
-        if not (len(k3) and len(k5) and len(k15) and len(k30) and len(k1h)): return
+        if not (len(k5) and len(k15) and len(k30)): return
 
-        c3  = [float(k[4]) for k in k3]
         c5  = [float(k[4]) for k in k5]
         c15 = [float(k[4]) for k in k15]
         c30 = [float(k[4]) for k in k30]
-        c1h = [float(k[4]) for k in k1h]
-        v5 = [float(k[5]) for k in k5]
+        v5  = [float(k[5]) for k in k5]
+        l5  = [float(k[3]) for k in k5]
 
-        if len(c5) < 50: return
-        i3, i5, i15, i30, i1h = len(c3)-1, len(c5)-1, len(c15)-1, len(c30)-1, len(c1h)-1
-        volmed5 = sum(v5[-10:])/10 if len(v5) >= 10 else (v5[-1] if v5 else 0.0)
+        i5 = len(c5)-1
+        volmed5 = sum(v5[-10:])/10 if len(v5)>=10 else v5[-1]
 
-        cruzou_5m = cruzou_de_baixo(c5, 9, 20)
+        # === Cruzamento 5m (fechado) ===
+        cruzou_5m = cruzou_de_baixo(c5[:-1])
 
-        macd3  = macd(c3)
-        macd5  = macd(c5)
-        macd15 = macd(c15)
-        macd30 = macd(c30)
-        macd1h = macd(c1h)
+        # === MACD confirmado (últimos candles fechados) ===
+        macd5  = macd(c5[:-1])
+        macd15 = macd(c15[:-1])
+        macd30 = macd(c30[:-1])
 
-        # ✅ Apenas MACD positivo em todos
         hist_ok = (
-            macd3["hist"][-1] > 0 and
-            macd5["hist"][-1] > 0 and
-            macd15["hist"][-1] > 0 and
-            macd30["hist"][-1] > 0 and
-            macd1h["hist"][-1] > 0
+            macd5["hist"][-2] > 0 and
+            macd15["hist"][-2] > 0 and
+            macd30["hist"][-2] > 0
         )
 
-        rsi15 = calc_rsi(c15, 14)[-1] if len(c15) else 50.0
+        # === RSI + volume ===
+        rsi15 = calc_rsi(c15, 14)[-1]
         preco = c5[-1]
-        ema20_1h = ema(c1h, 20)[i1h] if len(c1h) > 20 else c1h[-1]
-        filtro_forte = preco > ema20_1h and 45 <= rsi15 <= 68 and v5[-1] > volmed5 * 1.1
+        filtro_ok = (45 <= rsi15 <= 68 and v5[-1] > volmed5 * 1.1)
 
-        if cruzou_5m and hist_ok and filtro_forte:
+        # === Condição final ===
+        if cruzou_5m and hist_ok and filtro_ok:
             if can_alert(symbol, "CRUZAMENTO_5M", COOLDOWN_SEC):
-                stop = ema(c5,21)[i5]
+                stop = min(l5[i5-1], ema(c5,21)[i5]) if i5>=1 else ema(c5,21)[i5]
                 risco = max(preco - stop, 1e-12)
-                alvo_1 = preco + 2.5 * risco
-                alvo_2 = preco + 5.0 * risco
-                tp_parcial = preco + risco
+                alvo1 = preco + 2.5*risco
+                alvo2 = preco + 5.0*risco
+                parcial = preco + risco
 
-                liq_status = f"Alta (US$ {qv/1_000_000:.1f}M)" if qv >= 100_000_000 else (f"Média (US$ {qv/1_000_000:.1f}M)" if qv >= 20_000_000 else f"Baixa (US$ {qv/1_000_000:.1f}M)")
+                liq = "Alta" if qv>=100_000_000 else "Média" if qv>=20_000_000 else "Baixa"
 
                 msg = (
-                    f"<b>CRUZAMENTO 5M + CONFLUÊNCIA!</b>\n"
+                    f"<b>CRUZAMENTO 5M + CONFLUÊNCIA MACD</b>\n"
                     f"{symbol}\n"
-                    f"MACD: 3m✅ 5m✅ 15m✅ 30m✅ 1h✅\n"
+                    f"MACD: 5m✅ 15m✅ 30m✅\n"
                     f"RSI15: {rsi15:.1f}\n"
-                    f"Liquidez: {liq_status}\n\n"
+                    f"Liquidez: {liq}\n\n"
                     f"Preço: {fmt_price(preco)}\n"
                     f"Stop: {fmt_price(stop)}\n"
-                    f"Alvo1: {fmt_price(alvo_1)} (1:2.5)\n"
-                    f"Alvo2: {fmt_price(alvo_2)} (1:5)\n"
-                    f"Parcial: {fmt_price(tp_parcial)} (1:1)\n"
+                    f"Alvo1: {fmt_price(alvo1)} (1:2.5)\n"
+                    f"Alvo2: {fmt_price(alvo2)} (1:5)\n"
+                    f"Parcial: {fmt_price(parcial)} (1:1)\n"
                     f"{now_br()}"
                 )
                 await tg(session, msg)
@@ -206,15 +197,10 @@ async def scan_symbol(session, symbol, qv):
 async def main_loop():
     async with aiohttp.ClientSession() as session:
         pares = await get_top_usdt_symbols(session)
-        await tg(session, f"<b>{VERSION} ATIVO</b>\nCruzamento 5m + MACD verde em todos os tempos\n{len(pares)} pares\n{now_br()}\n──────────────────────────────")
+        await tg(session, f"<b>{VERSION} ATIVO</b>\nCruzamento 5m + MACD Confirmado\n{len(pares)} pares\n{now_br()}\n──────────────────────────────")
         while True:
-            try:
-                await asyncio.gather(*[scan_symbol(session, s, qv) for s, qv in pares])
-                await asyncio.sleep(30)
-            except Exception as e:
-                await tg(session, f"<b>ERRO NO BOT</b>\n{e}\nReiniciando em 10s...\n{now_br()}")
-                print(f"[LOOP ERRO] {e}")
-                await asyncio.sleep(10)
+            await asyncio.gather(*[scan_symbol(session, s, qv) for s, qv in pares])
+            await asyncio.sleep(30)
 
 def start_bot():
     while True:
