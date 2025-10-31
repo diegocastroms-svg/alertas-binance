@@ -1,5 +1,5 @@
 # main_breakout_v1_render_hibrido.py
-# V5.0 – OURO CONFLUENTE FINAL (filtros anti-topo aplicados em 3m, 5m e 15m)
+# V5.2 – OURO CONFLUÊNCIA TOTAL (RSI 45–68)
 
 import os, asyncio, aiohttp, time
 from datetime import datetime, timedelta
@@ -11,7 +11,7 @@ BINANCE_HTTP = "https://api.binance.com"
 COOLDOWN_SEC = 15 * 60
 TOP_N = 50
 REQ_TIMEOUT = 8
-VERSION = "V5.0 - OURO CONFLUENTE FINAL"
+VERSION = "V5.2 - OURO CONFLUÊNCIA TOTAL"
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 CHAT_ID = os.getenv("CHAT_ID", "").strip()
@@ -20,7 +20,7 @@ CHAT_ID = os.getenv("CHAT_ID", "").strip()
 app = Flask(__name__)
 @app.route("/")
 def home():
-    return f"{VERSION} | 3m | 5m | 15m | 1h | 50 pares", 200
+    return f"{VERSION} | 3m | 5m | 15m | 30m | 1h | 50 pares", 200
 
 # ---------------- UTILS ----------------
 def now_br():
@@ -101,7 +101,6 @@ async def get_top_usdt_symbols(session):
 
 # ---------------- COOLDOWNS ----------------
 cooldowns = {}
-
 def can_alert(symbol, tipo, cooldown_sec):
     now = time.time()
     key = f"{symbol}_{tipo}"
@@ -111,114 +110,100 @@ def can_alert(symbol, tipo, cooldown_sec):
         return True
     return False
 
-def rsi_bolinha(rsi):
-    if rsi >= 70: return "🟢"
-    elif rsi >= 60: return "🟡"
-    else: return "🔴"
-
 # ---------------- WORKER ----------------
 async def scan_symbol(session, symbol):
     try:
-        k3 = await get_klines(session, symbol, "3m", limit=100)
-        k5 = await get_klines(session, symbol, "5m", limit=100)
-        k15 = await get_klines(session, symbol, "15m", limit=100)
-        k1h = await get_klines(session, symbol, "1h", limit=100)
-        if not (len(k3) and len(k5) and len(k15) and len(k1h)): return
+        k3 = await get_klines(session, symbol, "3m", 100)
+        k5 = await get_klines(session, symbol, "5m", 100)
+        k15 = await get_klines(session, symbol, "15m", 100)
+        k30 = await get_klines(session, symbol, "30m", 100)
+        if not (len(k3) and len(k5) and len(k15) and len(k30)): return
 
-        c3, o3, h3, l3 = [float(k[4]) for k in k3], [float(k[1]) for k in k3], [float(k[2]) for k in k3], [float(k[3]) for k in k3]
-        c5, o5 = [float(k[4]) for k in k5], [float(k[1]) for k in k5]
-        c15, o15 = [float(k[4]) for k in k15], [float(k[1]) for k in k15]
-        v3, v5, v15 = [float(k[5]) for k in k3], [float(k[5]) for k in k5], [float(k[5]) for k in k15]
-        i3, i5, i15 = len(c3)-1, len(c5)-1, len(c15)-1
+        c3 = [float(k[4]) for k in k3]
+        c5 = [float(k[4]) for k in k5]
+        c15 = [float(k[4]) for k in k15]
+        c30 = [float(k[4]) for k in k30]
+        o3 = [float(k[1]) for k in k3]
+        o5 = [float(k[1]) for k in k5]
+        o15 = [float(k[1]) for k in k15]
+        v3 = [float(k[5]) for k in k3]
+        v5 = [float(k[5]) for k in k5]
+        v15 = [float(k[5]) for k in k15]
+        v30 = [float(k[5]) for k in k30]
 
-        ema9_3, ema20_3 = ema(c3, 9)[i3], ema(c3, 20)[i3]
-        ema9_5, ema20_5, ema50_5 = ema(c5, 9)[i5], ema(c5, 20)[i5], ema(c5, 50)[i5]
-        ema9_15, ema20_15, ema50_15 = ema(c15, 9)[i15], ema(c15, 20)[i15], ema(c15, 50)[i15]
-        ema20_1h, ema50_1h = ema([float(k[4]) for k in k1h], 20)[-1], ema([float(k[4]) for k in k1h], 50)[-1]
-
-        rsi3, rsi5, rsi15 = calc_rsi(c3, 14)[i3], calc_rsi(c5, 14)[i5], calc_rsi(c15, 14)[i15]
+        i3, i5, i15, i30 = len(c3)-1, len(c5)-1, len(c15)-1, len(c30)-1
         volmed3, volmed5, volmed15 = sum(v3[-10:])/10, sum(v5[-10:])/10, sum(v15[-10:])/10
 
-        # 3M – Pré-Ignição
+        # 3M – Cruzamento 9/20
         if (
-            ema9_3 > ema20_3
-            and rsi3 > 62
+            ema(c3,9)[i3-1] < ema(c3,20)[i3-1]
+            and ema(c3,9)[i3] > ema(c3,20)[i3]
             and v3[i3] > 1.3 * volmed3
-            and v3[i3] > v3[i3-1]
             and c3[i3] > o3[i3]
-            and ema9_5 > ema20_5 and rsi5 > 55
         ):
-            # ANTI-TOPO
-            if not (rsi3 < 80 and (c3[i3]/ema(c3,20)[i3]) < 1.04 and rsi3 > calc_rsi(c3[:-1],14)[-1] and c3[i3] > o3[i3]): return
-            if can_alert(symbol, "3m", 15*60):
-                bola = rsi_bolinha(rsi3)
+            if can_alert(symbol, "3m_cruzamento", 15*60):
                 msg = (
-                    f"{bola} <b>[3m] Pré-Ignição Confirmada</b>\n"
-                    f"⏰ {now_br()} | {symbol}\n"
-                    f"📊 RSI: {rsi3:.1f} | Volume: +{((v3[i3]/volmed3)-1)*100:.0f}%\n"
+                    f"⚡ <b>[3m] Cruzamento 9/20 Detectado</b>\n"
+                    f"{symbol} | RSI e Volume crescentes\n"
+                    f"⏰ {now_br()}\n"
                     f"🔗 https://www.binance.com/pt-BR/trade/{symbol}?type=spot"
                 )
                 await tg(session, msg)
 
-        # 5M – Ignição Confirmada
+        # 5M – Cruzamento 20/50
         if (
-            ema9_5 > ema20_5
-            and ema(c5,9)[i5-1] > ema(c5,20)[i5-1]
-            and rsi5 > 56
-            and v5[i5] > 1.2 * volmed5
+            ema(c5,20)[i5-1] < ema(c5,50)[i5-1]
+            and ema(c5,20)[i5] > ema(c5,50)[i5]
+            and v5[i5] > 1.3 * volmed5
+            and c5[i5] > o5[i5]
         ):
-            # ANTI-TOPO
-            if not (rsi5 < 80 and (c5[i5]/ema(c5,20)[i5]) < 1.04 and rsi5 > calc_rsi(c5[:-1],14)[-1] and c5[i5] > o5[i5]): return
-            if can_alert(symbol, "5m", 15*60):
-                bola = rsi_bolinha(rsi5)
+            if can_alert(symbol, "5m_cruzamento", 15*60):
                 msg = (
-                    f"{bola} <b>[5m] Ignição Confirmada</b>\n"
-                    f"⏰ {now_br()} | {symbol}\n"
-                    f"📊 RSI: {rsi5:.1f} | VOL: +{((v5[i5]/volmed5)-1)*100:.0f}%\n"
+                    f"🟢 <b>[5m] Cruzamento 20/50 Confirmado</b>\n"
+                    f"{symbol} | Tendência curta virando pra alta\n"
+                    f"⏰ {now_br()}\n"
                     f"🔗 https://www.binance.com/pt-BR/trade/{symbol}?type=spot"
                 )
                 await tg(session, msg)
 
-        # 15M – Continuação de Alta
+        # 15M – Continuação (EMA9>20>50)
+        if ema(c15,9)[i15] > ema(c15,20)[i15] > ema(c15,50)[i15]:
+            if can_alert(symbol, "15m_tendencia", 15*60):
+                msg = (
+                    f"📈 <b>[15m] Continuação de Alta</b>\n"
+                    f"{symbol} | Médias alinhadas 9>20>50\n"
+                    f"⏰ {now_br()}\n"
+                    f"🔗 https://www.binance.com/pt-BR/trade/{symbol}?type=spot"
+                )
+                await tg(session, msg)
+
+        # 💎 CONFLUÊNCIA TOTAL MACD (RSI 15m 45–68)
+        rsi15 = calc_rsi(c15,14)[i15]
         if (
-            ema9_15 > ema20_15 > ema50_15
-            and rsi15 > 60
-            and v15[i15] > volmed15
+            ema(c3,9)[i3] > ema(c3,20)[i3]
+            and ema(c5,9)[i5] > ema(c5,20)[i5]
+            and ema(c15,9)[i15] > ema(c15,20)[i15]
+            and ema(c30,9)[i30] > ema(c30,20)[i30]
+            and 45 <= rsi15 <= 68
         ):
-            # ANTI-TOPO
-            if not (rsi15 < 80 and (c15[i15]/ema(c15,20)[i15]) < 1.04 and rsi15 > calc_rsi(c15[:-1],14)[-1] and c15[i15] > o15[i15]): return
-            if can_alert(symbol, "15m", 15*60):
-                bola = rsi_bolinha(rsi15)
-                msg = (
-                    f"{bola} <b>[15m] Continuação de Alta</b>\n"
-                    f"⏰ {now_br()} | {symbol}\n"
-                    f"📊 RSI: {rsi15:.1f} | VOL: +{((v15[i15]/volmed15)-1)*100:.0f}%\n"
-                    f"🔗 https://www.binance.com/pt-BR/trade/{symbol}?type=spot"
-                )
-                await tg(session, msg)
-
-        # 💎 CONFLUÊNCIA MACD
-        if ema20_1h > ema50_1h and ema9_15 > ema20_15 and ema9_5 > ema20_5 and rsi15 > 65 and v5[i5] > 1.5 * volmed5:
-            if can_alert(symbol, "MACD_CONFLUENCIA", 15*60):
-                bola = rsi_bolinha(rsi15)
+            if can_alert(symbol, "CONFLUENCIA_TOTAL", 15*60):
                 preco = c5[-1]
-                stop = min(c5[-3], ema(c5, 21)[-1])
+                stop = min(c5[-3], ema(c5,21)[-1])
                 risco = preco - stop
                 alvo_1 = preco + 2.5 * risco
                 alvo_2 = preco + 5.0 * risco
                 tp_parcial = preco + risco
-                prob = 90 if rsi15 >= 70 else 85 if rsi15 >= 65 else 80 if rsi15 >= 60 else 75
                 msg = (
-                    f"{bola} 💎 <b>Confluência MACD Detectada</b>\n"
-                    f"⏰ {now_br()} | {symbol}\n"
-                    f"📈 1h ✅ | 15m ✅ | 5m ✅\n\n"
-                    f"💰 Preço: <b>{fmt_price(preco)}</b>\n"
-                    f"📊 RSI15m: {rsi15:.1f} | Probabilidade: <b>{prob}%</b>\n\n"
-                    f"🛡️ Stop: <code>{fmt_price(stop)}</code> (-{(risco/preco)*100:.1f}%)\n"
-                    f"🎯 Alvo 1 (1:2.5): <code>{fmt_price(alvo_1)}</code> (+{(alvo_1/preco-1)*100:.1f}%)\n"
-                    f"🎯 Alvo 2 (1:5): <code>{fmt_price(alvo_2)}</code> (+{(alvo_2/preco-1)*100:.1f}%)\n"
-                    f"💫 TP Parcial: <code>{fmt_price(tp_parcial)}</code> (+{(tp_parcial/preco-1)*100:.1f}%)\n\n"
-                    f"💬 Padrão de Alta Sustentada\n"
+                    f"💎 <b>Confluência Total MACD</b>\n"
+                    f"{symbol}\n"
+                    f"3m✅ 5m✅ 15m✅ 30m✅\n"
+                    f"RSI15: {rsi15:.1f}\n\n"
+                    f"💰 Preço: {fmt_price(preco)}\n"
+                    f"🛡️ Stop: {fmt_price(stop)}\n"
+                    f"🎯 Alvo1: {fmt_price(alvo_1)} (1:2.5)\n"
+                    f"🎯 Alvo2: {fmt_price(alvo_2)} (1:5)\n"
+                    f"💫 Parcial: {fmt_price(tp_parcial)} (1:1)\n\n"
+                    f"⏰ {now_br()}\n"
                     f"🔗 https://www.binance.com/pt-BR/trade/{symbol}?type=spot"
                 )
                 await tg(session, msg)
@@ -230,7 +215,7 @@ async def scan_symbol(session, symbol):
 async def main_loop():
     async with aiohttp.ClientSession() as session:
         symbols = await get_top_usdt_symbols(session)
-        await tg(session, f"<b>{VERSION} ATIVO</b>\n3m | 5m | 15m | 1h | {len(symbols)} pares\n{now_br()}\n──────────────────────────────")
+        await tg(session, f"<b>{VERSION} ATIVO</b>\n3m | 5m | 15m | 30m | 1h | {len(symbols)} pares\n{now_br()}\n──────────────────────────────")
         while True:
             await asyncio.gather(*[scan_symbol(session, s) for s in symbols])
             await asyncio.sleep(15)
