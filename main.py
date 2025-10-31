@@ -1,5 +1,5 @@
 # main_breakout_v1_render_hibrido.py
-# V4.8 – AJUSTE DE TIMING (antecipação do alerta 5m)
+# V4.9 – OURO CONFLUENTE TRIPLO (3m, 5m, 15m refinados + MACD completo)
 
 import os, asyncio, aiohttp, time
 from datetime import datetime, timedelta
@@ -11,7 +11,7 @@ BINANCE_HTTP = "https://api.binance.com"
 COOLDOWN_SEC = 15 * 60
 TOP_N = 50
 REQ_TIMEOUT = 8
-VERSION = "V4.8 - OURO CONFLUENTE ANTECIPADO"
+VERSION = "V4.9 - OURO CONFLUENTE TRIPLO"
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 CHAT_ID = os.getenv("CHAT_ID", "").strip()
@@ -125,58 +125,74 @@ async def scan_symbol(session, symbol):
         k1h = await get_klines(session, symbol, "1h", limit=100)
         if not (len(k3) and len(k5) and len(k15) and len(k1h)): return
 
-        c3, c5, c15, c1h = [float(k[4]) for k in k3], [float(k[4]) for k in k5], [float(k[4]) for k in k15], [float(k[4]) for k in k1h]
+        c3, o3, h3, l3 = [float(k[4]) for k in k3], [float(k[1]) for k in k3], [float(k[2]) for k in k3], [float(k[3]) for k in k3]
+        c5, o5 = [float(k[4]) for k in k5], [float(k[1]) for k in k5]
+        c15 = [float(k[4]) for k in k15]
         v3, v5, v15 = [float(k[5]) for k in k3], [float(k[5]) for k in k5], [float(k[5]) for k in k15]
         i3, i5, i15 = len(c3)-1, len(c5)-1, len(c15)-1
 
         ema9_3, ema20_3 = ema(c3, 9)[i3], ema(c3, 20)[i3]
         ema9_5, ema20_5, ema50_5 = ema(c5, 9)[i5], ema(c5, 20)[i5], ema(c5, 50)[i5]
         ema9_15, ema20_15, ema50_15 = ema(c15, 9)[i15], ema(c15, 20)[i15], ema(c15, 50)[i15]
-        ema20_1h, ema50_1h = ema(c1h, 20)[-1], ema(c1h, 50)[-1]
+        ema20_1h, ema50_1h = ema([float(k[4]) for k in k1h], 20)[-1], ema([float(k[4]) for k in k1h], 50)[-1]
 
         rsi3, rsi5, rsi15 = calc_rsi(c3, 14)[i3], calc_rsi(c5, 14)[i5], calc_rsi(c15, 14)[i15]
         volmed3, volmed5, volmed15 = sum(v3[-10:])/10, sum(v5[-10:])/10, sum(v15[-10:])/10
 
-        # --- ALERTAS ---
-        # 3M
-        if ema9_3 > ema20_3 and rsi3 > 66 and v3[i3] > 1.3 * volmed3:
+        # 3M – Pré-Ignição (volume + confirmação 5m)
+        if (
+            ema9_3 > ema20_3
+            and rsi3 > 62
+            and v3[i3] > 1.3 * volmed3
+            and v3[i3] > v3[i3-1] > v3[i3-2]
+            and c3[i3] > o3[i3]
+            and ema9_5 > ema20_5 and rsi5 > 55
+        ):
             if can_alert(symbol, "3m", 15*60):
                 bola = rsi_bolinha(rsi3)
                 msg = (
-                    f"{bola} <b>[3m] Pré-Ignição Detectada</b>\n"
+                    f"{bola} <b>[3m] Pré-Ignição Confirmada</b>\n"
                     f"⏰ {now_br()} | {symbol}\n"
-                    f"📊 RSI: {rsi3:.1f}\n"
+                    f"📊 RSI: {rsi3:.1f} | Volume: +{((v3[i3]/volmed3)-1)*100:.0f}%\n"
                     f"🔗 https://www.binance.com/pt-BR/trade/{symbol}?type=spot"
                 )
                 await tg(session, msg)
 
-        # 5M – Ignição (ANTECIPADO)
-        if ema9_5 > ema20_5 and rsi5 > 52 and v5[i5] > 1.3 * volmed5:
+        # 5M – Ignição Confirmada (duplo candle + volume)
+        if (
+            ema9_5 > ema20_5
+            and ema(c5,9)[i5-1] > ema(c5,20)[i5-1]
+            and rsi5 > 56
+            and v5[i5] > 1.2 * volmed5
+        ):
             if can_alert(symbol, "5m", 15*60):
                 bola = rsi_bolinha(rsi5)
                 mult = v5[i5] / volmed5
-                msg = (f"{bola} <b>[5m] Ignição Antecipada</b>\n"
-                       f"⏰ {now_br()} | {symbol}\n"
-                       f"📊 RSI: {rsi5:.1f} | VOL: {mult:.1f}x\n"
-                       f"🔗 https://www.binance.com/pt-BR/trade/{symbol}?type=spot")
+                msg = (
+                    f"{bola} <b>[5m] Ignição Confirmada</b>\n"
+                    f"⏰ {now_br()} | {symbol}\n"
+                    f"📊 RSI: {rsi5:.1f} | VOL: {mult:.1f}x\n"
+                    f"🔗 https://www.binance.com/pt-BR/trade/{symbol}?type=spot"
+                )
                 await tg(session, msg)
 
-        # 15M
-        if ema9_15 > ema20_15 > ema50_15 and rsi15 > 60:
-            if can_alert(symbol, "15m", 30*60):
+        # 15M – Continuação de Alta
+        if (
+            ema9_15 > ema20_15 > ema50_15
+            and rsi15 > 60
+            and v15[i15] > volmed15
+        ):
+            if can_alert(symbol, "15m", 15*60):
                 bola = rsi_bolinha(rsi15)
-                msg = (f"{bola} <b>[15m] Continuação de Alta</b>\n"
-                       f"⏰ {now_br()} | {symbol}\n"
-                       f"📊 RSI: {rsi15:.1f}\n"
-                       f"🔗 https://www.binance.com/pt-BR/trade/{symbol}?type=spot")
+                msg = (
+                    f"{bola} <b>[15m] Continuação de Alta</b>\n"
+                    f"⏰ {now_br()} | {symbol}\n"
+                    f"📊 RSI: {rsi15:.1f} | VOL: +{((v15[i15]/volmed15)-1)*100:.0f}%\n"
+                    f"🔗 https://www.binance.com/pt-BR/trade/{symbol}?type=spot"
+                )
                 await tg(session, msg)
 
-        # 1H
-        if ema20_1h > ema50_1h:
-            if can_alert(symbol, "1h", 60*60):
-                print(f"[1h] ✅ Tendência macro positiva | {symbol}")
-
-        # 💎 CONFLUÊNCIA (mantido)
+        # 💎 CONFLUÊNCIA MACD
         if ema20_1h > ema50_1h and ema9_15 > ema20_15 and ema9_5 > ema20_5 and rsi15 > 65 and v5[i5] > 1.5 * volmed5:
             if can_alert(symbol, "MACD_CONFLUENCIA", 15*60):
                 bola = rsi_bolinha(rsi15)
@@ -198,10 +214,10 @@ async def scan_symbol(session, symbol):
                     f"📈 1h ✅ | 15m ✅ | 5m ✅\n\n"
                     f"💰 Preço: <b>{fmt_price(preco)}</b>\n"
                     f"📊 RSI15m: {rsi15:.1f} | Probabilidade: <b>{prob}%</b>\n\n"
-                    f"🛡️ Stop Seguro: <code>{fmt_price(stop)}</code> (-{(risco/preco)*100:.1f}%)\n"
+                    f"🛡️ Stop: <code>{fmt_price(stop)}</code> (-{(risco/preco)*100:.1f}%)\n"
                     f"🎯 Alvo 1 (1:2.5): <code>{fmt_price(alvo_1)}</code> (+{(alvo_1/preco-1)*100:.1f}%)\n"
                     f"🎯 Alvo 2 (1:5): <code>{fmt_price(alvo_2)}</code> (+{(alvo_2/preco-1)*100:.1f}%)\n"
-                    f"💫 TP Parcial (1:1): <code>{fmt_price(tp_parcial)}</code> (+{(tp_parcial/preco-1)*100:.1f}%)\n\n"
+                    f"💫 TP Parcial: <code>{fmt_price(tp_parcial)}</code> (+{(tp_parcial/preco-1)*100:.1f}%)\n\n"
                     f"💬 Padrão de Alta Sustentada\n"
                     f"🔗 https://www.binance.com/pt-BR/trade/{symbol}?type=spot"
                 )
