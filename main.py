@@ -1,5 +1,5 @@
 # backtest.py
-# OURO CONFLUÊNCIA CURTA – Backtest + Envio automático para Telegram
+# OURO CONFLUÊNCIA CURTA – Backtest + Envio automático para Telegram (corrigido)
 # Gera 'Relatório Backtest OURO.xlsx' e envia pro chat configurado via bot Telegram
 
 import asyncio, aiohttp, time
@@ -107,18 +107,23 @@ def extract_ohlcv(k):
     v=[float(x[5])for x in k]
     return t,o,h,l,c,v
 
-# -------------- TELEGRAM --------------
+# -------------- TELEGRAM (CORRIGIDO) --------------
 async def send_excel_to_telegram(session, file_path):
     if not (TELEGRAM_TOKEN and CHAT_ID):
         print("⚠️ Telegram não configurado.")
         return
-    url=f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendDocument"
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendDocument"
     try:
-        with open(file_path,"rb") as f:
-            form={"chat_id":CHAT_ID}
-            files={"document":(os.path.basename(file_path),f)}
-            await session.post(url,data=form,files=files)
-        print("📤 Relatório enviado pro Telegram com sucesso.")
+        form = aiohttp.FormData()
+        form.add_field("chat_id", CHAT_ID)
+        form.add_field("document", open(file_path, "rb"),
+                       filename=os.path.basename(file_path),
+                       content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        async with session.post(url, data=form) as resp:
+            if resp.status == 200:
+                print("📤 Relatório enviado pro Telegram com sucesso.")
+            else:
+                print(f"[ERRO TELEGRAM] status={resp.status}")
     except Exception as e:
         print(f"[ERRO TELEGRAM] {e}")
 
