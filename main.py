@@ -1,5 +1,5 @@
-# main_breakout_v1_render_hibrido.py
-# V6.0 – CRUZAMENTO 5M FECHADO + HIST > 0.01 (SEM ROUND, COM TELEGRAM FUNCIONANDO)
+# V6.1 — CRUZAMENTO 5M FECHADO + MACD > 0.02 + CRESCENTE EM TODOS
+# SEM ROUND, SEM FALSOS, SÓ PUMP COM GÁS
 
 import os, asyncio, aiohttp, time
 from datetime import datetime, timedelta
@@ -11,7 +11,8 @@ BINANCE_HTTP = "https://api.binance.com"
 COOLDOWN_SEC = 15 * 60
 TOP_N = 90
 REQ_TIMEOUT = 8
-VERSION = "V6.0 - CRUZAMENTO 5M FECHADO + HIST > 0.01 (TELEGRAM OK)"
+MIN_HIST = 0.02  # FORÇA MÍNIMA
+VERSION = "V6.1 - MACD > 0.02 + CRUZAMENTO 5M FECHADO"
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 CHAT_ID = os.getenv("CHAT_ID", "").strip()
@@ -20,31 +21,18 @@ CHAT_ID = os.getenv("CHAT_ID", "").strip()
 app = Flask(__name__)
 @app.route("/")
 def home():
-    return f"{VERSION} | 5m FECHADO + MACD > 0.01 | 50 pares", 200
+    return f"{VERSION} | MACD > {MIN_HIST} | 50 pares", 200
 
 # ---------------- UTILS ----------------
 def now_br():
     return (datetime.utcnow() - timedelta(hours=3)).strftime("%Y-%m-%d %H:%M:%S") + " BR"
 
 async def tg(session, text: str):
-    if not (TELEGRAM_TOKEN and CHAT_ID):
-        print(f"[TG SIMULADO] {text}")
-        return
+    if not (TELEGRAM_TOKEN and CHAT_ID): print(f"[TG] {text}"); return
     try:
-        url = "https://api.telegram.org/bot{}/sendMessage".format(TELEGRAM_TOKEN)  # CORRETO
-        print(f"[TG ENVIANDO] {text[:60]}...")  # LOG
-        async with session.post(
-            url,
-            data={"chat_id": CHAT_ID, "text": text, "parse_mode": "HTML"},
-            timeout=REQ_TIMEOUT
-        ) as resp:
-            result = await resp.json()
-            if result.get("ok"):
-                print(f"[TG OK] Enviado com sucesso!")
-            else:
-                print(f"[TG ERRO] {result}")
-    except Exception as e:
-        print(f"[TG FALHOU] {e}")
+        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+        await session.post(url, data={"chat_id": CHAT_ID, "text": text, "parse_mode": "HTML"}, timeout=REQ_TIMEOUT)
+    except Exception as e: print(f"[TG ERRO] {e}")
 
 def fmt_price(x: float) -> str:
     return f"{x:.8f}".rstrip("0").rstrip(".") or "0"
@@ -57,28 +45,6 @@ def ema(seq, span):
         e = alpha * x + (1 - alpha) * e
         out.append(e)
     return out
-
-def calc_rsi(seq, period=14):
-    if len(seq) < period + 1: return [50.0] * len(seq)
-    gains, losses = [], []
-    for i in range(1, len(seq)):
-        diff = seq[i] - seq[i-1]
-        gains.append(max(diff, 0))
-        losses.append(abs(min(diff, 0)))
-    rsi = []
-    avg_gain = sum(gains[:period]) / period
-    avg_loss = sum(losses[:period]) / period
-    rs = avg_gain / (avg_loss + 1e-12)
-    rsi.append(100 - (100 / (1 + rs)))
-    for i in range(period, len(seq) - 1):
-        diff = seq[i] - seq[i-1]
-        gain = max(diff, 0)
-        loss = abs(min(diff, 0))
-        avg_gain = (avg_gain * (period - 1) + gain) / period
-        avg_loss = (avg_loss * (period - 1) + loss) / period
-        rs = avg_gain / (avg_loss + 1e-12)
-        rsi.append(100 - (100 / (1 + rs)))
-    return [50.0] * (len(seq) - len(rsi)) + rsi
 
 def macd(seq, fast=12, slow=26, signal=9):
     if len(seq) < slow + signal + 1:
@@ -137,11 +103,12 @@ def can_alert(symbol, tipo, cooldown_sec):
 # ---------------- WORKER ----------------
 async def scan_symbol(session, symbol, qv):
     try:
+        # === DADOS ===
         k5  = await get_klines(session, symbol, "5m",  100)
         k15 = await get_klines(session, symbol, "15m", 100)
         k30 = await get_klines(session, symbol, "30m", 100)
         k1h = await get_klines(session, symbol, "1h",  100)
-        if not (len(k5) and len(k15) and len(k30) and len(k1h)): return
+        if not all([k5, k15, k30, k1h]): return
 
         c5  = [float(k[4]) for k in k5]
         c15 = [float(k[4]) for k in k15]
@@ -149,14 +116,13 @@ async def scan_symbol(session, symbol, qv):
         c1h = [float(k[4]) for k in k1h]
         v5  = [float(k[5]) for k in k5]
 
-        i5, i15, i30, i1h = len(c5)-1, len(c15)-1, len(c30)-1, len(c1h)-1
-        volmed5 = sum(v5[-10:])/10 if len(v5) >= 10 else v5[-1]
+        volmed5 = sum(v5[-10:]) / 10 if len(v5) >= 10 else v5[-1]
 
         # === CRUZAMENTO 5M FECHADO ===
         c5_closed = c5[:-1]
         cruzou_5m = cruzou_de_baixo(c5_closed, 9, 20)
 
-        # === MACD EM VELAS FECHADAS ===
+        # === MACD FECHADO ===
         macd5  = macd(c5_closed)
         macd15 = macd(c15[:-1])
         macd30 = macd(c30[:-1])
@@ -167,75 +133,60 @@ async def scan_symbol(session, symbol, qv):
         h30 = macd30["hist"]
         h1h = macd1h["hist"]
 
-        # === HIST > 0.01 + CRESCENTE (SEM ROUND!) ===
+        # === FORÇA REAL: MACD > 0.02 + CRESCENTE ===
         hist_ok = (
-            len(h5)  >= 2 and h5[-1]  > 0.01 and h5[-1]  > h5[-2]  and
-            len(h15) >= 2 and h15[-1] > 0.01 and h15[-1] > h15[-2] and
-            len(h30) >= 2 and h30[-1] > 0.01 and h30[-1] > h30[-2] and
-            len(h1h) >= 2 and h1h[-1] > 0.01 and h1h[-1] > h1h[-2]
+            len(h5)  >= 2 and h5[-1]  > MIN_HIST and h5[-1]  > h5[-2]  and
+            len(h15) >= 2 and h15[-1] > MIN_HIST and h15[-1] > h15[-2] and
+            len(h30) >= 2 and h30[-1] > MIN_HIST and h30[-1] > h30[-2] and
+            len(h1h) >= 2 and h1h[-1] > MIN_HIST and h1h[-1] > h1h[-2]
         )
 
         # === FILTROS ===
-        rsi15 = calc_rsi(c15, 14)[i15]
+        rsi15 = calc_rsi(c15, 14)[-1]
         preco = c5[-1]
-        ema20_1h = ema(c1h, 20)[i1h] if len(c1h) > 20 else c1h[-1]
+        ema20_1h = ema(c1h, 20)[-1]
         filtro_forte = preco > ema20_1h and 45 <= rsi15 <= 68 and v5[-1] > volmed5 * 1.1
 
-        # === TESTE FORÇADO (REMOVA DEPOIS DE TESTAR) ===
-        if symbol == "BTCUSDT":
-            await tg(session, f"<b>TESTE V6.0 FUNCIONANDO!</b>\nBot corrigido e enviando.\n{now_br()}")
-            return
+        # === ALERTA ===
+        if cruzou_5m and hist_ok and filtro_forte and can_alert(symbol, "ALERTA", COOLDOWN_SEC):
+            stop = min([float(k[3]) for k in k5][-2:], ema(c5, 21)[-1])
+            risco = max(preco - stop, 1e-8)
+            alvo1 = preco + 2.5 * risco
+            alvo2 = preco + 5.0 * risco
 
-        # === ALERTA SÓ COM TUDO VERDADEIRO ===
-        if cruzou_5m and hist_ok and filtro_forte:
-            if can_alert(symbol, "CRUZAMENTO_5M", COOLDOWN_SEC):
-                l5 = [float(k[3]) for k in k5]
-                stop = min(l5[i5-1], ema(c5,21)[i5]) if i5 >= 1 else ema(c5,21)[i5]
-                risco = max(preco - stop, 1e-12)
-                alvo_1 = preco + 2.5 * risco
-                alvo_2 = preco + 5.0 * risco
+            liq = "Alta" if qv >= 1e8 else "Média" if qv >= 2e7 else "Baixa"
+            msg = (
+                f"<b>FORÇA BRUTA CONFIRMADA</b>\n"
+                f"<code>{symbol}</code>\n"
+                f"Preço: <b>{fmt_price(preco)}</b>\n"
+                f"Stop: {fmt_price(stop)}\n"
+                f"Alvo1: {fmt_price(alvo1)} (+{((alvo1/preco)-1)*100:.1f}%)\n"
+                f"Alvo2: {fmt_price(alvo2)} (+{((alvo2/preco)-1)*100:.1f}%)\n"
+                f"RSI15: {rsi15:.1f} | Vol: +{((v5[-1]/volmed5)-1)*100:.1f}%\n"
+                f"Liquidez: {liq} (${qv/1e6:.0f}M)\n"
+                f"{now_br()}"
+            )
+            await tg(session, msg)
 
-                liq = "Alta" if qv >= 100_000_000 else "Média" if qv >= 20_000_000 else "Baixa"
-                liq_status = f"{liq} (US$ {qv/1_000_000:.1f}M)"
-
-                msg = (
-                    f"<b>CRUZAMENTO 5M + FORÇA REAL!</b>\n"
-                    f"{symbol}\n"
-                    f"MACD > 0.01: 5m 15m 30m 1h\n"
-                    f"RSI15: {rsi15:.1f}\n"
-                    f"Liquidez: {liq_status}\n\n"
-                    f"Preço: {fmt_price(preco)}\n"
-                    f"Stop: {fmt_price(stop)}\n"
-                    f"Alvo1: {fmt_price(alvo_1)} (1:2.5)\n"
-                    f"Alvo2: {fmt_price(alvo_2)} (1:5)\n"
-                    f"{now_br()}"
-                )
-                await tg(session, msg)
-
-    except Exception as e:
-        print(f"[ERRO] {symbol}: {e}")
+    except Exception as e: print(f"[ERRO {symbol}] {e}")
 
 # ---------------- MAIN ----------------
 async def main_loop():
     async with aiohttp.ClientSession() as session:
         pares = await get_top_usdt_symbols(session)
-        await tg(session, f"<b>{VERSION} ATIVO</b>\nCruzamento 5m FECHADO + HIST > 0.01\n{len(pares)} pares\n{now_br()}")
+        await tg(session, f"<b>{VERSION} ONLINE</b>\nMACD > {MIN_HIST} | 50 pares | {now_br()}")
         while True:
             try:
                 await asyncio.gather(*[scan_symbol(session, s, qv) for s, qv in pares])
                 await asyncio.sleep(30)
             except Exception as e:
-                await tg(session, f"<b>ERRO NO BOT</b>\n{e}\nReiniciando...\n{now_br()}")
-                print(f"[LOOP ERRO] {e}")
+                await tg(session, f"<b>ERRO</b>: {e}")
                 await asyncio.sleep(10)
 
 def start_bot():
     while True:
-        try:
-            asyncio.run(main_loop())
-        except Exception as e:
-            print(f"[LOOP ERRO] {e}")
-            time.sleep(5)
+        try: asyncio.run(main_loop())
+        except: time.sleep(5)
 
 threading.Thread(target=start_bot, daemon=True).start()
 app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
