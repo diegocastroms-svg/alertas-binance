@@ -1,11 +1,8 @@
-# main.py — V6.5A – OURO CONFLUÊNCIA CURTA (AGRESSIVA) + 1H MACD VERDE
-# 3m: EMA9 acima da EMA20 + RSI 40–80
-# 5m, 15m, 30m, 1h: MACD verde (alinhamento)
-# liquidez mínima 20M USDT + 1000 trades
-# bloqueio automático de moedas mortas
-# alerta com “TENDÊNCIA CURTA”
-# cooldown de 10 minutos
-# top 50 pares de maior volume (atualizado a cada 5 min)
+# main.py — V7.0 OURO CONFLUÊNCIA FORTE (MACD VERDE + EXPANSÃO)
+# 3m: EMA9 > EMA20 + RSI 40-80 + Volume crescente
+# 5m/15m/30m/1h: MACD hist > 0 e hist[-1] > hist[-2] (expansão)
+# Top 50 USDT | Liquidez > 20M | >1000 trades
+# Cooldown 10 min | Alerta com alvos 1:2.5 e 1:5
 
 import os, asyncio, aiohttp, time
 from datetime import datetime, timedelta
@@ -16,9 +13,9 @@ import threading
 BINANCE_HTTP = "https://api.binance.com"
 COOLDOWN_SEC = 10 * 60
 TOP_N = 50
-REQ_TIMEOUT = 8
-UPDATE_TOP_INTERVAL = 10  # ciclos (30s cada) → 5 min
-VERSION = "V6.5A - OURO CONFLUÊNCIA CURTA (AGRESSIVA)"
+REQ_TIMEOUT = 10
+UPDATE_TOP_INTERVAL = 10  # 5 min
+VERSION = "V7.0 - OURO CONFLUÊNCIA FORTE"
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 CHAT_ID = os.getenv("CHAT_ID", "").strip()
@@ -27,7 +24,7 @@ CHAT_ID = os.getenv("CHAT_ID", "").strip()
 app = Flask(__name__)
 @app.route("/")
 def home():
-    return f"{VERSION} | 3m EMA+RSI (40–80) | 5m/15m/30m/1h MACD VERDE | 50 pares", 200
+    return f"{VERSION} | MACD VERDE + EXPANSÃO | 3m EMA9>20 + RSI 40-80", 200
 
 # ---------------- UTILS ----------------
 def now_br():
@@ -43,66 +40,45 @@ async def tg(session, text: str):
     except Exception as e:
         print(f"[TG ERRO] {e}")
 
-def ema(seq, span):
-    if not seq: return []
-    alpha = 2 / (span + 1)
-    e = seq[0]
-    out = [e]
-    for x in seq[1:]:
-        e = alpha * x + (1 - alpha) * e
-        out.append(e)
+def ema(seq, period):
+    if len(seq) < period: return []
+    alpha = 2 / (period + 1)
+    ema_val = seq[0]
+    out = [ema_val]
+    for price in seq[1:]:
+        ema_val = alpha * price + (1 - alpha) * ema_val
+        out.append(ema_val)
     return out
 
-def macd(seq, fast=12, slow=26, signal=9):
-    if len(seq) < slow:
-        return {"macd": [], "signal": [], "hist": []}
-    ema_fast = ema(seq, fast)
-    ema_slow = ema(seq, slow)
-    macd_line = [f - s for f, s in zip(ema_fast, ema_slow)]
-    if len(macd_line) < signal:
-        return {"macd": macd_line, "signal": [], "hist": []}
-    signal_line = ema(macd_line, signal)
-    hist = [m - s for m, s in zip(macd_line[-len(signal_line):], signal_line)]
-    pad = len(macd_line) - len(hist)
-    return {
-        "macd": macd_line,
-        "signal": [0]*pad + signal_line,
-        "hist": [0]*pad + hist
-    }
+def macd_expansao(hist):
+    if len(hist) < 2: return False
+    return hist[-1] > 0 and hist[-1] > hist[-2]  # verde e crescendo
 
-def calc_rsi(seq, period=14):
-    if len(seq) < period + 1:
-        return [50.0] * len(seq)
-    rsi = []
-    gain = loss = 0.0
-    for i in range(1, period + 1):
-        delta = seq[i] - seq[i - 1]
-        gain += max(delta, 0)
-        loss += abs(min(delta, 0))
-    gain /= period
-    loss /= period
-    rs = gain / (loss + 1e-12)
-    rsi.append(100 - 100 / (1 + rs))
-    for i in range(period + 1, len(seq)):
-        delta = seq[i] - seq[i - 1]
-        gain = (gain * (period - 1) + max(delta, 0)) / period
-        loss = (loss * (period - 1) + abs(min(delta, 0))) / period
-        rs = gain / (loss + 1e-12)
-        rsi.append(100 - 100 / (1 + rs))
-    return [50.0] * (len(seq) - len(rsi)) + rsi
-
-def ema_alinhada(c, p9=9, p20=20):
-    if len(c) < p20: return False
-    e9, e20 = ema(c, p9), ema(c, p20)
-    return e9[-1] > e20[-1]
+def calc_rsi(prices, period=14):
+    if len(prices) < period + 1: return 50.0
+    deltas = [prices[i] - prices[i-1] for i in range(1, len(prices))]
+    gains = [d for d in deltas[:period] if d > 0]
+    losses = [-d for d in deltas[:period] if d < 0]
+    avg_gain = sum(gains) / period if gains else 0
+    avg_loss = sum(losses) / period if losses else 1e-12
+    rs = avg_gain / avg_loss
+    rsi = [100 - 100/(1+rs)] if rs > 0 else [100]
+    for i in range(period, len(deltas)):
+        delta = deltas[i]
+        gain = delta if delta > 0 else 0
+        loss = -delta if delta < 0 else 0
+        avg_gain = (avg_gain * (period-1) + gain) / period
+        avg_loss = (avg_loss * (period-1) + loss) / period
+        rs = avg_gain / (avg_loss + 1e-12)
+        rsi.append(100 - 100/(1+rs))
+    return rsi[-1] if rsi else 50.0
 
 # ---------------- BINANCE ----------------
 async def get_klines(session, symbol, interval, limit=100):
     url = f"{BINANCE_HTTP}/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
     try:
         async with session.get(url, timeout=REQ_TIMEOUT) as r:
-            if r.status != 200:
-                return []
+            if r.status != 200: return []
             return await r.json()
     except:
         return []
@@ -111,124 +87,145 @@ async def get_top_usdt_symbols(session):
     try:
         url = f"{BINANCE_HTTP}/api/v3/ticker/24hr"
         async with session.get(url, timeout=REQ_TIMEOUT) as r:
-            if r.status != 200:
-                return []
+            if r.status != 200: return []
             data = await r.json()
-        blocked = ("UP","DOWN","BULL","BEAR","BUSD","FDUSB","TUSD","USDC","EUR","BRL","PERP","TEST","USDE")
+        blocked = ("UP","DOWN","BULL","BEAR","BUSD","FDUSD","TUSD","USDC","EUR","BRL","PERP","TEST","USDE")
         pares = []
         for d in data:
-            s = d.get("symbol", "")
+            s = d["symbol"]
             if not s.endswith("USDT"): continue
             if any(x in s for x in blocked): continue
-            qv = float(d.get("quoteVolume", 0) or 0)
-            count = int(d.get("count", 0))
-            if qv < 20_000_000 or count < 1000: continue
+            qv = float(d.get("quoteVolume", 0))
+            trades = int(d.get("count", 0))
+            if qv < 20_000_000 or trades < 1000: continue
             pares.append((s, qv))
         pares.sort(key=lambda x: x[1], reverse=True)
-        return pares[:TOP_N]
-    except:
+        return [p[0] for p in pares[:TOP_N]]
+    except Exception as e:
+        print(f"[ERRO TOP] {e}")
         return []
 
 # ---------------- COOLDOWN ----------------
 cooldowns = {}
-
-def can_alert(symbol, cooldown_sec):
+def can_alert(symbol):
     now = time.time()
     last = cooldowns.get(symbol, 0)
-    if now - last > cooldown_sec:
+    if now - last >= COOLDOWN_SEC:
         cooldowns[symbol] = now
+        # limpa antigos
         cutoff = now - 3600
         to_remove = [k for k, v in cooldowns.items() if v < cutoff]
-        for k in to_remove:
-            del cooldowns[k]
+        for k in to_remove: del cooldowns[k]
         return True
     return False
 
-# ---------------- WORKER ----------------
+# ---------------- SCAN ----------------
 async def scan_symbol(session, symbol):
     try:
-        k3  = await get_klines(session, symbol, "3m", 100)
-        k5  = await get_klines(session, symbol, "5m", 100)
-        k15 = await get_klines(session, symbol, "15m", 100)
-        k30 = await get_klines(session, symbol, "30m", 100)
-        k1h = await get_klines(session, symbol, "1h", 100)  # ADICIONADO: 1h
-        if not (k3 and k5 and k15 and k30 and k1h): return
+        # Pegar dados (apenas candles fechados)
+        k3  = await get_klines(session, symbol, "3m", 50)
+        k5  = await get_klines(session, symbol, "5m", 50)
+        k15 = await get_klines(session, symbol, "15m", 50)
+        k30 = await get_klines(session, symbol, "30m", 50)
+        k1h = await get_klines(session, symbol, "1h", 50)
 
-        c3  = [float(k[4]) for k in k3]
-        c5  = [float(k[4]) for k in k5]
-        c15 = [float(k[4]) for k in k15]
-        c30 = [float(k[4]) for k in k30]
-        c1h = [float(k[4]) for k in k1h]  # ADICIONADO: 1h
+        if not all([k3, k5, k15, k30, k1h]) or len(k3) < 30: return
 
-        macd5 = macd(c5)
-        macd15 = macd(c15)
-        macd30 = macd(c30)
-        macd1h = macd(c1h)  # ADICIONADO: MACD 1h
+        # Preços de fechamento (fechados: até -2)
+        close3  = [float(k[4]) for k in k3[:-1]]
+        close5  = [float(k[4]) for k in k5[:-1]]
+        close15 = [float(k[4]) for k in k15[:-1]]
+        close30 = [float(k[4]) for k in k30[:-1]]
+        close1h = [float(k[4]) for k in k1h[:-1]]
 
-        acima3 = ema_alinhada(c3, 9, 20)
-        rsi3 = calc_rsi(c3)[-1]
+        volume3 = [float(k[5]) for k in k3[:-1]]
 
-        hist5 = macd5["hist"]
+        # --- 3m: EMA9 > EMA20 + RSI + Volume ---
+        ema9  = ema(close3, 9)
+        ema20 = ema(close3, 20)
+        if len(ema9) == 0 or len(ema20) == 0: return
+        ema_ok = ema9[-1] > ema20[-1]
+
+        rsi3 = calc_rsi(close3[-30:])
+        rsi_ok = 40 <= rsi3 <= 80
+
+        vol_ok = volume3[-1] > volume3[-2] > volume3[-3]  # 3 velas crescentes
+
+        # --- MACD com expansão ---
+        macd5  = macd(close5)
+        macd15 = macd(close15)
+        macd30 = macd(close30)
+        macd1h = macd(close1h)
+
+        hist5  = macd5["hist"]
         hist15 = macd15["hist"]
         hist30 = macd30["hist"]
-        hist1h = macd1h["hist"]  # ADICIONADO: histograma 1h
+        hist1h = macd1h["hist"]
 
-        hist5_ok = len(hist5) >= 1 and hist5[-1] > 0
-        hist15_ok = len(hist15) >= 1 and hist15[-1] > 0
-        hist30_ok = len(hist30) >= 1 and hist30[-1] > 0
-        hist1h_ok = len(hist1h) >= 1 and hist1h[-1] > 0  # ADICIONADO: 1h verde
+        macd_ok = all([
+            len(h) >= 2 and macd_expansao(h[-2:])  # usa últimos 2 fechados
+            for h in [hist5, hist15, hist30, hist1h]
+        ])
 
-        cond = (
-            acima3 and
-            hist5_ok and hist15_ok and hist30_ok and hist1h_ok and
-            40 <= rsi3 <= 80
-        )
+        # --- CONDIÇÃO FINAL ---
+        if ema_ok and rsi_ok and vol_ok and macd_ok and can_alert(symbol):
+            preco = close5[-1]  # último fechado
+            preco_ant = close5[-2]
+            var_5m = (preco - preco_ant) / preco_ant * 100
 
-        if cond and can_alert(symbol, COOLDOWN_SEC):
-            preco = c5[-2]  # vela fechada
-            l5 = [float(k[3]) for k in k5]
-            ema21 = ema(c5[:-1], 21)
+            # Stop: mínima das últimas 2 velas 5m ou EMA21
+            low5 = [float(k[3]) for k in k5[-3:-1]]
+            ema21 = ema(close5, 21)
             ema21_val = ema21[-1] if ema21 else preco
-            stop = min(l5[-2], ema21_val)
-            risco = max(preco - stop, 1e-12)
-            alvo1, alvo2 = preco + 2.5*risco, preco + 5*risco
-            preco_anterior = c5[-3] if len(c5) >= 3 else preco
-            variacao = ((preco - preco_anterior) / preco_anterior) * 100 if preco_anterior != 0 else 0
+            stop = min(min(low5), ema21_val * 0.995)  # margem
+
+            risco = max(preco - stop, preco * 0.001)  # min 0.1%
+            alvo1 = preco + 2.5 * risco
+            alvo2 = preco + 5.0 * risco
 
             msg = (
-                f"<b>TENDÊNCIA CURTA CONFIRMADA (AGRESSIVA)</b>\n"
-                f"{symbol}\n"
-                f"3m RSI:{rsi3:.1f} | 5m 15m 30m 1h\n"
-                f"Preço: {preco:.6f} ({variacao:+.2f}%)\n"
-                f"Stop: {stop:.6f}\n"
-                f"Alvo1: {alvo1:.6f} (1:2.5)\n"
-                f"Alvo2: {alvo2:.6f} (1:5)\n"
-                f"{now_br()}"
+                f"<b>🚀 TENDÊNCIA CURTA FORTE</b>\n"
+                f"<code>{symbol}</code>\n"
+                f"RSI 3m: <b>{rsi3:.1f}</b> | MACD 5m/15m/30m/1h <b>VERDE + EXPANSÃO</b>\n"
+                f"Preço: <b>{preco:.6f}</b> ({var_5m:+.2f}%)\n"
+                f"Stop: <b>{stop:.6f}</b>\n"
+                f"Alvo 1: <b>{alvo1:.6f}</b> (1:2.5)\n"
+                f"Alvo 2: <b>{alvo2:.6f}</b> (1:5)\n"
+                f"<i>{now_br()}</i>"
             )
             await tg(session, msg)
-            print(f"[ALERTA] {symbol} | RSI={rsi3:.1f}")
+            print(f"[SINAL FORTE] {symbol} | RSI={rsi3:.1f} | Preço={preco:.6f}")
 
     except Exception as e:
-        print(f"[ERRO] {symbol}: {e}")
+        print(f"[ERRO SCAN] {symbol}: {e}")
+
+def macd(prices, fast=12, slow=26, signal=9):
+    if len(prices) < slow + signal: return {"hist": []}
+    ema_fast = ema(prices, fast)
+    ema_slow = ema(prices, slow)
+    macd_line = [f - s for f, s in zip(ema_fast, ema_slow)]
+    signal_line = ema(macd_line, signal)
+    hist = [m - s for m, s in zip(macd_line[-len(signal_line):], signal_line)]
+    return {"hist": hist}
 
 # ---------------- MAIN ----------------
 async def main_loop():
     async with aiohttp.ClientSession() as session:
-        pares = await get_top_usdt_symbols(session)
-        if pares:
-            await tg(session, f"<b>{VERSION} ATIVO</b>\n3m EMA+RSI (40–80) | 5m/15m/30m/1h MACD VERDE\n{len(pares)} pares\n{now_br()}")
-            print(f"[{now_br()}] MONITORANDO {len(pares)} PARES USDT...")
+        top_symbols = await get_top_usdt_symbols(session)
+        if top_symbols:
+            await tg(session, f"<b>{VERSION} ATIVO</b>\nConfluência FORTE + MACD em expansão\n{len(top_symbols)} pares monitorados\n{now_br()}")
+            print(f"[{now_br()}] Iniciado com {len(top_symbols)} pares")
 
         cycle = 0
         while True:
             cycle += 1
             if cycle % UPDATE_TOP_INTERVAL == 1:
-                pares = await get_top_usdt_symbols(session)
-                print(f"[{now_br()}] Top 50 atualizado: {len(pares)} pares")
+                top_symbols = await get_top_usdt_symbols(session)
+                print(f"[{now_br()}] Top 50 atualizado: {len(top_symbols)} pares")
 
-            print(f"[{now_br()}] Iniciando varredura...")
-            await asyncio.gather(*[scan_symbol(session, s) for s, _ in pares])
-            print(f"[{now_br()}] Varredura concluída. Aguardando 30s...")
+            print(f"[{now_br()}] Ciclo {cycle} - Varredura iniciada...")
+            await asyncio.gather(*[scan_symbol(session, s) for s in top_symbols], return_exceptions=True)
+            print(f"[{now_br()}] Varredura concluída. Próximo em 30s...")
             await asyncio.sleep(30)
 
 def start_bot():
@@ -236,6 +233,8 @@ def start_bot():
     asyncio.set_event_loop(loop)
     try:
         loop.run_until_complete(main_loop())
+    except KeyboardInterrupt:
+        print("Bot parado.")
     except Exception as e:
         print(f"[FATAL] {e}")
         time.sleep(5)
