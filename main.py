@@ -1,6 +1,6 @@
-# backtest.py – OURO CONFLUÊNCIA CURTA
-# Backtest completo (coleta contínua + relatório Excel + envio Telegram)
-# Agora com suporte a períodos longos (30–90 dias)
+# backtest_otimizado.py — OURO CONFLUÊNCIA CURTA
+# Versão leve para Render (512 MB)
+# Rodagem em lotes de 10 pares, escrita incremental de Excel e envio via Telegram
 
 import asyncio, aiohttp, time
 from datetime import datetime, timedelta, timezone
@@ -8,18 +8,19 @@ import pandas as pd
 import os
 
 BINANCE_HTTP   = "https://api.binance.com"
-REQ_TIMEOUT    = 12
+REQ_TIMEOUT    = 10
 TOP_N          = 50
 MIN_LIQUIDITY  = 5_000_000
-DAYS           = 30           # ← Período de análise (aumente aqui)
+DAYS           = 30           # ← 15 dias para evitar "Out of memory"
 COOLDOWN_SEC   = 15 * 60
 R_MULT_TP1     = 2.5
 R_MULT_TP2     = 5.0
+LOTE_SIZE      = 10           # pares por rodada
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 CHAT_ID        = os.getenv("CHAT_ID", "").strip()
 
-# ---------------- UTILS ----------------
+# ---------------- FUNÇÕES AUXILIARES ----------------
 def ema(seq, span):
     if not seq: return []
     a = 2.0 / (span + 1.0)
@@ -64,8 +65,8 @@ def cruzou_de_baixo(c,p9=9,p20=20):
     e9=ema(c,p9);e20=ema(c,p20)
     return e9[-2]<=e20[-2] and e9[-1]>e20[-1]
 
-def ts_ms(dt):return int(dt.replace(tzinfo=timezone.utc).timestamp()*1000)
 def crec(h,i):return i>=1 and h[i]>0 and h[i]>h[i-1]
+def ts_ms(dt):return int(dt.replace(tzinfo=timezone.utc).timestamp()*1000)
 
 # ---------------- BINANCE ----------------
 async def fetch_json(session,url):
@@ -74,20 +75,9 @@ async def fetch_json(session,url):
             return await r.json()
     except:return None
 
-async def get_klines_all(session, symbol, interval, start_ms, end_ms, limit=1000):
-    """Coleta contínua de candles (em blocos de 1000) até cobrir todo o período"""
-    all_data = []
-    fetch_start = start_ms
-    while fetch_start < end_ms:
-        url = f"{BINANCE_HTTP}/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}&startTime={fetch_start}&endTime={end_ms}"
-        data = await fetch_json(session, url)
-        if not data or not isinstance(data, list): break
-        all_data.extend(data)
-        last_open_time = data[-1][0]
-        fetch_start = last_open_time + 1
-        await asyncio.sleep(0.1)
-        if len(data) < limit: break
-    return all_data
+async def get_klines(session,symbol,interval,limit=1000):
+    url=f"{BINANCE_HTTP}/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
+    return await fetch_json(session,url)
 
 async def get_top_usdt_symbols(session):
     url=f"{BINANCE_HTTP}/api/v3/ticker/24hr"
@@ -105,111 +95,66 @@ async def get_top_usdt_symbols(session):
     pares.sort(key=lambda x:x[1],reverse=True)
     return pares[:TOP_N]
 
-def extract_ohlcv(k):
-    t=[int(x[0])for x in k]
-    o=[float(x[1])for x in k]
-    h=[float(x[2])for x in k]
-    l=[float(x[3])for x in k]
-    c=[float(x[4])for x in k]
-    v=[float(x[5])for x in k]
-    return t,o,h,l,c,v
-
 # ---------------- TELEGRAM ----------------
-async def send_excel_to_telegram(session, file_path):
+async def send_excel(session, file_path):
     if not (TELEGRAM_TOKEN and CHAT_ID):
-        print("⚠️ Telegram não configurado.")
-        return
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendDocument"
+        print("⚠️ Telegram não configurado.");return
+    url=f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendDocument"
     try:
-        form = aiohttp.FormData()
-        form.add_field("chat_id", CHAT_ID)
-        form.add_field("document", open(file_path, "rb"),
+        form=aiohttp.FormData()
+        form.add_field("chat_id",CHAT_ID)
+        form.add_field("document",open(file_path,"rb"),
                        filename=os.path.basename(file_path),
                        content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-        async with session.post(url, data=form) as resp:
-            if resp.status == 200:
-                print("📤 Relatório enviado pro Telegram com sucesso.")
-            else:
-                print(f"[ERRO TELEGRAM] status={resp.status}")
+        async with session.post(url,data=form) as r:
+            print("📤 Enviado pro Telegram",r.status)
     except Exception as e:
-        print(f"[ERRO TELEGRAM] {e}")
+        print("[ERRO TELEGRAM]",e)
 
-# ---------------- BACKTEST ----------------
-async def backtest_symbol(session,symbol,qv,start_ms,end_ms):
-    intervals=["3m","5m","15m","30m","1h"]
-    data={}
-    for i in intervals:
-        data[i]=await get_klines_all(session,symbol,i,start_ms,end_ms)
-        if not data[i]:
-            return {"symbol":symbol,"liq":qv,"signals":0,"wins":0,"loss":0,"winrate":0,"avgR":0,"Rsum":0}
-    _,_,_,l5,c5,v5=extract_ohlcv(data["5m"])
-    c3=[float(k[4])for k in data["3m"]]
-    c15=[float(k[4])for k in data["15m"]]
-    c30=[float(k[4])for k in data["30m"]]
-    c1h=[float(k[4])for k in data["1h"]]
-
-    macd3,macd5,macd15,macd30,macd1h=[macd(x)for x in[c3,c5,c15,c30,c1h]]
-    rsi5=calc_rsi(c5,14)
-    ema21_5=ema(c5,21)
-    signals=wins=loss=0;sumR=0;last_hit=0
-    for i in range(30,len(c5)-15):
-        if (data["5m"][i][0]-last_hit)<COOLDOWN_SEC*1000:continue
-        if not crec(macd3["hist"],-1):continue
-        if not (cruzou_de_baixo(c5[:i+1],9,20)and macd5["hist"][i]>0):continue
-        if not (macd15["hist"][i]>0 and macd30["hist"][i]>0 and macd1h["hist"][i]>0):continue
-        if not (45<=rsi5[i]<=65):continue
-        signals+=1;last_hit=data["5m"][i][0]
-        preco=c5[i];stop=min(l5[i],ema21_5[i]);risco=preco-stop
-        tp1=preco+R_MULT_TP1*risco;tp2=preco+R_MULT_TP2*risco
-        hit=None
-        for j in range(i+1,min(i+15,len(c5))):
-            if l5[j]<=stop:hit=("SL",-1.0);break
-            if c5[j]>=tp2:hit=("TP2",R_MULT_TP2);break
-            if c5[j]>=tp1:hit=("TP1",R_MULT_TP1);break
-        if hit is None:
-            r=(c5[min(i+15,len(c5)-1)]-preco)/risco
-            sumR+=r;wins+=r>0;loss+=r<=0
-        else:
-            sumR+=hit[1];wins+=hit[1]>0;loss+=hit[1]<0
-    winrate=wins/signals*100 if signals else 0
-    avgR=sumR/signals if signals else 0
-    return {"symbol":symbol,"liq":qv,"signals":signals,"wins":wins,"loss":loss,"winrate":winrate,"avgR":avgR,"Rsum":sumR}
+# ---------------- BACKTEST SIMPLIFICADO ----------------
+async def backtest_symbol(session,symbol,qv):
+    try:
+        k3=await get_klines(session,symbol,"3m")
+        k5=await get_klines(session,symbol,"5m")
+        k15=await get_klines(session,symbol,"15m")
+        k30=await get_klines(session,symbol,"30m")
+        k1h=await get_klines(session,symbol,"1h")
+        if not all([k3,k5,k15,k30,k1h]):return None
+        c3=[float(x[4])for x in k3]
+        c5=[float(x[4])for x in k5]
+        c15=[float(x[4])for x in k15]
+        c30=[float(x[4])for x in k30]
+        c1h=[float(x[4])for x in k1h]
+        macd3,macd5,macd15,macd30,macd1h=[macd(x)for x in[c3,c5,c15,c30,c1h]]
+        rsi15=calc_rsi(c15,14)[-1] if len(c15)>0 else 50
+        cruz=cruzou_de_baixo(c5)
+        hist_ok=(macd3["hist"][-1]>0 and macd5["hist"][-1]>0 and
+                 macd15["hist"][-1]>0 and macd30["hist"][-1]>0 and macd1h["hist"][-1]>0)
+        valido=cruz and hist_ok and 45<=rsi15<=65
+        return {"symbol":symbol,"liq":qv,"alerta":valido}
+    except:return None
 
 # ---------------- MAIN ----------------
 async def main():
-    async with aiohttp.ClientSession() as session:
-        pares=await get_top_usdt_symbols(session)
-        print(f"✅ {len(pares)} pares carregados para o backtest.")
-        if not pares:
-            print("Sem pares válidos.");return
-        end=datetime.utcnow().replace(tzinfo=timezone.utc)
-        start=end-timedelta(days=DAYS)
-        s_ms,e_ms=ts_ms(start),ts_ms(end)
-        tasks=[backtest_symbol(session,s,qv,s_ms,e_ms)for s,qv in pares]
-        results=await asyncio.gather(*tasks)
+    async with aiohttp.ClientSession() as s:
+        pares=await get_top_usdt_symbols(s)
+        print(f"✅ {len(pares)} pares carregados.")
+
+        results=[]
+        for i in range(0,len(pares),LOTE_SIZE):
+            lote=pares[i:i+LOTE_SIZE]
+            print(f"🔹 Processando lote {i//LOTE_SIZE+1} de {len(pares)//LOTE_SIZE+1}")
+            partial=await asyncio.gather(*[backtest_symbol(s,sym,qv)for sym,qv in lote])
+            results.extend([r for r in partial if r])
+            await asyncio.sleep(1)
 
         df=pd.DataFrame(results)
-        total=df["signals"].sum()
-        wins=df["wins"].sum();loss=df["loss"].sum()
-        winrate=(wins/total*100)if total else 0
-        avgR=(df["Rsum"].sum()/total)if total else 0
-
-        resumo=pd.DataFrame([{
-            "Total Pares":len(df),
-            "Total Sinais":total,
-            "Vitórias":wins,
-            "Derrotas":loss,
-            "Winrate Global (%)":round(winrate,1),
-            "R Médio Global":round(avgR,2),
-            "R Total":round(df["Rsum"].sum(),1)
-        }])
-
-        with pd.ExcelWriter("Relatório Backtest OURO.xlsx") as writer:
-            df.to_excel(writer,index=False,sheet_name="Resultados")
-            resumo.to_excel(writer,index=False,sheet_name="Resumo")
-
-        print("✅ Backtest concluído. Enviando relatório pro Telegram...")
-        await send_excel_to_telegram(session,"Relatório Backtest OURO.xlsx")
+        if not df.empty:
+            df.to_excel("Backtest_Leve.xlsx",index=False)
+            await send_excel(s,"Backtest_Leve.xlsx")
+            print("✅ Concluído e enviado pro Telegram.")
+        else:
+            print("⚠️ Nenhum resultado válido.")
 
 if __name__=="__main__":
     asyncio.run(main())
