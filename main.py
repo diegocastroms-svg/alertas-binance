@@ -1,7 +1,7 @@
-# main.py — V6.3C – OURO CONFLUÊNCIA CURTA (AGRESSIVA) – GLOBAL CORRIGIDO
+# main.py — V6.4A – OURO CONFLUÊNCIA CURTA (AGRESSIVA) – SEM HIST. CRESCENTE
 # 3m: EMA9 acima da EMA20 + RSI 40–80
 # 5m, 15m e 30m: MACD verde (alinhamento)
-# histograma crescente
+# SEM histograma crescente (removido conforme solicitado)
 # liquidez mínima 20M USDT + 1000 trades
 # bloqueio automático de moedas mortas
 # alerta com “TENDÊNCIA CURTA”
@@ -19,7 +19,7 @@ COOLDOWN_SEC = 10 * 60
 TOP_N = 50
 REQ_TIMEOUT = 8
 UPDATE_TOP_INTERVAL = 10  # ciclos (30s cada) → 5 min
-VERSION = "V6.3C - OURO CONFLUÊNCIA CURTA (AGRESSIVA)"
+VERSION = "V6.4A - OURO CONFLUÊNCIA CURTA (AGRESSIVA)"
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 CHAT_ID = os.getenv("CHAT_ID", "").strip()
@@ -28,7 +28,7 @@ CHAT_ID = os.getenv("CHAT_ID", "").strip()
 app = Flask(__name__)
 @app.route("/")
 def home():
-    return f"{VERSION} | 3m EMA+RSI (40–80) | 5m/15m/30m MACD | 50 pares", 200
+    return f"{VERSION} | 3m EMA+RSI (40–80) | 5m/15m/30m MACD VERDE | 50 pares", 200
 
 # ---------------- UTILS ----------------
 def now_br():
@@ -115,7 +115,7 @@ async def get_top_usdt_symbols(session):
             if r.status != 200:
                 return []
             data = await r.json()
-        blocked = ("UP","DOWN","BULL","BEAR","BUSD","FDUSD","TUSD","USDC","EUR","BRL","PERP","TEST","USDE")
+        blocked = ("UP","DOWN","BULL","BEAR","BUSD","FDUSB","TUSD","USDC","EUR","BRL","PERP","TEST","USDE")
         pares = []
         for d in data:
             s = d.get("symbol", "")
@@ -132,15 +132,16 @@ async def get_top_usdt_symbols(session):
 
 # ---------------- COOLDOWN ----------------
 cooldowns = {}
+
 def can_alert(symbol, cooldown_sec):
-    global cooldowns
     now = time.time()
     last = cooldowns.get(symbol, 0)
     if now - last > cooldown_sec:
         cooldowns[symbol] = now
-        # Limpeza de entradas antigas (>1h)
         cutoff = now - 3600
-        cooldowns = {k: v for k, v in cooldowns.items() if v > cutoff}
+        to_remove = [k for k, v in cooldowns.items() if v < cutoff]
+        for k in to_remove:
+            del cooldowns[k]
         return True
     return False
 
@@ -158,7 +159,6 @@ async def scan_symbol(session, symbol):
         c15 = [float(k[4]) for k in k15]
         c30 = [float(k[4]) for k in k30]
 
-        macd3 = macd(c3)
         macd5 = macd(c5)
         macd15 = macd(c15)
         macd30 = macd(c30)
@@ -173,12 +173,12 @@ async def scan_symbol(session, symbol):
         hist5_ok = len(hist5) >= 1 and hist5[-1] > 0
         hist15_ok = len(hist15) >= 1 and hist15[-1] > 0
         hist30_ok = len(hist30) >= 1 and hist30[-1] > 0
-        hist_crescente = len(hist5) >= 2 and hist5[-1] > hist5[-2]
+
+        # REMOVIDO: hist_crescente = len(hist5) >= 2 and hist5[-1] > hist5[-2]
 
         cond = (
             acima3 and
             hist5_ok and hist15_ok and hist30_ok and
-            hist_crescente and
             40 <= rsi3 <= 80
         )
 
@@ -214,7 +214,7 @@ async def main_loop():
     async with aiohttp.ClientSession() as session:
         pares = await get_top_usdt_symbols(session)
         if pares:
-            await tg(session, f"<b>{VERSION} ATIVO</b>\n3m EMA+RSI (40–80) | 5m/15m/30m MACD\n{len(pares)} pares\n{now_br()}")
+            await tg(session, f"<b>{VERSION} ATIVO</b>\n3m EMA+RSI (40–80) | 5m/15m/30m MACD VERDE\n{len(pares)} pares\n{now_br()}")
             print(f"[{now_br()}] MONITORANDO {len(pares)} PARES USDT...")
 
         cycle = 0
