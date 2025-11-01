@@ -152,7 +152,7 @@ async def scan_symbol(session, symbol):
             macd15["hist"][-1] > 0 and
             macd30["hist"][-1] > 0 and
             (macd5["hist"][-1] > macd5["hist"][-2]) and
-            45 <= rsi5 <= 65
+            45 <= rsi5 <= 70
         )
 
         if cond and can_alert(symbol, COOLDOWN_SEC):
@@ -196,3 +196,4 @@ def start_bot():
 
 threading.Thread(target=start_bot, daemon=True).start()
 app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
+
