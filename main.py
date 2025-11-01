@@ -1,5 +1,5 @@
 # main.py — V6.2A – OURO CONFLUÊNCIA CURTA (AGRESSIVA)
-# 3m: cruzamento EMA9 subindo EMA20 + RSI 40–80
+# 3m: EMA9 acima da EMA20 + RSI 40–80
 # 5m, 15m e 30m: MACD verde
 # histograma crescente
 # liquidez mínima 20M USDT
@@ -84,10 +84,11 @@ def calc_rsi(seq, period=14):
         rsi.append(100 - 100 / (1 + rs))
     return [50.0] * (len(seq) - len(rsi)) + rsi
 
+# ✅ ALTERAÇÃO: considerar EMA9 > EMA20 (não apenas o cruzamento)
 def cruzou_de_baixo(c, p9=9, p20=20):
     if len(c) < p20 + 2: return False
     e9, e20 = ema(c, p9), ema(c, p20)
-    return e9[-2] <= e20[-2] and e9[-1] > e20[-1]
+    return e9[-1] > e20[-1]
 
 # ---------------- BINANCE ----------------
 async def get_klines(session, symbol, interval, limit=100):
@@ -161,7 +162,6 @@ async def scan_symbol(session, symbol):
             risco = max(preco - stop, 1e-12)
             alvo1, alvo2 = preco + 2.5*risco, preco + 5*risco
 
-            # variação percentual do candle
             preco_anterior = c5[-2]
             variacao = ((preco - preco_anterior) / preco_anterior) * 100
 
@@ -185,10 +185,8 @@ async def main_loop():
     async with aiohttp.ClientSession() as session:
         pares = await get_top_usdt_symbols(session)
         await tg(session, f"<b>{VERSION} ATIVO</b>\n3m EMA+RSI (40–80) | 5m/15m/30m MACD\n{len(pares)} pares\n{now_br()}")
-
-        # 🔹 Logs para Render — monitoramento visual
         print(f"[{now_br()}] MONITORANDO {len(pares)} PARES USDT...")
-        
+
         while True:
             print(f"[{now_br()}] Iniciando varredura...")
             await asyncio.gather(*[scan_symbol(session, s) for s, _ in pares])
