@@ -1,5 +1,5 @@
-# main.py — V9.5 REVERSÃO DO FUNDO (CURTO FORTE)
-# 3m | Volume 5x+ | MACD 4 velas | EMA forte | RSI subindo
+# main.py — V10.5 DUAL MODE (REVERSÃO FORTE + FUNDO DUPLO)
+# 3m | Dois alertas diferentes | Mesmo código
 
 import os, asyncio, aiohttp, time
 from datetime import datetime, timedelta
@@ -11,8 +11,7 @@ BINANCE_HTTP = "https://api.binance.com"
 COOLDOWN_SEC = 10 * 60
 TOP_N = 120
 REQ_TIMEOUT = 10
-UPDATE_INTERVAL = 3  # 3 min
-VERSION = "V9.5 - REVERSÃO FORTE"
+VERSION = "V10.5 DUAL"
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 CHAT_ID = os.getenv("CHAT_ID", "").strip()
@@ -21,7 +20,7 @@ CHAT_ID = os.getenv("CHAT_ID", "").strip()
 app = Flask(__name__)
 @app.route("/")
 def home():
-    return f"{VERSION} | Reversão Forte 3m | +10% em 15-45 min", 200
+    return f"{VERSION} | Dual: Reversão Forte + Fundo Duplo", 200
 
 # ---------------- UTILS ----------------
 def now_br():
@@ -49,8 +48,8 @@ def ema(seq, period):
 
 def macd_hist_expanding(hist):
     if len(hist) < 4: return False
-    h1, h2, h3, h4 = hist[-1], hist[-2], hist[-3], hist[-4]
-    return h1 > 0 and h1 > h2 > h3 > h4  # 4 velas verdes crescendo
+    h = hist[-4:]
+    return all(h[i] > 0 for i in range(4)) and h[3] > h[2] > h[1] > h[0]
 
 def calc_rsi(prices, period=14):
     if len(prices) < period + 1: return 50.0
@@ -114,10 +113,11 @@ async def get_top_symbols(session):
 
 # ---------------- COOLDOWN ----------------
 cooldowns = {}
-def can_alert(s):
+def can_alert(s, mode):
+    key = f"{s}_{mode}"
     now = time.time()
-    if now - cooldowns.get(s, 0) >= COOLDOWN_SEC:
-        cooldowns[s] = now
+    if now - cooldowns.get(key, 0) >= COOLDOWN_SEC:
+        cooldowns[key] = now
         return True
     return False
 
@@ -134,7 +134,6 @@ def macd(prices):
 # ---------------- SCAN ----------------
 async def scan_symbol(session, symbol):
     try:
-        # 24h
         ticker = await get_ticker_24hr(session, symbol)
         if not ticker: return
         change24 = float(ticker["priceChangePercent"])
@@ -142,69 +141,85 @@ async def scan_symbol(session, symbol):
         low24 = float(ticker["lowPrice"])
         preco = float(ticker["lastPrice"])
 
-        if preco < low24 * 1.06: return  # +6% do fundo
-
-        # 3m klines
-        k3m = await get_klines(session, symbol, "3m", 60)
-        if not k3m or len(k3m) < 50: return
+        k3m = await get_klines(session, symbol, "3m", 80)
+        if not k3m or len(k3m) < 60: return
 
         close3m = [float(k[4]) for k in k3m[:-1]]
         vol3m = [float(k[5]) for k in k3m[:-1]]
+        lows = [float(k[3]) for k in k3m[:-1]]
 
-        # volume 5x+
         vol_recent = sum(vol3m[-5:])
         vol_avg = sum(vol3m[-25:-5]) / 20
         vol_ratio = vol_recent / (vol_avg + 1e-6)
-        if vol_ratio < 5.0: return
 
-        # EMA9 > EMA20 + EMA9 subindo
         e9 = ema(close3m, 9)
         e20 = ema(close3m, 20)
         if len(e9) < 3 or len(e20) < 1: return
-        if not (e9[-1] > e20[-1] and e9[-1] > e9[-2] > e9[-3]): return
 
-        # MACD 4 velas verdes crescendo
         macd_data = macd(close3m)
         hist = macd_data["hist"]
-        if not macd_hist_expanding(hist): return
 
-        # RSI > 50 e subindo
         rsi = calc_rsi(close3m[-30:])
-        if rsi <= 50: return
-        rsi_prev = calc_rsi(close3m[-31:-1])
-        if rsi <= rsi_prev: return
 
-        # 3 velas verdes seguidas
-        closes = close3m[-3:]
-        if not all(closes[i] > closes[i-1] for i in range(1, len(closes))): return
+        # === V9.5: REVERSÃO FORTE (SEM FUNDO DUPLO) ===
+        if (vol_ratio >= 5.0 and
+            e9[-1] > e20[-1] and e9[-1] > e9[-2] > e9[-3] and
+            macd_hist_expanding(hist) and
+            rsi > 50 and
+            all(close3m[-i] > close3m[-i-1] for i in range(1, 3)) and
+            can_alert(symbol, "FORTE")):
 
-        # CONDIÇÃO FINAL
-        if can_alert(symbol):
             distancia_fundo = (preco - low24) / low24 * 100
             alvo = preco * 1.10
-            stop = min([float(k[3]) for k in k3m[-6:-1]]) * 0.99
+            stop = min(lows[-6:]) * 0.99
 
-            # PROBABILIDADE (95%+)
-            prob = 80
-            if vol_ratio > 7.0: prob += 15
-            elif vol_ratio > 5.0: prob += 10
-            if rsi > 60: prob += 5
-            prob = min(99, prob)
+            prob = 80 + (15 if vol_ratio > 7 else 10 if vol_ratio > 5 else 0) + (5 if rsi > 60 else 0)
+            prob = min(98, prob)
 
             msg = (
-                f"<b>ROCKET REVERSÃO DO FUNDO</b>\n"
+                f"<b>ROCKET REVERSÃO FORTE</b>\n"
                 f"<code>{symbol}</code>\n"
                 f"Queda 24h: <b>{change24:+.1f}%</b>\n"
-                f"Preço: <b>{preco:.6f}</b> (+{distancia_fundo:.1f}% do fundo)\n"
-                f"<b>PROBABILIDADE: {prob}%</b>\n"
-                f"<b>TEMPO: 15-45 MIN</b>\n"
-                f"Volume +{vol_ratio:.1f}x | 4 velas MACD | EMA forte\n"
+                f"Preço: <b>{preco:.6f}</b>\n"
+                f"<b>PROB: {prob}%</b> | TEMPO: 15-45 MIN\n"
+                f"Volume +{vol_ratio:.1f}x | MACD 4↑\n"
                 f"Stop: <b>{stop:.6f}</b>\n"
                 f"Alvo +10%: <b>{alvo:.6f}</b>\n"
                 f"<i>{now_br()} BR</i>"
             )
             await tg(session, msg)
-            print(f"[SINAL FORTE {prob}%] {symbol} | +10% em 45 min")
+
+        # === V10.0: FUNDO DUPLO (95%+) ===
+        recent_lows = lows[-10:]
+        if len(recent_lows) >= 2:
+            min_low = min(recent_lows)
+            max_low = max(recent_lows)
+            if (max_low - min_low) / min_low <= 0.005:  # ±0.5%
+                touches = sum(1 for l in recent_lows if abs(l - min_low)/min_low <= 0.005)
+                if touches >= 2 and preco > min_low * 1.06:  # +6% do fundo
+                    if (vol_ratio >= 5.0 and
+                        e9[-1] > e20[-1] and
+                        macd_hist_expanding(hist) and
+                        rsi > 55 and
+                        can_alert(symbol, "DUPLO")):
+
+                        alvo50 = preco * 1.50
+                        alvo100 = preco * 2.00
+                        stop = min_low * 0.99
+
+                        msg = (
+                            f"<b>ROCKET FOGUETE DUPLO</b>\n"
+                            f"<code>{symbol}</code>\n"
+                            f"FUNDO DUPLO: {min_low:.6f} (2+ toques)\n"
+                            f"Preço: <b>{preco:.6f}</b>\n"
+                            f"<b>95%+</b> | 1-3 HORAS\n"
+                            f"Volume +{vol_ratio:.1f}x | MACD 4↑\n"
+                            f"Stop: <b>{stop:.6f}</b>\n"
+                            f"Alvo +50%: <b>{alvo50:.6f}</b>\n"
+                            f"Alvo +100%: <b>{alvo100:.6f}</b>\n"
+                            f"<i>{now_br()} BR</i>"
+                        )
+                        await tg(session, msg)
 
     except Exception as e:
         pass
@@ -212,11 +227,11 @@ async def scan_symbol(session, symbol):
 # ---------------- MAIN ----------------
 async def main_loop():
     async with aiohttp.ClientSession() as session:
-        await tg(session, f"<b>{VERSION} ATIVO</b>\nReversão FORTE (95%+)\n{now_br()} BR")
+        await tg(session, f"<b>{VERSION} DUAL ATIVO</b>\nReversão Forte + Fundo Duplo\n{now_br()} BR")
 
         while True:
             symbols = await get_top_symbols(session)
-            print(f"[{now_br()}] Monitorando {len(symbols)} em queda...")
+            print(f"[{now_br()}] Dual scan: {len(symbols)} moedas...")
             await asyncio.gather(*[scan_symbol(session, s) for s in symbols], return_exceptions=True)
             await asyncio.sleep(30)
 
