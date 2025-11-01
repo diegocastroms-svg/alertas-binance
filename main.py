@@ -1,7 +1,6 @@
-# main.py — V6.4A – OURO CONFLUÊNCIA CURTA (AGRESSIVA) – SEM HIST. CRESCENTE
+# main.py — V6.5A – OURO CONFLUÊNCIA CURTA (AGRESSIVA) + 1H MACD VERDE
 # 3m: EMA9 acima da EMA20 + RSI 40–80
-# 5m, 15m e 30m: MACD verde (alinhamento)
-# SEM histograma crescente (removido conforme solicitado)
+# 5m, 15m, 30m, 1h: MACD verde (alinhamento)
 # liquidez mínima 20M USDT + 1000 trades
 # bloqueio automático de moedas mortas
 # alerta com “TENDÊNCIA CURTA”
@@ -19,7 +18,7 @@ COOLDOWN_SEC = 10 * 60
 TOP_N = 50
 REQ_TIMEOUT = 8
 UPDATE_TOP_INTERVAL = 10  # ciclos (30s cada) → 5 min
-VERSION = "V6.4A - OURO CONFLUÊNCIA CURTA (AGRESSIVA)"
+VERSION = "V6.5A - OURO CONFLUÊNCIA CURTA (AGRESSIVA)"
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 CHAT_ID = os.getenv("CHAT_ID", "").strip()
@@ -28,7 +27,7 @@ CHAT_ID = os.getenv("CHAT_ID", "").strip()
 app = Flask(__name__)
 @app.route("/")
 def home():
-    return f"{VERSION} | 3m EMA+RSI (40–80) | 5m/15m/30m MACD VERDE | 50 pares", 200
+    return f"{VERSION} | 3m EMA+RSI (40–80) | 5m/15m/30m/1h MACD VERDE | 50 pares", 200
 
 # ---------------- UTILS ----------------
 def now_br():
@@ -152,16 +151,19 @@ async def scan_symbol(session, symbol):
         k5  = await get_klines(session, symbol, "5m", 100)
         k15 = await get_klines(session, symbol, "15m", 100)
         k30 = await get_klines(session, symbol, "30m", 100)
-        if not (k3 and k5 and k15 and k30): return
+        k1h = await get_klines(session, symbol, "1h", 100)  # ADICIONADO: 1h
+        if not (k3 and k5 and k15 and k30 and k1h): return
 
         c3  = [float(k[4]) for k in k3]
         c5  = [float(k[4]) for k in k5]
         c15 = [float(k[4]) for k in k15]
         c30 = [float(k[4]) for k in k30]
+        c1h = [float(k[4]) for k in k1h]  # ADICIONADO: 1h
 
         macd5 = macd(c5)
         macd15 = macd(c15)
         macd30 = macd(c30)
+        macd1h = macd(c1h)  # ADICIONADO: MACD 1h
 
         acima3 = ema_alinhada(c3, 9, 20)
         rsi3 = calc_rsi(c3)[-1]
@@ -169,16 +171,16 @@ async def scan_symbol(session, symbol):
         hist5 = macd5["hist"]
         hist15 = macd15["hist"]
         hist30 = macd30["hist"]
+        hist1h = macd1h["hist"]  # ADICIONADO: histograma 1h
 
         hist5_ok = len(hist5) >= 1 and hist5[-1] > 0
         hist15_ok = len(hist15) >= 1 and hist15[-1] > 0
         hist30_ok = len(hist30) >= 1 and hist30[-1] > 0
-
-        # REMOVIDO: hist_crescente = len(hist5) >= 2 and hist5[-1] > hist5[-2]
+        hist1h_ok = len(hist1h) >= 1 and hist1h[-1] > 0  # ADICIONADO: 1h verde
 
         cond = (
             acima3 and
-            hist5_ok and hist15_ok and hist30_ok and
+            hist5_ok and hist15_ok and hist30_ok and hist1h_ok and
             40 <= rsi3 <= 80
         )
 
@@ -196,7 +198,7 @@ async def scan_symbol(session, symbol):
             msg = (
                 f"<b>TENDÊNCIA CURTA CONFIRMADA (AGRESSIVA)</b>\n"
                 f"{symbol}\n"
-                f"3m RSI:{rsi3:.1f} | 5m 15m 30m\n"
+                f"3m RSI:{rsi3:.1f} | 5m 15m 30m 1h\n"
                 f"Preço: {preco:.6f} ({variacao:+.2f}%)\n"
                 f"Stop: {stop:.6f}\n"
                 f"Alvo1: {alvo1:.6f} (1:2.5)\n"
@@ -214,7 +216,7 @@ async def main_loop():
     async with aiohttp.ClientSession() as session:
         pares = await get_top_usdt_symbols(session)
         if pares:
-            await tg(session, f"<b>{VERSION} ATIVO</b>\n3m EMA+RSI (40–80) | 5m/15m/30m MACD VERDE\n{len(pares)} pares\n{now_br()}")
+            await tg(session, f"<b>{VERSION} ATIVO</b>\n3m EMA+RSI (40–80) | 5m/15m/30m/1h MACD VERDE\n{len(pares)} pares\n{now_br()}")
             print(f"[{now_br()}] MONITORANDO {len(pares)} PARES USDT...")
 
         cycle = 0
