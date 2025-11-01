@@ -1,9 +1,7 @@
-# main.py — V6.2 – OURO CONFLUÊNCIA CURTA (sem 1h)
-# 3m: MACD verde
-# 5m: cruzamento EMA9 subindo EMA20 + MACD verde
-# 15m e 30m: MACD verde
+# main.py — V6.2C – OURO CONFLUÊNCIA CURTA (RSI + EMA no 3m)
+# 3m: cruzamento EMA9 subindo EMA20 + RSI 45–65
+# 5m, 15m e 30m: MACD verde
 # histograma crescente
-# RSI entre 45 e 65
 # liquidez mínima 20M USDT
 # bloqueio automático de moedas mortas
 # alerta com “TENDÊNCIA CURTA”
@@ -20,7 +18,7 @@ BINANCE_HTTP = "https://api.binance.com"
 COOLDOWN_SEC = 15 * 60
 TOP_N = 50
 REQ_TIMEOUT = 8
-VERSION = "V6.2 - OURO CONFLUÊNCIA CURTA (sem 1h)"
+VERSION = "V6.2C - OURO CONFLUÊNCIA CURTA (RSI+EMA 3m)"
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 CHAT_ID = os.getenv("CHAT_ID", "").strip()
@@ -29,7 +27,7 @@ CHAT_ID = os.getenv("CHAT_ID", "").strip()
 app = Flask(__name__)
 @app.route("/")
 def home():
-    return f"{VERSION} | TENDÊNCIA CURTA | 3m+5m+15m+30m", 200
+    return f"{VERSION} | 3m EMA+RSI | 5m/15m/30m MACD | 50 pares", 200
 
 # ---------------- UTILS ----------------
 def now_br():
@@ -142,17 +140,16 @@ async def scan_symbol(session, symbol):
         c30 = [float(k[4]) for k in k30]
 
         macd3, macd5, macd15, macd30 = macd(c3), macd(c5), macd(c15), macd(c30)
-        cruzou = cruzou_de_baixo(c5, 9, 20)
-        rsi5 = calc_rsi(c5)[-1]
+        cruzou3 = cruzou_de_baixo(c3, 9, 20)
+        rsi3 = calc_rsi(c3)[-1]
 
         cond = (
-            cruzou and
-            macd3["hist"][-1] > 0 and
+            cruzou3 and
             macd5["hist"][-1] > 0 and
             macd15["hist"][-1] > 0 and
             macd30["hist"][-1] > 0 and
             (macd5["hist"][-1] > macd5["hist"][-2]) and
-            45 <= rsi5 <= 70
+            45 <= rsi3 <= 65
         )
 
         if cond and can_alert(symbol, COOLDOWN_SEC):
@@ -164,8 +161,7 @@ async def scan_symbol(session, symbol):
             msg = (
                 f"<b>💥 TENDÊNCIA CURTA CONFIRMADA</b>\n"
                 f"{symbol}\n"
-                f"MACD: 3m✅ 5m✅ 15m✅ 30m✅\n"
-                f"RSI5: {rsi5:.1f}\n\n"
+                f"3m✅ RSI:{rsi3:.1f} | 5m✅ 15m✅ 30m✅\n"
                 f"Preço: {preco:.6f}\n"
                 f"Stop: {stop:.6f}\n"
                 f"Alvo1: {alvo1:.6f} (1:2.5)\n"
@@ -181,7 +177,7 @@ async def scan_symbol(session, symbol):
 async def main_loop():
     async with aiohttp.ClientSession() as session:
         pares = await get_top_usdt_symbols(session)
-        await tg(session, f"<b>{VERSION} ATIVO</b>\nAnalisando {len(pares)} pares USDT\n{now_br()}")
+        await tg(session, f"<b>{VERSION} ATIVO</b>\n3m EMA+RSI | 5m/15m/30m MACD\n{len(pares)} pares\n{now_br()}")
         while True:
             await asyncio.gather(*[scan_symbol(session, s) for s, _ in pares])
             await asyncio.sleep(30)
@@ -196,4 +192,3 @@ def start_bot():
 
 threading.Thread(target=start_bot, daemon=True).start()
 app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
-
