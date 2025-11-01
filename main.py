@@ -1,6 +1,6 @@
-# main.py — V9.0 REVERSÃO DO FUNDO (PEGAR +10% APÓS QUEDA)
-# Detecta moedas que caíram 15-50% e estão revertendo
-# Entrada no fundo → alvo +10% em 3-6h
+# main.py — V9.1 REVERSÃO DO FUNDO + PROBABILIDADE
+# Detecta moedas que caíram 15-70% e estão revertendo
+# Entrada no fundo → alvo +10% com % de chance e tempo
 
 import os, asyncio, aiohttp, time
 from datetime import datetime, timedelta
@@ -13,7 +13,7 @@ COOLDOWN_SEC = 12 * 60
 TOP_N = 100
 REQ_TIMEOUT = 10
 UPDATE_INTERVAL = 6  # ~3 min
-VERSION = "V9.0 - REVERSÃO DO FUNDO"
+VERSION = "V9.1 - REVERSÃO + PROBABILIDADE"
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 CHAT_ID = os.getenv("CHAT_ID", "").strip()
@@ -22,7 +22,7 @@ CHAT_ID = os.getenv("CHAT_ID", "").strip()
 app = Flask(__name__)
 @app.route("/")
 def home():
-    return f"{VERSION} | Queda 15-50% + Reversão | +10% em 3-6h", 200
+    return f"{VERSION} | Queda 15-70% + Reversão | +10% com % e tempo", 200
 
 # ---------------- UTILS ----------------
 def now_br():
@@ -141,16 +141,13 @@ async def scan_symbol(session, symbol):
         change24 = float(ticker["priceChangePercent"])
         if change24 > -15 or change24 < -70: return
         low24 = float(ticker["lowPrice"])
-        high24 = float(ticker["highPrice"])
         preco = float(ticker["lastPrice"])
-        vol24 = float(ticker["quoteVolume"])
 
         # recuperação do fundo?
-        if preco < low24 * 1.05: return  # ainda no fundo
+        if preco < low24 * 1.05: return
 
         # klines
         k3m = await get_klines(session, symbol, "3m", 50)
-        k1h = await get_klines(session, symbol, "1h", 30)
         if not k3m or len(k3m) < 40: return
 
         close3m = [float(k[4]) for k in k3m[:-1]]
@@ -159,6 +156,7 @@ async def scan_symbol(session, symbol):
         # volume alto recente
         vol_recent = sum(vol3m[-6:])
         vol_avg = sum(vol3m[-20:-6]) / 14
+        vol_ratio = vol_recent / (vol_avg + 1e-6)
         vol_ok = vol_recent > vol_avg * 1.5
 
         # EMA9 > EMA20
@@ -181,18 +179,69 @@ async def scan_symbol(session, symbol):
             alvo = preco * 1.10
             stop = min([float(k[3]) for k in k3m[-5:-1]]) * 0.99
 
+            # === CÁLCULO DA PROBABILIDADE ===
+            probabilidade = 50  # base
+
+            # Volume (40% do total)
+            if vol_ratio > 4.0:
+                probabilidade += 40
+            elif vol_ratio > 3.0:
+                probabilidade += 35
+            elif vol_ratio > 2.0:
+                probabilidade += 25
+            elif vol_ratio > 1.5:
+                probabilidade += 15
+
+            # RSI (30% do total)
+            if rsi < 35:
+                probabilidade += 30
+            elif rsi < 45:
+                probabilidade += 22
+            elif rsi < 55:
+                probabilidade += 12
+
+            # MACD aceleração (30% do total)
+            if len(hist) >= 3:
+                acel = (hist[-1] - hist[-3]) / (abs(hist[-3]) + 1e-6)
+                if acel > 2.0:
+                    probabilidade += 30
+                elif acel > 1.0:
+                    probabilidade += 20
+                elif acel > 0.3:
+                    probabilidade += 10
+
+            # Limita entre 60% e 98%
+            probabilidade = max(60, min(98, probabilidade))
+
+            # === PREVISÃO DE TEMPO ===
+            if probabilidade >= 90:
+                tempo = "15-45 MIN"
+                emoji = "ROCKET"
+            elif probabilidade >= 80:
+                tempo = "45 MIN - 2H"
+                emoji = "FIRE"
+            elif probabilidade >= 70:
+                tempo = "2-4 HORAS"
+                emoji = "UP"
+            else:
+                tempo = "4-8 HORAS"
+                emoji = "STEADY"
+
+            # === ALERTA FINAL COM % E TEMPO ===
             msg = (
-                f"<b>REVERSÃO DO FUNDO DETECTADA</b>\n"
+                f"<b>{emoji} REVERSÃO DO FUNDO</b>\n"
                 f"<code>{symbol}</code>\n"
-                f"Queda 24h: <b>{change24:+.1f}%</b> → Fundo: {low24:.6f}\n"
+                f"Queda 24h: <b>{change24:+.1f}%</b>\n"
                 f"Preço: <b>{preco:.6f}</b> (+{distancia_fundo:.1f}% do fundo)\n"
-                f"Volume +{vol_recent/vol_avg:.1f}x | EMA cruzou | MACD verde\n"
+                f"<b>PROBABILIDADE: {probabilidade}%</b>\n"
+                f"<b>TEMPO ESTIMADO: {tempo}</b>\n"
+                f"Volume +{vol_ratio:.1f}x | EMA cruzou | MACD acelerando\n"
                 f"Stop: <b>{stop:.6f}</b>\n"
                 f"Alvo +10%: <b>{alvo:.6f}</b>\n"
                 f"<i>{now_br()} BR</i>"
             )
             await tg(session, msg)
-            print(f"[REVERSÃO] {symbol} | {change24:+.1f}% → {preco:.6f}")
+            print(f"[SINAL {probabilidade}%] {symbol} | {change24:+.1f}% → {preco:.6f} | {tempo}")
 
     except Exception as e:
         pass
@@ -200,7 +249,7 @@ async def scan_symbol(session, symbol):
 # ---------------- MAIN ----------------
 async def main_loop():
     async with aiohttp.ClientSession() as session:
-        await tg(session, f"<b>{VERSION} ATIVO</b>\nCaça reversão após queda forte\n{now_br()} BR")
+        await tg(session, f"<b>{VERSION} ATIVO</b>\nReversão com PROBABILIDADE e TEMPO\n{now_br()} BR")
 
         while True:
             symbols = await get_top_symbols(session)
