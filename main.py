@@ -185,8 +185,14 @@ async def main_loop():
     async with aiohttp.ClientSession() as session:
         pares = await get_top_usdt_symbols(session)
         await tg(session, f"<b>{VERSION} ATIVO</b>\n3m EMA+RSI (40–80) | 5m/15m/30m MACD\n{len(pares)} pares\n{now_br()}")
+
+        # 🔹 Logs para Render — monitoramento visual
+        print(f"[{now_br()}] MONITORANDO {len(pares)} PARES USDT...")
+        
         while True:
+            print(f"[{now_br()}] Iniciando varredura...")
             await asyncio.gather(*[scan_symbol(session, s) for s, _ in pares])
+            print(f"[{now_br()}] Varredura concluída. Aguardando 30s...")
             await asyncio.sleep(30)
 
 def start_bot():
