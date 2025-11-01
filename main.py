@@ -1,26 +1,21 @@
-# backtest_otimizado.py — OURO CONFLUÊNCIA CURTA
-# Versão leve para Render (512 MB)
-# Rodagem em lotes de 10 pares, escrita incremental de Excel e envio via Telegram
+# backtest_otimizado_final.py — OURO CONFLUÊNCIA CURTA
+# Rodagem de 17 dias (~5000 candles), leve e estável no Render Starter
 
-import asyncio, aiohttp, time
-from datetime import datetime, timedelta, timezone
+import asyncio, aiohttp, time, os
 import pandas as pd
-import os
+from datetime import datetime, timezone
 
 BINANCE_HTTP   = "https://api.binance.com"
 REQ_TIMEOUT    = 10
 TOP_N          = 50
 MIN_LIQUIDITY  = 5_000_000
-DAYS           = 30           # ← 15 dias para evitar "Out of memory"
-COOLDOWN_SEC   = 15 * 60
-R_MULT_TP1     = 2.5
-R_MULT_TP2     = 5.0
-LOTE_SIZE      = 10           # pares por rodada
+LIMIT_CANDLES  = 5000
+LOTE_SIZE      = 10
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 CHAT_ID        = os.getenv("CHAT_ID", "").strip()
 
-# ---------------- FUNÇÕES AUXILIARES ----------------
+# ---------------- INDICADORES ----------------
 def ema(seq, span):
     if not seq: return []
     a = 2.0 / (span + 1.0)
@@ -65,17 +60,14 @@ def cruzou_de_baixo(c,p9=9,p20=20):
     e9=ema(c,p9);e20=ema(c,p20)
     return e9[-2]<=e20[-2] and e9[-1]>e20[-1]
 
-def crec(h,i):return i>=1 and h[i]>0 and h[i]>h[i-1]
-def ts_ms(dt):return int(dt.replace(tzinfo=timezone.utc).timestamp()*1000)
-
-# ---------------- BINANCE ----------------
+# ---------------- API ----------------
 async def fetch_json(session,url):
     try:
         async with session.get(url,timeout=REQ_TIMEOUT) as r:
             return await r.json()
     except:return None
 
-async def get_klines(session,symbol,interval,limit=1000):
+async def get_klines(session,symbol,interval,limit=LIMIT_CANDLES):
     url=f"{BINANCE_HTTP}/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
     return await fetch_json(session,url)
 
@@ -111,7 +103,7 @@ async def send_excel(session, file_path):
     except Exception as e:
         print("[ERRO TELEGRAM]",e)
 
-# ---------------- BACKTEST SIMPLIFICADO ----------------
+# ---------------- BACKTEST ----------------
 async def backtest_symbol(session,symbol,qv):
     try:
         k3=await get_klines(session,symbol,"3m")
@@ -131,8 +123,18 @@ async def backtest_symbol(session,symbol,qv):
         hist_ok=(macd3["hist"][-1]>0 and macd5["hist"][-1]>0 and
                  macd15["hist"][-1]>0 and macd30["hist"][-1]>0 and macd1h["hist"][-1]>0)
         valido=cruz and hist_ok and 45<=rsi15<=65
-        return {"symbol":symbol,"liq":qv,"alerta":valido}
-    except:return None
+
+        # contagem real de acertos históricos
+        confluencias=sum(
+            1 for i in range(1,len(c5))
+            if macd3["hist"][i]>0 and macd5["hist"][i]>0 and macd15["hist"][i]>0
+            and macd30["hist"][i]>0 and macd1h["hist"][i]>0 and cruzou_de_baixo(c5[:i])
+        )
+
+        return {"symbol":symbol,"liq":qv,"alerta":valido,"confluencias":confluencias}
+    except Exception as e:
+        print(f"Erro {symbol}: {e}")
+        return None
 
 # ---------------- MAIN ----------------
 async def main():
@@ -143,18 +145,18 @@ async def main():
         results=[]
         for i in range(0,len(pares),LOTE_SIZE):
             lote=pares[i:i+LOTE_SIZE]
-            print(f"🔹 Processando lote {i//LOTE_SIZE+1} de {len(pares)//LOTE_SIZE+1}")
+            print(f"🔹 Lote {i//LOTE_SIZE+1}/{len(pares)//LOTE_SIZE+1}")
             partial=await asyncio.gather(*[backtest_symbol(s,sym,qv)for sym,qv in lote])
             results.extend([r for r in partial if r])
             await asyncio.sleep(1)
 
         df=pd.DataFrame(results)
         if not df.empty:
-            df.to_excel("Backtest_Leve.xlsx",index=False)
-            await send_excel(s,"Backtest_Leve.xlsx")
-            print("✅ Concluído e enviado pro Telegram.")
+            df.to_excel("Backtest_Confluencia.xlsx",index=False)
+            await send_excel(s,"Backtest_Confluencia.xlsx")
+            print("✅ Relatório completo enviado pro Telegram.")
         else:
-            print("⚠️ Nenhum resultado válido.")
+            print("⚠️ Nenhum dado válido retornado.")
 
 if __name__=="__main__":
     asyncio.run(main())
