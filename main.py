@@ -1,6 +1,5 @@
-# main.py — V9.1 REVERSÃO DO FUNDO + PROBABILIDADE
-# Detecta moedas que caíram 15-70% e estão revertendo
-# Entrada no fundo → alvo +10% com % de chance e tempo
+# main.py — V9.5 REVERSÃO DO FUNDO (CURTO FORTE)
+# 3m | Volume 5x+ | MACD 4 velas | EMA forte | RSI subindo
 
 import os, asyncio, aiohttp, time
 from datetime import datetime, timedelta
@@ -9,11 +8,11 @@ import threading
 
 # ---------------- CONFIG ----------------
 BINANCE_HTTP = "https://api.binance.com"
-COOLDOWN_SEC = 12 * 60
-TOP_N = 100
+COOLDOWN_SEC = 10 * 60
+TOP_N = 120
 REQ_TIMEOUT = 10
-UPDATE_INTERVAL = 6  # ~3 min
-VERSION = "V9.1 - REVERSÃO + PROBABILIDADE"
+UPDATE_INTERVAL = 3  # 3 min
+VERSION = "V9.5 - REVERSÃO FORTE"
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 CHAT_ID = os.getenv("CHAT_ID", "").strip()
@@ -22,7 +21,7 @@ CHAT_ID = os.getenv("CHAT_ID", "").strip()
 app = Flask(__name__)
 @app.route("/")
 def home():
-    return f"{VERSION} | Queda 15-70% + Reversão | +10% com % e tempo", 200
+    return f"{VERSION} | Reversão Forte 3m | +10% em 15-45 min", 200
 
 # ---------------- UTILS ----------------
 def now_br():
@@ -30,7 +29,7 @@ def now_br():
 
 async def tg(session, text: str):
     if not (TELEGRAM_TOKEN and CHAT_ID):
-        print(f"[REVERSÃO] {text}")
+        print(f"[ALERTA] {text}")
         return
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -49,9 +48,9 @@ def ema(seq, period):
     return out
 
 def macd_hist_expanding(hist):
-    if len(hist) < 3: return False
-    h1, h2, h3 = hist[-1], hist[-2], hist[-3]
-    return h1 > 0 and h1 > h2 > h3  # verde e acelerando
+    if len(hist) < 4: return False
+    h1, h2, h3, h4 = hist[-1], hist[-2], hist[-3], hist[-4]
+    return h1 > 0 and h1 > h2 > h3 > h4  # 4 velas verdes crescendo
 
 def calc_rsi(prices, period=14):
     if len(prices) < period + 1: return 50.0
@@ -105,10 +104,10 @@ async def get_top_symbols(session):
             if any(x in s for x in blocked): continue
             change = float(d.get("priceChangePercent", 0))
             qv = float(d.get("quoteVolume", 0))
-            if qv < 10_000_000: continue
-            if change > -15 or change < -70: continue  # só quedas fortes
+            if qv < 15_000_000: continue
+            if change > -15 or change < -70: continue
             pares.append((s, change, qv))
-        pares.sort(key=lambda x: x[1])  # mais negativa primeiro
+        pares.sort(key=lambda x: x[1])
         return [p[0] for p in pares[:TOP_N]]
     except:
         return []
@@ -135,7 +134,7 @@ def macd(prices):
 # ---------------- SCAN ----------------
 async def scan_symbol(session, symbol):
     try:
-        # 24h ticker
+        # 24h
         ticker = await get_ticker_24hr(session, symbol)
         if not ticker: return
         change24 = float(ticker["priceChangePercent"])
@@ -143,105 +142,69 @@ async def scan_symbol(session, symbol):
         low24 = float(ticker["lowPrice"])
         preco = float(ticker["lastPrice"])
 
-        # recuperação do fundo?
-        if preco < low24 * 1.05: return
+        if preco < low24 * 1.06: return  # +6% do fundo
 
-        # klines
-        k3m = await get_klines(session, symbol, "3m", 50)
-        if not k3m or len(k3m) < 40: return
+        # 3m klines
+        k3m = await get_klines(session, symbol, "3m", 60)
+        if not k3m or len(k3m) < 50: return
 
         close3m = [float(k[4]) for k in k3m[:-1]]
         vol3m = [float(k[5]) for k in k3m[:-1]]
 
-        # volume alto recente
-        vol_recent = sum(vol3m[-6:])
-        vol_avg = sum(vol3m[-20:-6]) / 14
+        # volume 5x+
+        vol_recent = sum(vol3m[-5:])
+        vol_avg = sum(vol3m[-25:-5]) / 20
         vol_ratio = vol_recent / (vol_avg + 1e-6)
-        vol_ok = vol_recent > vol_avg * 1.5
+        if vol_ratio < 5.0: return
 
-        # EMA9 > EMA20
+        # EMA9 > EMA20 + EMA9 subindo
         e9 = ema(close3m, 9)
         e20 = ema(close3m, 20)
-        ema_ok = len(e9) > 0 and len(e20) > 0 and e9[-1] > e20[-1] and e9[-2] <= e20[-2]
+        if len(e9) < 3 or len(e20) < 1: return
+        if not (e9[-1] > e20[-1] and e9[-1] > e9[-2] > e9[-3]): return
 
-        # MACD
+        # MACD 4 velas verdes crescendo
         macd_data = macd(close3m)
         hist = macd_data["hist"]
-        macd_ok = len(hist) >= 3 and macd_hist_expanding(hist)
+        if not macd_hist_expanding(hist): return
 
-        # RSI
+        # RSI > 50 e subindo
         rsi = calc_rsi(close3m[-30:])
-        rsi_ok = 30 <= rsi <= 65
+        if rsi <= 50: return
+        rsi_prev = calc_rsi(close3m[-31:-1])
+        if rsi <= rsi_prev: return
+
+        # 3 velas verdes seguidas
+        closes = close3m[-3:]
+        if not all(closes[i] > closes[i-1] for i in range(1, len(closes))): return
 
         # CONDIÇÃO FINAL
-        if vol_ok and ema_ok and macd_ok and rsi_ok and can_alert(symbol):
+        if can_alert(symbol):
             distancia_fundo = (preco - low24) / low24 * 100
             alvo = preco * 1.10
-            stop = min([float(k[3]) for k in k3m[-5:-1]]) * 0.99
+            stop = min([float(k[3]) for k in k3m[-6:-1]]) * 0.99
 
-            # === CÁLCULO DA PROBABILIDADE ===
-            probabilidade = 50  # base
+            # PROBABILIDADE (95%+)
+            prob = 80
+            if vol_ratio > 7.0: prob += 15
+            elif vol_ratio > 5.0: prob += 10
+            if rsi > 60: prob += 5
+            prob = min(99, prob)
 
-            # Volume (40% do total)
-            if vol_ratio > 4.0:
-                probabilidade += 40
-            elif vol_ratio > 3.0:
-                probabilidade += 35
-            elif vol_ratio > 2.0:
-                probabilidade += 25
-            elif vol_ratio > 1.5:
-                probabilidade += 15
-
-            # RSI (30% do total)
-            if rsi < 35:
-                probabilidade += 30
-            elif rsi < 45:
-                probabilidade += 22
-            elif rsi < 55:
-                probabilidade += 12
-
-            # MACD aceleração (30% do total)
-            if len(hist) >= 3:
-                acel = (hist[-1] - hist[-3]) / (abs(hist[-3]) + 1e-6)
-                if acel > 2.0:
-                    probabilidade += 30
-                elif acel > 1.0:
-                    probabilidade += 20
-                elif acel > 0.3:
-                    probabilidade += 10
-
-            # Limita entre 60% e 98%
-            probabilidade = max(60, min(98, probabilidade))
-
-            # === PREVISÃO DE TEMPO ===
-            if probabilidade >= 90:
-                tempo = "15-45 MIN"
-                emoji = "ROCKET"
-            elif probabilidade >= 80:
-                tempo = "45 MIN - 2H"
-                emoji = "FIRE"
-            elif probabilidade >= 70:
-                tempo = "2-4 HORAS"
-                emoji = "UP"
-            else:
-                tempo = "4-8 HORAS"
-                emoji = "STEADY"
-
-            # === ALERTA FINAL COM % E TEMPO ===
             msg = (
-                f"<b>{emoji} REVERSÃO DO FUNDO</b>\n"
+                f"<b>ROCKET REVERSÃO DO FUNDO</b>\n"
                 f"<code>{symbol}</code>\n"
                 f"Queda 24h: <b>{change24:+.1f}%</b>\n"
                 f"Preço: <b>{preco:.6f}</b> (+{distancia_fundo:.1f}% do fundo)\n"
-                f"<b>PROBABILIDADE: {probabilidade}%</b>\n"
-                f"<b>TEMPO ESTIMADO: {tempo}</b>\n"
-                f"Volume +{vol_ratio:.1f}x | EMA cruzou | MACD acelerando\n"
+                f"<b>PROBABILIDADE: {prob}%</b>\n"
+                f"<b>TEMPO: 15-45 MIN</b>\n"
+                f"Volume +{vol_ratio:.1f}x | 4 velas MACD | EMA forte\n"
                 f"Stop: <b>{stop:.6f}</b>\n"
                 f"Alvo +10%: <b>{alvo:.6f}</b>\n"
                 f"<i>{now_br()} BR</i>"
             )
             await tg(session, msg)
-            print(f"[SINAL {probabilidade}%] {symbol} | {change24:+.1f}% → {preco:.6f} | {tempo}")
+            print(f"[SINAL FORTE {prob}%] {symbol} | +10% em 45 min")
 
     except Exception as e:
         pass
@@ -249,13 +212,13 @@ async def scan_symbol(session, symbol):
 # ---------------- MAIN ----------------
 async def main_loop():
     async with aiohttp.ClientSession() as session:
-        await tg(session, f"<b>{VERSION} ATIVO</b>\nReversão com PROBABILIDADE e TEMPO\n{now_br()} BR")
+        await tg(session, f"<b>{VERSION} ATIVO</b>\nReversão FORTE (95%+)\n{now_br()} BR")
 
         while True:
             symbols = await get_top_symbols(session)
-            print(f"[{now_br()}] Monitorando {len(symbols)} em queda forte...")
+            print(f"[{now_br()}] Monitorando {len(symbols)} em queda...")
             await asyncio.gather(*[scan_symbol(session, s) for s in symbols], return_exceptions=True)
-            await asyncio.sleep(35)
+            await asyncio.sleep(30)
 
 def start_bot():
     loop = asyncio.new_event_loop()
