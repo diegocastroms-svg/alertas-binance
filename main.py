@@ -1,5 +1,5 @@
-# main.py — V10.7 DUAL MODE
-# QUEDA: -3% A -60% | Volume ÚLTIMA VELA | MACD FORTE
+# main.py — V10.8 TRIPLO MODO (FINAL)
+# +8% em 1h | Volume última vela | MACD forte
 
 import os, asyncio, aiohttp, time
 from datetime import datetime, timedelta
@@ -11,7 +11,7 @@ BINANCE_HTTP = "https://api.binance.com"
 COOLDOWN_SEC = 10 * 60
 TOP_N = 120
 REQ_TIMEOUT = 10
-VERSION = "V10.7 DUAL"
+VERSION = "V10.8 TRIPLO"
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 CHAT_ID = os.getenv("CHAT_ID", "").strip()
@@ -20,7 +20,7 @@ CHAT_ID = os.getenv("CHAT_ID", "").strip()
 app = Flask(__name__)
 @app.route("/")
 def home():
-    return f"{VERSION} | Dual: -3% a -60% | Volume Última Vela", 200
+    return f"{VERSION} | Triplo: Reversão + Fundo Duplo + Continuação (+8%)", 200
 
 # ---------------- UTILS ----------------
 def now_br():
@@ -103,8 +103,8 @@ async def get_top_symbols(session):
             if any(x in s for x in blocked): continue
             change = float(d.get("priceChangePercent", 0))
             qv = float(d.get("quoteVolume", 0))
-            if qv < 10_000_000: continue  # volume mínimo
-            if change > -3 or change < -60: continue  # NOVA FAIXA: -3% a -60%
+            if qv < 10_000_000: continue
+            if change > -3 or change < -60: continue  # -3% a -60%
             pares.append((s, change, qv))
         pares.sort(key=lambda x: x[1])
         return [p[0] for p in pares[:TOP_N]]
@@ -137,12 +137,12 @@ async def scan_symbol(session, symbol):
         ticker = await get_ticker_24hr(session, symbol)
         if not ticker: return
         change24 = float(ticker["priceChangePercent"])
-        if change24 > -3 or change24 < -60: return  # NOVA FAIXA
+        if change24 > -3 or change24 < -60: return
         low24 = float(ticker["lowPrice"])
         preco = float(ticker["lastPrice"])
 
-        k3m = await get_klines(session, symbol, "3m", 80)
-        if not k3m or len(k3m) < 60: return
+        k3m = await get_klines(session, symbol, "3m", 100)
+        if not k3m or len(k3m) < 80: return
 
         close3m = [float(k[4]) for k in k3m[:-1]]
         vol3m = [float(k[5]) for k in k3m[:-1]]
@@ -162,7 +162,7 @@ async def scan_symbol(session, symbol):
 
         rsi = calc_rsi(close3m[-30:])
 
-        # === V9.5: REVERSÃO FORTE (SEM FUNDO DUPLO) ===
+        # === 1. REVERSÃO FORTE ===
         if (vol_ratio >= 3.0 and
             e9[-1] > e20[-1] and e9[-1] > e9[-2] > e9[-3] and
             macd_hist_expanding(hist) and
@@ -182,7 +182,7 @@ async def scan_symbol(session, symbol):
                 f"<code>{symbol}</code>\n"
                 f"Queda 24h: <b>{change24:+.1f}%</b>\n"
                 f"Preço: <b>{preco:.6f}</b>\n"
-                f"<b>PROB: {prob}%</b> | TEMPO: 15-45 MIN\n"
+                f"<b>PROB: {prob}%</b> | 15-45 MIN\n"
                 f"Volume ÚLTIMA: +{vol_ratio:.1f}x\n"
                 f"Stop: <b>{stop:.6f}</b>\n"
                 f"Alvo +10%: <b>{alvo:.6f}</b>\n"
@@ -190,12 +190,12 @@ async def scan_symbol(session, symbol):
             )
             await tg(session, msg)
 
-        # === V10.0: FUNDO DUPLO (95%+) ===
+        # === 2. FUNDO DUPLO ===
         recent_lows = lows[-12:]
         if len(recent_lows) >= 2:
             min_low = min(recent_lows)
             max_low = max(recent_lows)
-            if (max_low - min_low) / min_low <= 0.005:  # ±0.5%
+            if (max_low - min_low) / min_low <= 0.005:
                 touches = sum(1 for l in recent_lows if abs(l - min_low)/min_low <= 0.005)
                 if touches >= 2 and preco > min_low * 1.06:
                     if (vol_ratio >= 3.0 and
@@ -222,17 +222,55 @@ async def scan_symbol(session, symbol):
                         )
                         await tg(session, msg)
 
+        # === 3. CONTINUAÇÃO DE ALTA (+8% em 1h) ===
+        if len(close3m) >= 30:
+            # Alta forte anterior: +8% em 1h (20 velas)
+            high_1h = max(close3m[-20:])
+            low_1h = min(close3m[-20:-10])  # antes do pullback
+            if high_1h / low_1h >= 1.08:  # +8%
+                # Pullback até EMA9 ou EMA20 (sem quebrar)
+                pullback_low = min(close3m[-10:])
+                if pullback_low >= min(e9[-1], e20[-1]) * 0.995:  # não quebrou
+                    # Volume caiu no pullback
+                    vol_pullback = sum(vol3m[-5:-1]) / 4
+                    vol_anterior = sum(vol3m[-10:-5]) / 5
+                    if vol_pullback < vol_anterior * 0.6:
+                        # Volume explode na retomada
+                        if vol_ratio >= 3.0:
+                            # Preço quebra máxima anterior
+                            max_anterior = max(close3m[-10:-1])
+                            if preco > max_anterior:
+                                if macd_data["hist"][-1] > 0.001 and can_alert(symbol, "CONT"):
+                                    alvo30 = preco * 1.30
+                                    alvo60 = preco * 1.60
+                                    stop = pullback_low * 0.99
+
+                                    msg = (
+                                        f"<b>ROCKET CONTINUAÇÃO DE ALTA</b>\n"
+                                        f"<code>{symbol}</code>\n"
+                                        f"Alta anterior: +{((high_1h/low_1h)-1)*100:.1f}% (1h)\n"
+                                        f"Pullback: {pullback_low:.6f} → EMA\n"
+                                        f"Volume ÚLTIMA: +{vol_ratio:.1f}x\n"
+                                        f"Quebra topo: {preco:.6f}\n"
+                                        f"<b>95%+</b> | 30-90 MIN\n"
+                                        f"Stop: <b>{stop:.6f}</b>\n"
+                                        f"Alvo +30%: <b>{alvo30:.6f}</b>\n"
+                                        f"Alvo +60%: <b>{alvo60:.6f}</b>\n"
+                                        f"<i>{now_br()} BR</i>"
+                                    )
+                                    await tg(session, msg)
+
     except Exception as e:
         pass
 
 # ---------------- MAIN ----------------
 async def main_loop():
     async with aiohttp.ClientSession() as session:
-        await tg(session, f"<b>{VERSION} ATIVO</b>\nQueda: -3% a -60%\n{now_br()} BR")
+        await tg(session, f"<b>{VERSION} ATIVO</b>\nTriplo Modo: Reversão + Duplo + Continuação (+8%)\n{now_br()} BR")
 
         while True:
             symbols = await get_top_symbols(session)
-            print(f"[{now_br()}] V10.7: {len(symbols)} moedas em -3% a -60%...")
+            print(f"[{now_br()}] V10.8: {len(symbols)} moedas em -3% a -60%...")
             await asyncio.gather(*[scan_symbol(session, s) for s in symbols], return_exceptions=True)
             await asyncio.sleep(30)
 
