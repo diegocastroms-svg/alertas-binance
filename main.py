@@ -1,6 +1,6 @@
-# backtest.py
-# OURO CONFLUÊNCIA CURTA – Backtest + Envio automático para Telegram (corrigido e ajustado)
-# Gera 'Relatório Backtest OURO.xlsx' e envia pro chat configurado via bot Telegram
+# backtest.py – OURO CONFLUÊNCIA CURTA
+# Backtest completo (coleta contínua + relatório Excel + envio Telegram)
+# Agora com suporte a períodos longos (30–90 dias)
 
 import asyncio, aiohttp, time
 from datetime import datetime, timedelta, timezone
@@ -10,8 +10,8 @@ import os
 BINANCE_HTTP   = "https://api.binance.com"
 REQ_TIMEOUT    = 12
 TOP_N          = 50
-MIN_LIQUIDITY  = 5_000_000       # ↓ Reduzido para 5 milhões
-DAYS           = 7               # ↓ Backtest mais curto (7 dias)
+MIN_LIQUIDITY  = 5_000_000
+DAYS           = 30           # ← Período de análise (aumente aqui)
 COOLDOWN_SEC   = 15 * 60
 R_MULT_TP1     = 2.5
 R_MULT_TP2     = 5.0
@@ -19,7 +19,7 @@ R_MULT_TP2     = 5.0
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 CHAT_ID        = os.getenv("CHAT_ID", "").strip()
 
-# -------------- UTILS --------------
+# ---------------- UTILS ----------------
 def ema(seq, span):
     if not seq: return []
     a = 2.0 / (span + 1.0)
@@ -65,15 +65,29 @@ def cruzou_de_baixo(c,p9=9,p20=20):
     return e9[-2]<=e20[-2] and e9[-1]>e20[-1]
 
 def ts_ms(dt):return int(dt.replace(tzinfo=timezone.utc).timestamp()*1000)
-
 def crec(h,i):return i>=1 and h[i]>0 and h[i]>h[i-1]
 
-# -------------- BINANCE --------------
+# ---------------- BINANCE ----------------
 async def fetch_json(session,url):
     try:
         async with session.get(url,timeout=REQ_TIMEOUT) as r:
             return await r.json()
     except:return None
+
+async def get_klines_all(session, symbol, interval, start_ms, end_ms, limit=1000):
+    """Coleta contínua de candles (em blocos de 1000) até cobrir todo o período"""
+    all_data = []
+    fetch_start = start_ms
+    while fetch_start < end_ms:
+        url = f"{BINANCE_HTTP}/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}&startTime={fetch_start}&endTime={end_ms}"
+        data = await fetch_json(session, url)
+        if not data or not isinstance(data, list): break
+        all_data.extend(data)
+        last_open_time = data[-1][0]
+        fetch_start = last_open_time + 1
+        await asyncio.sleep(0.1)
+        if len(data) < limit: break
+    return all_data
 
 async def get_top_usdt_symbols(session):
     url=f"{BINANCE_HTTP}/api/v3/ticker/24hr"
@@ -91,13 +105,6 @@ async def get_top_usdt_symbols(session):
     pares.sort(key=lambda x:x[1],reverse=True)
     return pares[:TOP_N]
 
-async def get_klines(session,symbol,interval,start_ms=None,end_ms=None,limit=1000):
-    base=f"{BINANCE_HTTP}/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
-    if start_ms:base+=f"&startTime={start_ms}"
-    if end_ms:base+=f"&endTime={end_ms}"
-    data=await fetch_json(session,base)
-    return data if isinstance(data,list) else[]
-
 def extract_ohlcv(k):
     t=[int(x[0])for x in k]
     o=[float(x[1])for x in k]
@@ -107,7 +114,7 @@ def extract_ohlcv(k):
     v=[float(x[5])for x in k]
     return t,o,h,l,c,v
 
-# -------------- TELEGRAM --------------
+# ---------------- TELEGRAM ----------------
 async def send_excel_to_telegram(session, file_path):
     if not (TELEGRAM_TOKEN and CHAT_ID):
         print("⚠️ Telegram não configurado.")
@@ -127,33 +134,31 @@ async def send_excel_to_telegram(session, file_path):
     except Exception as e:
         print(f"[ERRO TELEGRAM] {e}")
 
-# -------------- BACKTEST --------------
+# ---------------- BACKTEST ----------------
 async def backtest_symbol(session,symbol,qv,start_ms,end_ms):
-    k3=await get_klines(session,symbol,"3m",start_ms,end_ms)
-    k5=await get_klines(session,symbol,"5m",start_ms,end_ms)
-    k15=await get_klines(session,symbol,"15m",start_ms,end_ms)
-    k30=await get_klines(session,symbol,"30m",start_ms,end_ms)
-    k1h=await get_klines(session,symbol,"1h",start_ms,end_ms)
-    if not (k3 and k5 and k15 and k30 and k1h):
-        return {"symbol":symbol,"liq":qv,"signals":0,"wins":0,"loss":0,"winrate":0,"avgR":0,"Rsum":0}
-
-    _,_,_,l5,c5,v5=extract_ohlcv(k5)
-    c3=[float(k[4])for k in k3]
-    c15=[float(k[4])for k in k15]
-    c30=[float(k[4])for k in k30]
-    c1h=[float(k[4])for k in k1h]
+    intervals=["3m","5m","15m","30m","1h"]
+    data={}
+    for i in intervals:
+        data[i]=await get_klines_all(session,symbol,i,start_ms,end_ms)
+        if not data[i]:
+            return {"symbol":symbol,"liq":qv,"signals":0,"wins":0,"loss":0,"winrate":0,"avgR":0,"Rsum":0}
+    _,_,_,l5,c5,v5=extract_ohlcv(data["5m"])
+    c3=[float(k[4])for k in data["3m"]]
+    c15=[float(k[4])for k in data["15m"]]
+    c30=[float(k[4])for k in data["30m"]]
+    c1h=[float(k[4])for k in data["1h"]]
 
     macd3,macd5,macd15,macd30,macd1h=[macd(x)for x in[c3,c5,c15,c30,c1h]]
     rsi5=calc_rsi(c5,14)
     ema21_5=ema(c5,21)
     signals=wins=loss=0;sumR=0;last_hit=0
     for i in range(30,len(c5)-15):
-        if (k5[i][0]-last_hit)<COOLDOWN_SEC*1000:continue
+        if (data["5m"][i][0]-last_hit)<COOLDOWN_SEC*1000:continue
         if not crec(macd3["hist"],-1):continue
         if not (cruzou_de_baixo(c5[:i+1],9,20)and macd5["hist"][i]>0):continue
         if not (macd15["hist"][i]>0 and macd30["hist"][i]>0 and macd1h["hist"][i]>0):continue
         if not (45<=rsi5[i]<=65):continue
-        signals+=1;last_hit=k5[i][0]
+        signals+=1;last_hit=data["5m"][i][0]
         preco=c5[i];stop=min(l5[i],ema21_5[i]);risco=preco-stop
         tp1=preco+R_MULT_TP1*risco;tp2=preco+R_MULT_TP2*risco
         hit=None
@@ -170,11 +175,11 @@ async def backtest_symbol(session,symbol,qv,start_ms,end_ms):
     avgR=sumR/signals if signals else 0
     return {"symbol":symbol,"liq":qv,"signals":signals,"wins":wins,"loss":loss,"winrate":winrate,"avgR":avgR,"Rsum":sumR}
 
-# -------------- MAIN --------------
+# ---------------- MAIN ----------------
 async def main():
     async with aiohttp.ClientSession() as session:
         pares=await get_top_usdt_symbols(session)
-        print(f"✅ {len(pares)} pares carregados para o backtest.")  # ← Novo log
+        print(f"✅ {len(pares)} pares carregados para o backtest.")
         if not pares:
             print("Sem pares válidos.");return
         end=datetime.utcnow().replace(tzinfo=timezone.utc)
