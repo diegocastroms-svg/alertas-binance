@@ -1,4 +1,4 @@
-# main.py — V6.3A – OURO CONFLUÊNCIA CURTA (AGRESSIVA) – CORRIGIDO
+# main.py — V6.3B – OURO CONFLUÊNCIA CURTA (AGRESSIVA) – CORRIGIDO GLOBAL
 # 3m: EMA9 acima da EMA20 + RSI 40–80
 # 5m, 15m e 30m: MACD verde (alinhamento)
 # histograma crescente
@@ -19,7 +19,7 @@ COOLDOWN_SEC = 10 * 60
 TOP_N = 50
 REQ_TIMEOUT = 8
 UPDATE_TOP_INTERVAL = 10  # ciclos (30s cada) → 5 min
-VERSION = "V6.3A - OURO CONFLUÊNCIA CURTA (AGRESSIVA)"
+VERSION = "V6.3B - OURO CONFLUÊNCIA CURTA (AGRESSIVA)"
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 CHAT_ID = os.getenv("CHAT_ID", "").strip()
@@ -140,7 +140,9 @@ def can_alert(symbol, cooldown_sec):
         # Limpeza de entradas antigas (>1h)
         cutoff = now - 3600
         global cooldowns
-        cooldowns = {k: v for k, v in cooldowns.items() if v > cutoff}
+        new_cooldowns = {k: v for k, v in cooldowns.items() if v > cutoff}
+        cooldowns.clear()
+        cooldowns.update(new_cooldowns)
         return True
     return False
 
@@ -185,12 +187,13 @@ async def scan_symbol(session, symbol):
         if cond and can_alert(symbol, COOLDOWN_SEC):
             preco = c5[-2]  # vela fechada
             l5 = [float(k[3]) for k in k5]
-            ema21 = ema(c5[:-1], 21)[-1]  # sem vela atual
-            stop = min(l5[-2], ema21)
+            ema21 = ema(c5[:-1], 21)
+            ema21_val = ema21[-1] if ema21 else preco
+            stop = min(l5[-2], ema21_val)
             risco = max(preco - stop, 1e-12)
             alvo1, alvo2 = preco + 2.5*risco, preco + 5*risco
-            preco_anterior = c5[-3]
-            variacao = ((preco - preco_anterior) / preco_anterior) * 100
+            preco_anterior = c5[-3] if len(c5) >= 3 else preco
+            variacao = ((preco - preco_anterior) / preco_anterior) * 100 if preco_anterior != 0 else 0
 
             msg = (
                 f"<b>TENDÊNCIA CURTA CONFIRMADA (AGRESSIVA)</b>\n"
