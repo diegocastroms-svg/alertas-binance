@@ -1,5 +1,5 @@
 # backtest.py
-# OURO CONFLUÊNCIA CURTA – Backtest + Envio automático para Telegram (corrigido)
+# OURO CONFLUÊNCIA CURTA – Backtest + Envio automático para Telegram (corrigido e ajustado)
 # Gera 'Relatório Backtest OURO.xlsx' e envia pro chat configurado via bot Telegram
 
 import asyncio, aiohttp, time
@@ -10,8 +10,8 @@ import os
 BINANCE_HTTP   = "https://api.binance.com"
 REQ_TIMEOUT    = 12
 TOP_N          = 50
-MIN_LIQUIDITY  = 20_000_000
-DAYS           = 30
+MIN_LIQUIDITY  = 5_000_000       # ↓ Reduzido para 5 milhões
+DAYS           = 7               # ↓ Backtest mais curto (7 dias)
 COOLDOWN_SEC   = 15 * 60
 R_MULT_TP1     = 2.5
 R_MULT_TP2     = 5.0
@@ -107,7 +107,7 @@ def extract_ohlcv(k):
     v=[float(x[5])for x in k]
     return t,o,h,l,c,v
 
-# -------------- TELEGRAM (CORRIGIDO) --------------
+# -------------- TELEGRAM --------------
 async def send_excel_to_telegram(session, file_path):
     if not (TELEGRAM_TOKEN and CHAT_ID):
         print("⚠️ Telegram não configurado.")
@@ -174,6 +174,7 @@ async def backtest_symbol(session,symbol,qv,start_ms,end_ms):
 async def main():
     async with aiohttp.ClientSession() as session:
         pares=await get_top_usdt_symbols(session)
+        print(f"✅ {len(pares)} pares carregados para o backtest.")  # ← Novo log
         if not pares:
             print("Sem pares válidos.");return
         end=datetime.utcnow().replace(tzinfo=timezone.utc)
