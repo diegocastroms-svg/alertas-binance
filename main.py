@@ -1,6 +1,6 @@
 # main.py — V6.2A – OURO CONFLUÊNCIA CURTA (AGRESSIVA)
 # 3m: EMA9 acima da EMA20 + RSI 40–80
-# 5m, 15m e 30m: MACD verde
+# 5m, 15m e 30m: MACD verde (alinhamento)
 # histograma crescente
 # liquidez mínima 20M USDT
 # bloqueio automático de moedas mortas
@@ -15,7 +15,7 @@ import threading
 
 # ---------------- CONFIG ----------------
 BINANCE_HTTP = "https://api.binance.com"
-COOLDOWN_SEC = 10 * 60
+COOLDOWN_SEC = 15 * 60
 TOP_N = 50
 REQ_TIMEOUT = 8
 VERSION = "V6.2A - OURO CONFLUÊNCIA CURTA (AGRESSIVA)"
@@ -84,9 +84,9 @@ def calc_rsi(seq, period=14):
         rsi.append(100 - 100 / (1 + rs))
     return [50.0] * (len(seq) - len(rsi)) + rsi
 
-# ✅ ALTERAÇÃO: considerar EMA9 > EMA20 (não apenas o cruzamento)
-def cruzou_de_baixo(c, p9=9, p20=20):
-    if len(c) < p20 + 2: return False
+# ✅ EMA9 acima da 20
+def ema_alinhada(c, p9=9, p20=20):
+    if len(c) < p20: return False
     e9, e20 = ema(c, p9), ema(c, p20)
     return e9[-1] > e20[-1]
 
@@ -143,11 +143,11 @@ async def scan_symbol(session, symbol):
         c30 = [float(k[4]) for k in k30]
 
         macd3, macd5, macd15, macd30 = macd(c3), macd(c5), macd(c15), macd(c30)
-        cruzou3 = cruzou_de_baixo(c3, 9, 20)
+        acima3 = ema_alinhada(c3, 9, 20)
         rsi3 = calc_rsi(c3)[-1]
 
         cond = (
-            cruzou3 and
+            acima3 and
             macd5["hist"][-1] > 0 and
             macd15["hist"][-1] > 0 and
             macd30["hist"][-1] > 0 and
@@ -161,7 +161,6 @@ async def scan_symbol(session, symbol):
             stop = min(l5[-2], ema(c5, 21)[-1])
             risco = max(preco - stop, 1e-12)
             alvo1, alvo2 = preco + 2.5*risco, preco + 5*risco
-
             preco_anterior = c5[-2]
             variacao = ((preco - preco_anterior) / preco_anterior) * 100
 
@@ -176,6 +175,7 @@ async def scan_symbol(session, symbol):
                 f"{now_br()}"
             )
             await tg(session, msg)
+            print(f"[ALERTA] {symbol} | RSI={rsi3:.1f}")
 
     except Exception as e:
         print(f"[ERRO] {symbol}: {e}")
