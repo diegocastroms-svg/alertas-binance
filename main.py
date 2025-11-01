@@ -1,4 +1,4 @@
-# main.py — V6.3B – OURO CONFLUÊNCIA CURTA (AGRESSIVA) – CORRIGIDO GLOBAL
+# main.py — V6.3C – OURO CONFLUÊNCIA CURTA (AGRESSIVA) – GLOBAL CORRIGIDO
 # 3m: EMA9 acima da EMA20 + RSI 40–80
 # 5m, 15m e 30m: MACD verde (alinhamento)
 # histograma crescente
@@ -19,7 +19,7 @@ COOLDOWN_SEC = 10 * 60
 TOP_N = 50
 REQ_TIMEOUT = 8
 UPDATE_TOP_INTERVAL = 10  # ciclos (30s cada) → 5 min
-VERSION = "V6.3B - OURO CONFLUÊNCIA CURTA (AGRESSIVA)"
+VERSION = "V6.3C - OURO CONFLUÊNCIA CURTA (AGRESSIVA)"
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 CHAT_ID = os.getenv("CHAT_ID", "").strip()
@@ -133,16 +133,14 @@ async def get_top_usdt_symbols(session):
 # ---------------- COOLDOWN ----------------
 cooldowns = {}
 def can_alert(symbol, cooldown_sec):
+    global cooldowns
     now = time.time()
     last = cooldowns.get(symbol, 0)
     if now - last > cooldown_sec:
         cooldowns[symbol] = now
         # Limpeza de entradas antigas (>1h)
         cutoff = now - 3600
-        global cooldowns
-        new_cooldowns = {k: v for k, v in cooldowns.items() if v > cutoff}
-        cooldowns.clear()
-        cooldowns.update(new_cooldowns)
+        cooldowns = {k: v for k, v in cooldowns.items() if v > cutoff}
         return True
     return False
 
