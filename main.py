@@ -1,4 +1,4 @@
-# main.py — V10.9 REBOTE LENTO (COMPLETO)
+# main.py — V10.9 REBOTE LENTO + ALERTAS VISUALMENTE DIFERENCIADOS
 # +1.5x volume | +2 velas MACD | Fundo duplo +3% | Alta forte +20%
 
 import os, asyncio, aiohttp, time
@@ -11,7 +11,7 @@ BINANCE_HTTP = "https://api.binance.com"
 COOLDOWN_SEC = 10 * 60
 TOP_N = 120
 REQ_TIMEOUT = 10
-VERSION = "V10.9 REBOTE LENTO"
+VERSION = "V10.9 VISUAL"
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 CHAT_ID = os.getenv("CHAT_ID", "").strip()
@@ -20,7 +20,7 @@ CHAT_ID = os.getenv("CHAT_ID", "").strip()
 app = Flask(__name__)
 @app.route("/")
 def home():
-    return f"{VERSION} | Rebote Lento + Alta Forte", 200
+    return f"{VERSION} | Rebote Lento + Visual Diferenciado", 200
 
 # ---------------- UTILS ----------------
 def now_br():
@@ -130,6 +130,36 @@ def macd(prices):
     hist = [m - sg for m, sg in zip(macd_line[-len(sig):], sig)]
     return {"hist": hist}
 
+# ---------------- ALERTA VISUAL ----------------
+EMOJIS = {"FORTE": "REVERSÃO", "DUPLO": "FOGUETE DUPLO", "ALTA": "ALTA FORTE"}
+TITULOS = {
+    "FORTE": "REVERSÃO DO PÂNICO",
+    "DUPLO": "FUNDO DUPLO",
+    "ALTA": "ALTA FORTE"
+}
+
+async def enviar_alerta(session, tipo, symbol, preco, change24, vol_ratio, stop, alvo, prob, tempo, extra=None):
+    emoji = EMOJIS[tipo]
+    titulo = TITULOS[tipo]
+    
+    msg = (
+        f"<b>{emoji} {titulo}</b>\n"
+        f"┌ <code>{symbol}</code>\n"
+        f"├ Preço: <b>{preco:.6f}</b>\n"
+        f"├ {change24:+.1f}% 24h\n"
+        f"├ Volume ÚLTIMA: <b>+{vol_ratio:.1f}x</b>\n"
+        f"├ <b>PROB: {prob}%</b> | {tempo}\n"
+        f"├ Stop: <b>{stop:.6f}</b>\n"
+    )
+    if tipo == "DUPLO" and extra:
+        msg += f"├ Alvo +50%: <b>{extra[0]:.6f}</b>\n"
+        msg += f"└ Alvo +100%: <b>{extra[1]:.6f}</b>\n"
+    else:
+        msg += f"└ Alvo: <b>{alvo:.6f}</b>\n"
+    msg += f"<i>{now_br()} BR</i>"
+    
+    await tg(session, msg)
+
 # ---------------- SCAN ----------------
 async def scan_symbol(session, symbol):
     try:
@@ -146,7 +176,6 @@ async def scan_symbol(session, symbol):
         vol3m = [float(k[5]) for k in k3m[:-1]]
         lows = [float(k[3]) for k in k3m[:-1]]
 
-        # VOLUME: ÚLTIMA VELA > 1.5x MÉDIA DAS ÚLTIMAS 10
         vol_ultima = vol3m[-1]
         vol_media_10 = sum(vol3m[-11:-1]) / 10 if len(vol3m) > 11 else 1
         vol_ratio = vol_ultima / vol_media_10
@@ -158,8 +187,6 @@ async def scan_symbol(session, symbol):
         macd_data = macd(close3m)
         hist = macd_data["hist"]
 
-        rsi = calc_rsi(close3m[-30:])
-
         # === 1. REVERSÃO FORTE (REBOTE LENTO) ===
         if (change24 <= -3 and
             vol_ratio >= 1.5 and
@@ -168,34 +195,19 @@ async def scan_symbol(session, symbol):
             all(close3m[-i] > close3m[-i-1] for i in range(1, 2)) and
             can_alert(symbol, "FORTE")):
 
-            distancia_fundo = (preco - low24) / low24 * 100
             alvo = preco * 1.25
             stop = min(lows[-6:]) * 0.99
-
-            prob = 85 + (10 if vol_ratio > 2 else 5) + (5 if rsi > 60 else 0)
-            prob = min(95, prob)
-
-            msg = (
-                f"<b>ROCKET REVERSÃO FORTE</b>\n"
-                f"<code>{symbol}</code>\n"
-                f"Queda 24h: <b>{change24:+.1f}%</b>\n"
-                f"Preço: <b>{preco:.6f}</b>\n"
-                f"<b>PROB: {prob}%</b> | 15-90 MIN\n"
-                f"Volume ÚLTIMA: +{vol_ratio:.1f}x\n"
-                f"Stop: <b>{stop:.6f}</b>\n"
-                f"Alvo +25%: <b>{alvo:.6f}</b>\n"
-                f"<i>{now_br()} BR</i>"
-            )
-            await tg(session, msg)
+            prob = 85 + (10 if vol_ratio > 2 else 5)
+            await enviar_alerta(session, "FORTE", symbol, preco, change24, vol_ratio, stop, alvo, prob, "15-90 MIN")
 
         # === 2. FUNDO DUPLO (REBOTE LENTO) ===
         recent_lows = lows[-12:]
         if len(recent_lows) >= 2:
             min_low = min(recent_lows)
             max_low = max(recent_lows)
-            if (max_low - min_low) / min_low <= 0.01:  # ±1%
+            if (max_low - min_low) / min_low <= 0.01:
                 touches = sum(1 for l in recent_lows if abs(l - min_low)/min_low <= 0.01)
-                if touches >= 2 and preco > min_low * 1.03:  # +3%
+                if touches >= 2 and preco > min_low * 1.03:
                     if (vol_ratio >= 1.5 and
                         len(hist) >= 2 and macd_hist_expanding(hist, 2) and
                         e9[-1] > e20[-1] and
@@ -204,20 +216,7 @@ async def scan_symbol(session, symbol):
                         alvo50 = preco * 1.50
                         alvo100 = preco * 2.00
                         stop = min_low * 0.99
-
-                        msg = (
-                            f"<b>ROCKET FOGUETE DUPLO</b>\n"
-                            f"<code>{symbol}</code>\n"
-                            f"FUNDO DUPLO: {min_low:.6f} (2+ toques)\n"
-                            f"Preço: <b>{preco:.6f}</b>\n"
-                            f"<b>94%+</b> | 1-3 HORAS\n"
-                            f"Volume ÚLTIMA: +{vol_ratio:.1f}x\n"
-                            f"Stop: <b>{stop:.6f}</b>\n"
-                            f"Alvo +50%: <b>{alvo50:.6f}</b>\n"
-                            f"Alvo +100%: <b>{alvo100:.6f}</b>\n"
-                            f"<i>{now_br()} BR</i>"
-                        )
-                        await tg(session, msg)
+                        await enviar_alerta(session, "DUPLO", symbol, preco, change24, vol_ratio, stop, alvo50, 94, "1-3 HORAS", [alvo50, alvo100])
 
         # === 3. ALTA FORTE (+20% em 24h) ===
         if change24 >= 20:
@@ -227,19 +226,7 @@ async def scan_symbol(session, symbol):
                         if can_alert(symbol, "ALTA"):
                             alvo30 = preco * 1.30
                             stop = min(e9[-1], e20[-1]) * 0.99
-
-                            msg = (
-                                f"<b>ROCKET ALTA FORTE</b>\n"
-                                f"<code>{symbol}</code>\n"
-                                f"Alta 24h: <b>+{change24:.1f}%</b>\n"
-                                f"Preço: <b>{preco:.6f}</b>\n"
-                                f"Volume ÚLTIMA: +{vol_ratio:.1f}x\n"
-                                f"<b>92%+</b> | 1-3 HORAS\n"
-                                f"Stop: <b>{stop:.6f}</b>\n"
-                                f"Alvo +30%: <b>{alvo30:.6f}</b>\n"
-                                f"<i>{now_br()} BR</i>"
-                            )
-                            await tg(session, msg)
+                            await enviar_alerta(session, "ALTA", symbol, preco, change24, vol_ratio, stop, alvo30, 92, "1-3 HORAS")
 
     except Exception as e:
         pass
@@ -247,7 +234,7 @@ async def scan_symbol(session, symbol):
 # ---------------- MAIN ----------------
 async def main_loop():
     async with aiohttp.ClientSession() as session:
-        await tg(session, f"<b>{VERSION} ATIVO</b>\nRebote Lento + Alta Forte\n{now_br()} BR")
+        await tg(session, f"<b>{VERSION} ATIVO</b>\nRebote Lento + Visual Diferenciado\n{now_br()} BR")
 
         while True:
             symbols = await get_top_symbols(session)
