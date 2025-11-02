@@ -1,5 +1,5 @@
-# main.py — V10.9 REBOTE LENTO + ALERTAS VISUALMENTE DIFERENCIADOS
-# +1.5x volume | +2 velas MACD | Fundo duplo +3% | Alta forte +20%
+# main.py — V10.10 ANTI-FALSO (COMPLETO)
+# FILTROS DUROS: -5% 24h | 2.5x volume | 3 velas MACD | 3 velas verdes | RSI < 65
 
 import os, asyncio, aiohttp, time
 from datetime import datetime, timedelta
@@ -11,7 +11,7 @@ BINANCE_HTTP = "https://api.binance.com"
 COOLDOWN_SEC = 10 * 60
 TOP_N = 120
 REQ_TIMEOUT = 10
-VERSION = "V10.9 VISUAL"
+VERSION = "V10.10 ANTI-FALSO"
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 CHAT_ID = os.getenv("CHAT_ID", "").strip()
@@ -20,7 +20,7 @@ CHAT_ID = os.getenv("CHAT_ID", "").strip()
 app = Flask(__name__)
 @app.route("/")
 def home():
-    return f"{VERSION} | Rebote Lento + Visual Diferenciado", 200
+    return f"{VERSION} | Anti-Falso + Alta Forte", 200
 
 # ---------------- UTILS ----------------
 def now_br():
@@ -46,7 +46,7 @@ def ema(seq, period):
         out.append(e)
     return out
 
-def macd_hist_expanding(hist, min_len=2):
+def macd_hist_expanding(hist, min_len=3):
     if len(hist) < min_len: return False
     h = hist[-min_len:]
     return all(h[i] > 0.001 for i in range(min_len)) and h[-1] > h[-2]
@@ -187,20 +187,25 @@ async def scan_symbol(session, symbol):
         macd_data = macd(close3m)
         hist = macd_data["hist"]
 
-        # === 1. REVERSÃO FORTE (REBOTE LENTO) ===
-        if (change24 <= -3 and
-            vol_ratio >= 1.5 and
-            len(hist) >= 2 and macd_hist_expanding(hist, 2) and
+        rsi = calc_rsi(close3m[-30:])
+
+        # === 1. REVERSÃO FORTE (V10.10 — ANTI-FALSO) ===
+        if (change24 <= -5 and
+            vol_ratio >= 2.5 and
+            len(hist) >= 3 and macd_hist_expanding(hist, 3) and
             e9[-1] > e20[-1] and
-            all(close3m[-i] > close3m[-i-1] for i in range(1, 2)) and
+            all(close3m[-i] > close3m[-i-1] for i in range(1, 3)) and
+            preco > max(close3m[-10:-3]) and
+            rsi < 65 and
             can_alert(symbol, "FORTE")):
 
-            alvo = preco * 1.25
-            stop = min(lows[-6:]) * 0.99
-            prob = 85 + (10 if vol_ratio > 2 else 5)
+            alvo = preco * 1.30
+            stop = min(lows[-6:]) * 0.98
+            prob = 97
+
             await enviar_alerta(session, "FORTE", symbol, preco, change24, vol_ratio, stop, alvo, prob, "15-90 MIN")
 
-        # === 2. FUNDO DUPLO (REBOTE LENTO) ===
+        # === 2. FUNDO DUPLO (V10.10) ===
         recent_lows = lows[-12:]
         if len(recent_lows) >= 2:
             min_low = min(recent_lows)
@@ -208,25 +213,25 @@ async def scan_symbol(session, symbol):
             if (max_low - min_low) / min_low <= 0.01:
                 touches = sum(1 for l in recent_lows if abs(l - min_low)/min_low <= 0.01)
                 if touches >= 2 and preco > min_low * 1.03:
-                    if (vol_ratio >= 1.5 and
-                        len(hist) >= 2 and macd_hist_expanding(hist, 2) and
+                    if (vol_ratio >= 2.5 and
+                        len(hist) >= 3 and macd_hist_expanding(hist, 3) and
                         e9[-1] > e20[-1] and
                         can_alert(symbol, "DUPLO")):
 
                         alvo50 = preco * 1.50
                         alvo100 = preco * 2.00
-                        stop = min_low * 0.99
-                        await enviar_alerta(session, "DUPLO", symbol, preco, change24, vol_ratio, stop, alvo50, 94, "1-3 HORAS", [alvo50, alvo100])
+                        stop = min_low * 0.98
+                        await enviar_alerta(session, "DUPLO", symbol, preco, change24, vol_ratio, stop, alvo50, 97, "1-3 HORAS", [alvo50, alvo100])
 
-        # === 3. ALTA FORTE (+20% em 24h) ===
-        if change24 >= 20:
-            if vol_ratio >= 1.5:
+        # === 3. ALTA FORTE (+25% em 24h) ===
+        if change24 >= 25:
+            if vol_ratio >= 2.0:
                 if len(hist) >= 1 and hist[-1] > 0.001:
                     if preco > max(close3m[-20:]):
                         if can_alert(symbol, "ALTA"):
                             alvo30 = preco * 1.30
-                            stop = min(e9[-1], e20[-1]) * 0.99
-                            await enviar_alerta(session, "ALTA", symbol, preco, change24, vol_ratio, stop, alvo30, 92, "1-3 HORAS")
+                            stop = min(e9[-1], e20[-1]) * 0.98
+                            await enviar_alerta(session, "ALTA", symbol, preco, change24, vol_ratio, stop, alvo30, 95, "1-3 HORAS")
 
     except Exception as e:
         pass
@@ -234,11 +239,11 @@ async def scan_symbol(session, symbol):
 # ---------------- MAIN ----------------
 async def main_loop():
     async with aiohttp.ClientSession() as session:
-        await tg(session, f"<b>{VERSION} ATIVO</b>\nRebote Lento + Visual Diferenciado\n{now_br()} BR")
+        await tg(session, f"<b>{VERSION} ATIVO</b>\nAnti-Falso + Alta Forte\n{now_br()} BR")
 
         while True:
             symbols = await get_top_symbols(session)
-            print(f"[{now_br()}] V10.9: {len(symbols)} moedas...")
+            print(f"[{now_br()}] V10.10: {len(symbols)} moedas...")
             await asyncio.gather(*[scan_symbol(session, s) for s in symbols], return_exceptions=True)
             await asyncio.sleep(30)
 
