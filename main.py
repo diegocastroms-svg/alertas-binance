@@ -77,7 +77,7 @@ async def scan_tf(s, sym, tf):
         if not t: return
         p = float(t["lastPrice"])
         vol24 = float(t["quoteVolume"])
-        if vol24 < 20_000_000: return
+        if vol24 < 1_000_000: return
 
         k = await klines(s, sym, tf, 100)
         if len(k) < 50: return
@@ -137,3 +137,4 @@ threading.Thread(target=lambda: asyncio.run(main_loop()), daemon=True).start()
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+
