@@ -130,7 +130,9 @@ async def main_loop():
                 symbols = [
                     d["symbol"] for d in data
                     if d["symbol"].endswith("USDT")
-                    and not any(x in d["symbol"] for x in ["BUSD", "FDUSD", "USDE", "UP", "DOWN"])
+                    and not any(x in d["symbol"] for x in [
+                        "BUSD", "FDUSD", "USDE", "USDC", "TUSD", "CUSD", "USD", "UP", "DOWN"
+                    ])
                     and float(d["quoteVolume"]) > 1_000_000
                 ]
                 symbols = sorted(
