@@ -27,8 +27,8 @@ async def tg(s, msg):
     try:
         await s.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
                      data={"chat_id": CHAT_ID, "text": msg, "parse_mode": "HTML"}, timeout=10)
-    except:
-        pass
+    except Exception as e:
+        print("Erro Telegram:", e)
 
 def ema(data, p):
     if not data: return []
@@ -44,7 +44,7 @@ def rsi(prices, p=14):
     if len(prices) < p + 1: return 50
     d = [prices[i] - prices[i-1] for i in range(1, len(prices))]
     g = [max(x, 0) for x in d[-p:]]
-    l = [abs(min(x, 0) for x in d[-p:])]
+    l = [abs(min(x, 0)) for x in d[-p:]]
     ag, al = sum(g) / p, sum(l) / p or 1e-12
     return 100 - 100 / (1 + ag / al)
 
@@ -91,6 +91,7 @@ async def scan_tf(s, sym, tf):
         ema9_atual = ema9_prev[-1] * (1 - alpha9) + close[-1] * alpha9
         ema20_atual = ema20_prev[-1] * (1 - alpha20) + close[-1] * alpha20
 
+        # ALERTA SÓ NO MOMENTO DO CRUZAMENTO
         if not (ema9_prev[-1] <= ema20_prev[-1] and ema9_atual > ema20_atual): return
         if p < ema9_atual: return
 
@@ -110,19 +111,19 @@ async def scan_tf(s, sym, tf):
                 f"Preço: <b>{p:.6f}</b>\n"
                 f"RSI: <b>{current_rsi:.1f}</b>\n"
                 f"Volume 24h: <b>${vol24:,.0f}</b>\n"
-                F"Prob: <b>{prob}</b>\n"
+                f"Prob: <b>{prob}</b>\n"
                 f"Stop: <b>{stop:.6f}</b>\n"
-                f" Pagina +8%: <b>{alvo1:.6f}</b>\n"
+                f"Alvo +8%: <b>{alvo1:.6f}</b>\n"
                 f"Alvo +15%: <b>{alvo2:.6f}</b>\n"
                 f"<i>{now_br()} BR</i>"
             )
             await tg(s, msg)
-    except:
-        pass
+    except Exception as e:
+        print("Erro scan_tf:", e)
 
 async def main_loop():
     async with aiohttp.ClientSession() as s:
-        await tg(s, "<b>V20.0 VOLUME 1M ATIVO</b>\nAPITA EM WAL TIPO!")
+        await tg(s, "<b>V20.0 VOLUME 1M ATIVO</b>\nAPITA EM QUALQUER CRUZAMENTO!")
         while True:
             try:
                 data = await (await s.get(f"{BINANCE}/api/v3/ticker/24hr")).json()
@@ -133,8 +134,8 @@ async def main_loop():
                     tasks.append(scan_tf(s, sym, "15m"))
                     tasks.append(scan_tf(s, sym, "30m"))
                 await asyncio.gather(*tasks)
-            except:
-                pass
+            except Exception as e:
+                print("Erro main_loop:", e)
             await asyncio.sleep(60)
 
 threading.Thread(target=lambda: asyncio.run(main_loop()), daemon=True).start()
