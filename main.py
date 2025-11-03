@@ -1,4 +1,4 @@
-# main.py — V20.0 VOLUME 1M (APITA EM CRUZAMENTO E CONFIRMADO)
+# main.py — V20.1 VOLUME 1M (CRUZAMENTO + CONFIRMADO + FILTRO CORRIGIDO)
 import os, asyncio, aiohttp, time
 from datetime import datetime, timedelta, timezone
 from flask import Flask
@@ -7,7 +7,7 @@ import threading
 app = Flask(__name__)
 @app.route("/")
 def home():
-    return "V20.0 VOLUME 1M ATIVO", 200
+    return "V20.1 VOLUME 1M ATIVO", 200
 
 @app.route("/health")
 def health():
@@ -96,7 +96,8 @@ async def scan_tf(s, sym, tf):
         cruzamento_confirmado = ema9_prev[-2] <= ema20_prev[-2] and ema9_prev[-1] > ema20_prev[-1]
         if not (cruzamento_agora or cruzamento_confirmado): return
 
-        if p < ema9_atual: return
+        # folga de 0.1% abaixo da EMA9
+        if p < ema9_atual * 0.999: return
 
         current_rsi = rsi(close)
         if current_rsi < 40 or current_rsi > 80: return
@@ -126,17 +127,16 @@ async def scan_tf(s, sym, tf):
 
 async def main_loop():
     async with aiohttp.ClientSession() as s:
-        await tg(s, "<b>V20.0 VOLUME 1M ATIVO</b>\nAPITA EM CRUZAMENTO OU CONFIRMADO!")
+        await tg(s, "<b>V20.1 VOLUME 1M ATIVO</b>\nCRUZAMENTO + CONFIRMADO + FILTRO CORRIGIDO!")
         while True:
             try:
                 data = await (await s.get(f"{BINANCE}/api/v3/ticker/24hr")).json()
                 symbols = [
                     d["symbol"] for d in data
                     if d["symbol"].endswith("USDT")
-                    and not any(x in d["symbol"] for x in [
-                        "BUSD", "FDUSD", "USDE", "USDC", "TUSD", "CUSD", "USD", "UP", "DOWN"
-                    ])
                     and float(d["quoteVolume"]) > 1_000_000
+                    and (lambda base: not (base.endswith("USD") or base in {"BUSD","FDUSD","USDE","USDC","TUSD","CUSD"}))(d["symbol"][:-4])
+                    and not any(x in d["symbol"] for x in ["UP", "DOWN"])
                 ]
                 symbols = sorted(
                     symbols,
