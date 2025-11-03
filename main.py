@@ -127,8 +127,17 @@ async def main_loop():
         while True:
             try:
                 data = await (await s.get(f"{BINANCE}/api/v3/ticker/24hr")).json()
-                symbols = [d["symbol"] for d in data if d["symbol"].endswith("USDT") and float(d["quoteVolume"]) > 1_000_000]
-                symbols = sorted(symbols, key=lambda x: next((float(t["quoteVolume"]) for t in data if t["symbol"] == x), 0), reverse=True)[:100]  # TOP 100
+                symbols = [
+                    d["symbol"] for d in data
+                    if d["symbol"].endswith("USDT")
+                    and not any(x in d["symbol"] for x in ["BUSD", "FDUSD", "USDE", "UP", "DOWN"])
+                    and float(d["quoteVolume"]) > 1_000_000
+                ]
+                symbols = sorted(
+                    symbols,
+                    key=lambda x: next((float(t["quoteVolume"]) for t in data if t["symbol"] == x), 0),
+                    reverse=True
+                )[:100]  # TOP 100
                 tasks = []
                 for sym in symbols:
                     tasks.append(scan_tf(s, sym, "15m"))
