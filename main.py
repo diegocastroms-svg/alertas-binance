@@ -1,4 +1,4 @@
-# main.py — V20.1 VOLUME 1M (CRUZAMENTO + CONFIRMADO + FILTRO CORRIGIDO)
+# main.py — V20.2 VOLUME 1M (CRUZAMENTO + CONFIRMADO + FILTRO FINAL)
 import os, asyncio, aiohttp, time
 from datetime import datetime, timedelta, timezone
 from flask import Flask
@@ -7,7 +7,7 @@ import threading
 app = Flask(__name__)
 @app.route("/")
 def home():
-    return "V20.1 VOLUME 1M ATIVO", 200
+    return "V20.2 VOLUME 1M ATIVO", 200
 
 @app.route("/health")
 def health():
@@ -127,7 +127,7 @@ async def scan_tf(s, sym, tf):
 
 async def main_loop():
     async with aiohttp.ClientSession() as s:
-        await tg(s, "<b>V20.1 VOLUME 1M ATIVO</b>\nCRUZAMENTO + CONFIRMADO + FILTRO CORRIGIDO!")
+        await tg(s, "<b>V20.2 VOLUME 1M ATIVO</b>\nCRUZAMENTO + CONFIRMADO + FILTRO FINAL!")
         while True:
             try:
                 data = await (await s.get(f"{BINANCE}/api/v3/ticker/24hr")).json()
@@ -135,7 +135,14 @@ async def main_loop():
                     d["symbol"] for d in data
                     if d["symbol"].endswith("USDT")
                     and float(d["quoteVolume"]) > 1_000_000
-                    and (lambda base: not (base.endswith("USD") or base in {"BUSD","FDUSD","USDE","USDC","TUSD","CUSD"}))(d["symbol"][:-4])
+                    and (lambda base: not (
+                        base.endswith("USD")
+                        or base in {
+                            "BUSD","FDUSD","USDE","USDC","TUSD","CUSD",   # stablecoins
+                            "EUR","GBP","TRY","AUD","BRL","RUB","CAD","CHF","JPY",  # moedas fiduciárias
+                            "BF","BFC","BFG","BFD","BETA","AEUR","AUSD","CEUR","XAUT"  # tokens falsos e sintéticos
+                        }
+                    ))(d["symbol"][:-4])
                     and not any(x in d["symbol"] for x in ["UP", "DOWN"])
                 ]
                 symbols = sorted(
