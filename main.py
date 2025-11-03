@@ -1,15 +1,15 @@
-# main.py — V17.0 EMA9 CROSS EMA20 30m + RSI 40-80 (FIXED)
+# main.py — V17.2 VOLUME 20M (MAIS ALERTAS, SÓ VIVAS)
 import os, asyncio, aiohttp, time
 from datetime import datetime, timedelta, timezone
 from flask import Flask
 import threading
 
 app = Flask(__name__)
-@app.route("/")  # <--- FIX: parênteses aqui
+@app.route("/")
 def home():
-    return "V17.0 EMA CROSS ATIVO", 200
+    return "V17.2 VOLUME 20M ATIVO", 200
 
-@app.route("/health")  # <--- FIX: parênteses aqui
+@app.route("/health")
 def health():
     return "OK", 200
 
@@ -46,7 +46,7 @@ def rsi(prices, p=14):
         return 50
     d = [prices[i] - prices[i-1] for i in range(1, len(prices))]
     g = [max(x, 0) for x in d[-p:]]
-    l = [abs(min(x, 0)) for x in d[-p:]]
+    l = [abs(min(x, 0) for x in d[-p:])]
     ag, al = sum(g) / p, sum(l) / p or 1e-12
     return 100 - 100 / (1 + ag / al)
 
@@ -63,7 +63,7 @@ async def ticker(s, sym):
 cooldown = {}
 def can_alert(sym):
     n = time.time()
-    if n - cooldown.get(sym, 0) >= 3600:  # 1h
+    if n - cooldown.get(sym, 0) >= 3600:
         cooldown[sym] = n
         return True
     return False
@@ -75,7 +75,7 @@ async def scan(s, sym):
             return
         p = float(t["lastPrice"])
         vol24 = float(t["quoteVolume"])
-        if vol24 < 20_000_000:
+        if vol24 < 20_000_000:  # <--- VOLUME 20M
             return
 
         k30 = await klines(s, sym, "30m", 100)
@@ -104,6 +104,7 @@ async def scan(s, sym):
                 f"<code>{sym}</code>\n"
                 f"Preço: <b>{p:.6f}</b>\n"
                 f"RSI: <b>{current_rsi:.1f}</b>\n"
+                f"Volume 24h: <b>${vol24:,.0f}</b>\n"
                 f"Stop: <b>{stop:.6f}</b>\n"
                 f"Alvo +8%: <b>{alvo1:.6f}</b>\n"
                 f"Alvo +15%: <b>{alvo2:.6f}</b>\n"
@@ -115,12 +116,13 @@ async def scan(s, sym):
 
 async def main_loop():
     async with aiohttp.ClientSession() as s:
-        await tg(s, "<b>V17.0 EMA CROSS ATIVO</b>\n30m + RSI 40-80")
+        await tg(s, "<b>V17.2 VOLUME 20M ATIVO</b>\nMAIS ALERTAS, SÓ VIVAS")
         while True:
             try:
                 data = await (await s.get(f"{BINANCE}/api/v3/ticker/24hr")).json()
                 symbols = [d["symbol"] for d in data if d["symbol"].endswith("USDT") and float(d["quoteVolume"]) > 20_000_000]
-                await asyncio.gather(*[scan(s, sym) for sym in symbols[:100]])
+                symbols = sorted(symbols, key=lambda x: next((float(t["quoteVolume"]) for t in data if t["symbol"] == x), 0), reverse=True)[:50]
+                await asyncio.gather(*[scan(s, sym) for sym in symbols])
             except:
                 pass
             await asyncio.sleep(60)
