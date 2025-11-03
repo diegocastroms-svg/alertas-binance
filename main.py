@@ -63,7 +63,7 @@ async def ticker(s, sym):
 cooldown = {}
 def can_alert(sym):
     n = time.time()
-    if n - cooldown.get(sym, 0) >= 3600:
+    if n - cooldown.get(sym, 0) >= 1800:
         cooldown[sym] = n
         return True
     return False
@@ -131,3 +131,4 @@ threading.Thread(target=lambda: asyncio.run(main_loop()), daemon=True).start()
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+
