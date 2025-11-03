@@ -1,4 +1,4 @@
-# main.py — V20.0 VOLUME 1M (APITA EM QUALQUER CRUZAMENTO)
+# main.py — V20.0 VOLUME 1M (APITA EM CRUZAMENTO E CONFIRMADO)
 import os, asyncio, aiohttp, time
 from datetime import datetime, timedelta, timezone
 from flask import Flask
@@ -91,8 +91,11 @@ async def scan_tf(s, sym, tf):
         ema9_atual = ema9_prev[-1] * (1 - alpha9) + close[-1] * alpha9
         ema20_atual = ema20_prev[-1] * (1 - alpha20) + close[-1] * alpha20
 
-        # ALERTA SÓ NO MOMENTO DO CRUZAMENTO
-        if not (ema9_prev[-1] <= ema20_prev[-1] and ema9_atual > ema20_atual): return
+        # ALERTA AGORA PEGA CRUZAMENTO ATUAL OU CONFIRMADO NA VELA ANTERIOR
+        cruzamento_agora = ema9_prev[-1] <= ema20_prev[-1] and ema9_atual > ema20_atual
+        cruzamento_confirmado = ema9_prev[-2] <= ema20_prev[-2] and ema9_prev[-1] > ema20_prev[-1]
+        if not (cruzamento_agora or cruzamento_confirmado): return
+
         if p < ema9_atual: return
 
         current_rsi = rsi(close)
@@ -123,7 +126,7 @@ async def scan_tf(s, sym, tf):
 
 async def main_loop():
     async with aiohttp.ClientSession() as s:
-        await tg(s, "<b>V20.0 VOLUME 1M ATIVO</b>\nAPITA EM QUALQUER CRUZAMENTO!")
+        await tg(s, "<b>V20.0 VOLUME 1M ATIVO</b>\nAPITA EM CRUZAMENTO OU CONFIRMADO!")
         while True:
             try:
                 data = await (await s.get(f"{BINANCE}/api/v3/ticker/24hr")).json()
