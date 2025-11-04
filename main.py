@@ -1,4 +1,4 @@
-# main.py — V20.2 VOLUME 1M (CRUZAMENTO + CONFIRMADO + FILTRO FINAL)
+# main.py — V20.2 VOLUME 10M (CRUZAMENTO + CONFIRMADO + FORÇA DE VELA + FILTRO FINAL)
 import os, asyncio, aiohttp, time
 from datetime import datetime, timedelta, timezone
 from flask import Flask
@@ -91,12 +91,24 @@ async def scan_tf(s, sym, tf):
         ema9_atual = ema9_prev[-1] * (1 - alpha9) + close[-1] * alpha9
         ema20_atual = ema20_prev[-1] * (1 - alpha20) + close[-1] * alpha20
 
-        # ALERTA AGORA PEGA CRUZAMENTO ATUAL OU CONFIRMADO NA VELA ANTERIOR
+        # ALERTA: CRUZAMENTO ATUAL OU CONFIRMADO NA VELA ANTERIOR
         cruzamento_agora = ema9_prev[-1] <= ema20_prev[-1] and ema9_atual > ema20_atual
         cruzamento_confirmado = ema9_prev[-2] <= ema20_prev[-2] and ema9_prev[-1] > ema20_prev[-1]
         if not (cruzamento_agora or cruzamento_confirmado): return
 
-        # folga de 0.1% abaixo da EMA9
+        # FORÇA DE VELA (+1%): exige corpo de alta >= 1%
+        if cruzamento_agora:
+            open_now = float(k[-1][1])
+            close_now = float(k[-1][4])
+            if (close_now - open_now) / (open_now or 1e-12) < 0.01:
+                return
+        else:  # cruzamento_confirmado
+            open_prev = float(k[-2][1])
+            close_prev = float(k[-2][4])
+            if (close_prev - open_prev) / (open_prev or 1e-12) < 0.01:
+                return
+
+        # preço acima da EMA9 (folga 0,1%)
         if p < ema9_atual * 0.999: return
 
         current_rsi = rsi(close)
@@ -127,14 +139,14 @@ async def scan_tf(s, sym, tf):
 
 async def main_loop():
     async with aiohttp.ClientSession() as s:
-        await tg(s, "<b>V20.2 VOLUME 1M ATIVO</b>\nCRUZAMENTO + CONFIRMADO + FILTRO FINAL!")
+        await tg(s, "<b>V20.2 VOLUME 10M ATIVO</b>\nCRUZAMENTO + CONFIRMADO + FORÇA DE VELA + FILTRO FINAL")
         while True:
             try:
                 data = await (await s.get(f"{BINANCE}/api/v3/ticker/24hr")).json()
                 symbols = [
                     d["symbol"] for d in data
                     if d["symbol"].endswith("USDT")
-                    and float(d["quoteVolume"]) > 1_000_000
+                    and float(d["quoteVolume"]) > 10_000_000   # alinhado com 10M
                     and (lambda base: not (
                         base.endswith("USD")
                         or base in {
@@ -163,4 +175,3 @@ threading.Thread(target=lambda: asyncio.run(main_loop()), daemon=True).start()
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
-
