@@ -1,4 +1,4 @@
-# main.py — V20.7 VOLUME 3M (CRUZAMENTO REAL + INÍCIO DE IMPULSO + ALVOS CURTOS 2.5% e 5% + ALERTA 1H)
+# main.py — V20.8 VOLUME 3M (CRUZAMENTO REAL + CONFIRMAÇÃO + FORÇA DE VELA + ALVOS CURTOS)
 import os, asyncio, aiohttp, time
 from datetime import datetime, timedelta, timezone
 from flask import Flask
@@ -7,7 +7,7 @@ import threading
 app = Flask(__name__)
 @app.route("/")
 def home():
-    return "V20.7 VOLUME 3M ATIVO", 200
+    return "V20.8 VOLUME 3M ATIVO", 200
 
 @app.route("/health")
 def health():
@@ -77,7 +77,7 @@ async def scan_tf(s, sym, tf):
         if not t: return
         p = float(t["lastPrice"])
         vol24 = float(t["quoteVolume"])
-        if vol24 < 3_000_000: return  # VOLUME 3M
+        if vol24 < 3_000_000: return
 
         k = await klines(s, sym, tf, 100)
         if len(k) < 50: return
@@ -92,26 +92,20 @@ async def scan_tf(s, sym, tf):
         ema9_atual = ema9_prev[-1] * (1 - alpha9) + close[-1] * alpha9
         ema20_atual = ema20_prev[-1] * (1 - alpha20) + close[-1] * alpha20
 
-        cruzamento_agora = ema9_prev[-1] <= ema20_prev[-1] and ema9_atual > ema20_atual * 1.0003
+        # Cruzamento real (margem maior)
+        cruzamento_agora = ema9_prev[-1] <= ema20_prev[-1] and ema9_atual > ema20_atual * 1.001
         cruzamento_confirmado = ema9_prev[-2] <= ema20_prev[-2] and ema9_prev[-1] > ema20_prev[-1]
         if not (cruzamento_agora or cruzamento_confirmado): return
 
-        last_two = k[-2:]
-        if len(last_two) == 2:
-            up_candles = sum(1 for x in last_two if float(x[4]) > float(x[1]))
-            if up_candles < 2:
-                return
+        # Vela de confirmação fechada acima da EMA9 e EMA20
+        close_prev = float(k[-2][4])
+        if close_prev < ema9_prev[-1] or close_prev < ema20_prev[-1]:
+            return
 
-        if cruzamento_agora:
-            open_now = float(k[-1][1])
-            close_now = float(k[-1][4])
-            if (close_now - open_now) / (open_now or 1e-12) < 0.015:
-                return
-        else:
-            open_prev = float(k[-2][1])
-            close_prev = float(k[-2][4])
-            if (close_prev - open_prev) / (open_prev or 1e-12) < 0.015:
-                return
+        # Força de vela
+        open_prev = float(k[-2][1])
+        if (close_prev - open_prev) / (open_prev or 1e-12) < 0.01:
+            return
 
         current_rsi = rsi(close)
         if current_rsi < 40 or current_rsi > 80: return
@@ -141,7 +135,7 @@ async def scan_tf(s, sym, tf):
 
 async def main_loop():
     async with aiohttp.ClientSession() as s:
-        await tg(s, "<b>V20.7 VOLUME 3M ATIVO</b>\nCRUZAMENTO REAL + INÍCIO DE IMPULSO + ALVOS CURTOS 2.5% e 5% + ALERTA 1H")
+        await tg(s, "<b>V20.8 VOLUME 3M ATIVO</b>\nCRUZAMENTO REAL + CONFIRMAÇÃO + FORÇA DE VELA + ALVOS CURTOS 2.5% e 5%")
         while True:
             try:
                 data = await (await s.get(f"{BINANCE}/api/v3/ticker/24hr")).json()
@@ -168,7 +162,7 @@ async def main_loop():
                 for sym in symbols:
                     tasks.append(scan_tf(s, sym, "15m"))
                     tasks.append(scan_tf(s, sym, "30m"))
-                    tasks.append(scan_tf(s, sym, "1h"))  # NOVO ALERTA 1H
+                    tasks.append(scan_tf(s, sym, "1h"))
                 await asyncio.gather(*tasks)
             except Exception as e:
                 print("Erro main_loop:", e)
