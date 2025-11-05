@@ -1,4 +1,4 @@
-# main.py — V20.6 VOLUME 3M (CRUZAMENTO REAL + INÍCIO DE IMPULSO + ALVOS CURTOS 2.5% e 5%)
+# main.py — V20.7 VOLUME 3M (CRUZAMENTO REAL + INÍCIO DE IMPULSO + ALVOS CURTOS 2.5% e 5% + ALERTA 1H)
 import os, asyncio, aiohttp, time
 from datetime import datetime, timedelta, timezone
 from flask import Flask
@@ -7,7 +7,7 @@ import threading
 app = Flask(__name__)
 @app.route("/")
 def home():
-    return "V20.6 VOLUME 3M ATIVO", 200
+    return "V20.7 VOLUME 3M ATIVO", 200
 
 @app.route("/health")
 def health():
@@ -60,10 +60,11 @@ async def ticker(s, sym):
 
 cooldown_15m = {}
 cooldown_30m = {}
+cooldown_1h = {}
 
 def can_alert(tf, sym):
-    cd = cooldown_15m if tf == "15m" else cooldown_30m
-    cooldown_time = 900 if tf == "15m" else 1800
+    cd = cooldown_15m if tf == "15m" else cooldown_30m if tf == "30m" else cooldown_1h
+    cooldown_time = 900 if tf == "15m" else 1800 if tf == "30m" else 3600
     n = time.time()
     if n - cd.get(sym, 0) >= cooldown_time:
         cd[sym] = n
@@ -119,9 +120,9 @@ async def scan_tf(s, sym, tf):
             stop = min(float(x[3]) for x in k[-10:]) * 0.98
             alvo1 = p * 1.025
             alvo2 = p * 1.05
-            prob = "78%" if tf == "15m" else "85%"
-            emoji = "⚡" if tf == "15m" else "💪"
-            color = "🔵" if tf == "15m" else "🟢"
+            prob = "78%" if tf == "15m" else "85%" if tf == "30m" else "90%"
+            emoji = "⚡" if tf == "15m" else "💪" if tf == "30m" else "🟢"
+            color = "🔵" if tf == "15m" else "🟢" if tf == "30m" else "🟣"
             msg = (
                 f"<b>{emoji} EMA9 CROSS {tf.upper()} {color} (AO VIVO)</b>\n"
                 f"<code>{sym}</code>\n"
@@ -140,14 +141,14 @@ async def scan_tf(s, sym, tf):
 
 async def main_loop():
     async with aiohttp.ClientSession() as s:
-        await tg(s, "<b>V20.6 VOLUME 3M ATIVO</b>\nCRUZAMENTO REAL + INÍCIO DE IMPULSO + ALVOS CURTOS 2.5% e 5%")
+        await tg(s, "<b>V20.7 VOLUME 3M ATIVO</b>\nCRUZAMENTO REAL + INÍCIO DE IMPULSO + ALVOS CURTOS 2.5% e 5% + ALERTA 1H")
         while True:
             try:
                 data = await (await s.get(f"{BINANCE}/api/v3/ticker/24hr")).json()
                 symbols = [
                     d["symbol"] for d in data
                     if d["symbol"].endswith("USDT")
-                    and float(d["quoteVolume"]) > 3_000_000  # VOLUME 3M
+                    and float(d["quoteVolume"]) > 3_000_000
                     and (lambda base: not (
                         base.endswith("USD")
                         or base in {
@@ -167,6 +168,7 @@ async def main_loop():
                 for sym in symbols:
                     tasks.append(scan_tf(s, sym, "15m"))
                     tasks.append(scan_tf(s, sym, "30m"))
+                    tasks.append(scan_tf(s, sym, "1h"))  # NOVO ALERTA 1H
                 await asyncio.gather(*tasks)
             except Exception as e:
                 print("Erro main_loop:", e)
