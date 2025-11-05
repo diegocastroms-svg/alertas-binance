@@ -1,4 +1,4 @@
-# main.py — V20.4 VOLUME 10M (CRUZAMENTO REAL + INÍCIO DE IMPULSO)
+# main.py — V20.4 VOLUME 3M (CRUZAMENTO REAL + INÍCIO DE IMPULSO)
 import os, asyncio, aiohttp, time
 from datetime import datetime, timedelta, timezone
 from flask import Flask
@@ -7,7 +7,7 @@ import threading
 app = Flask(__name__)
 @app.route("/")
 def home():
-    return "V20.4 VOLUME 10M ATIVO", 200
+    return "V20.4 VOLUME 3M ATIVO", 200
 
 @app.route("/health")
 def health():
@@ -146,14 +146,14 @@ async def scan_tf(s, sym, tf):
 
 async def main_loop():
     async with aiohttp.ClientSession() as s:
-        await tg(s, "<b>V20.4 VOLUME 10M ATIVO</b>\nCRUZAMENTO REAL + INÍCIO DE IMPULSO")
+        await tg(s, "<b>V20.4 VOLUME 3M ATIVO</b>\nCRUZAMENTO REAL + INÍCIO DE IMPULSO")
         while True:
             try:
                 data = await (await s.get(f"{BINANCE}/api/v3/ticker/24hr")).json()
                 symbols = [
                     d["symbol"] for d in data
                     if d["symbol"].endswith("USDT")
-                    and float(d["quoteVolume"]) > 10_000_000
+                    and float(d["quoteVolume"]) > 3_000_000
                     and (lambda base: not (
                         base.endswith("USD")
                         or base in {
@@ -182,3 +182,4 @@ threading.Thread(target=lambda: asyncio.run(main_loop()), daemon=True).start()
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+
