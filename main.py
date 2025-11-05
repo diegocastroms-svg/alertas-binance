@@ -1,4 +1,4 @@
-# main.py — V20.4 VOLUME 3M (CRUZAMENTO REAL + INÍCIO DE IMPULSO)
+# main.py — V20.6 VOLUME 3M (CRUZAMENTO REAL + INÍCIO DE IMPULSO + ALVOS CURTOS 2.5% e 5%)
 import os, asyncio, aiohttp, time
 from datetime import datetime, timedelta, timezone
 from flask import Flask
@@ -7,7 +7,7 @@ import threading
 app = Flask(__name__)
 @app.route("/")
 def home():
-    return "V20.4 VOLUME 3M ATIVO", 200
+    return "V20.6 VOLUME 3M ATIVO", 200
 
 @app.route("/health")
 def health():
@@ -76,7 +76,7 @@ async def scan_tf(s, sym, tf):
         if not t: return
         p = float(t["lastPrice"])
         vol24 = float(t["quoteVolume"])
-        if vol24 < 10_000_000: return  # VOLUME 10M
+        if vol24 < 3_000_000: return  # VOLUME 3M
 
         k = await klines(s, sym, tf, 100)
         if len(k) < 50: return
@@ -91,19 +91,16 @@ async def scan_tf(s, sym, tf):
         ema9_atual = ema9_prev[-1] * (1 - alpha9) + close[-1] * alpha9
         ema20_atual = ema20_prev[-1] * (1 - alpha20) + close[-1] * alpha20
 
-        cruzamento_agora = ema9_prev[-1] <= ema20_prev[-1] and ema9_atual > ema20_atual
+        cruzamento_agora = ema9_prev[-1] <= ema20_prev[-1] and ema9_atual > ema20_atual * 1.0003
         cruzamento_confirmado = ema9_prev[-2] <= ema20_prev[-2] and ema9_prev[-1] > ema20_prev[-1]
         if not (cruzamento_agora or cruzamento_confirmado): return
 
-        # NOVA LÓGICA — valida cruzamento real + início de impulso
-        # exige duas velas consecutivas de alta (impulso real)
         last_two = k[-2:]
         if len(last_two) == 2:
             up_candles = sum(1 for x in last_two if float(x[4]) > float(x[1]))
             if up_candles < 2:
                 return
 
-        # força mínima de vela (mantém 1.5%)
         if cruzamento_agora:
             open_now = float(k[-1][1])
             close_now = float(k[-1][4])
@@ -115,16 +112,13 @@ async def scan_tf(s, sym, tf):
             if (close_prev - open_prev) / (open_prev or 1e-12) < 0.015:
                 return
 
-        # REMOVEU restrição: preço acima da EMA9
-        # mantém RSI e volume
-
         current_rsi = rsi(close)
         if current_rsi < 40 or current_rsi > 80: return
 
         if can_alert(tf, sym):
             stop = min(float(x[3]) for x in k[-10:]) * 0.98
-            alvo1 = p * 1.08
-            alvo2 = p * 1.15
+            alvo1 = p * 1.025
+            alvo2 = p * 1.05
             prob = "78%" if tf == "15m" else "85%"
             emoji = "⚡" if tf == "15m" else "💪"
             color = "🔵" if tf == "15m" else "🟢"
@@ -136,8 +130,8 @@ async def scan_tf(s, sym, tf):
                 f"Volume 24h: <b>${vol24:,.0f}</b>\n"
                 f"Prob: <b>{prob}</b>\n"
                 f"Stop: <b>{stop:.6f}</b>\n"
-                f"Alvo +8%: <b>{alvo1:.6f}</b>\n"
-                f"Alvo +15%: <b>{alvo2:.6f}</b>\n"
+                f"Alvo +2.5%: <b>{alvo1:.6f}</b>\n"
+                f"Alvo +5%: <b>{alvo2:.6f}</b>\n"
                 f"<i>{now_br()} BR</i>"
             )
             await tg(s, msg)
@@ -146,14 +140,14 @@ async def scan_tf(s, sym, tf):
 
 async def main_loop():
     async with aiohttp.ClientSession() as s:
-        await tg(s, "<b>V20.4 VOLUME 3M ATIVO</b>\nCRUZAMENTO REAL + INÍCIO DE IMPULSO")
+        await tg(s, "<b>V20.6 VOLUME 3M ATIVO</b>\nCRUZAMENTO REAL + INÍCIO DE IMPULSO + ALVOS CURTOS 2.5% e 5%")
         while True:
             try:
                 data = await (await s.get(f"{BINANCE}/api/v3/ticker/24hr")).json()
                 symbols = [
                     d["symbol"] for d in data
                     if d["symbol"].endswith("USDT")
-                    and float(d["quoteVolume"]) > 3_000_000
+                    and float(d["quoteVolume"]) > 3_000_000  # VOLUME 3M
                     and (lambda base: not (
                         base.endswith("USD")
                         or base in {
@@ -182,4 +176,3 @@ threading.Thread(target=lambda: asyncio.run(main_loop()), daemon=True).start()
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
-
