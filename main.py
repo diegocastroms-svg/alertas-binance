@@ -1,4 +1,4 @@
-# main.py — V20.8 VOLUME 3M (CRUZAMENTO REAL + CONFIRMAÇÃO + FORÇA DE VELA + ALVOS CURTOS)
+# main.py — V21.1 VOLUME 3M (LAYOUT TELEGRAM + NOME LIMPO + ESPAÇAMENTO)
 import os, asyncio, aiohttp, time
 from datetime import datetime, timedelta, timezone
 from flask import Flask
@@ -7,7 +7,7 @@ import threading
 app = Flask(__name__)
 @app.route("/")
 def home():
-    return "V20.8 VOLUME 3M ATIVO", 200
+    return "V21.1 VOLUME 3M ATIVO", 200
 
 @app.route("/health")
 def health():
@@ -92,17 +92,14 @@ async def scan_tf(s, sym, tf):
         ema9_atual = ema9_prev[-1] * (1 - alpha9) + close[-1] * alpha9
         ema20_atual = ema20_prev[-1] * (1 - alpha20) + close[-1] * alpha20
 
-        # Cruzamento real (margem maior)
         cruzamento_agora = ema9_prev[-1] <= ema20_prev[-1] and ema9_atual > ema20_atual * 1.001
         cruzamento_confirmado = ema9_prev[-2] <= ema20_prev[-2] and ema9_prev[-1] > ema20_prev[-1]
         if not (cruzamento_agora or cruzamento_confirmado): return
 
-        # Vela de confirmação fechada acima da EMA9 e EMA20
         close_prev = float(k[-2][4])
         if close_prev < ema9_prev[-1] or close_prev < ema20_prev[-1]:
             return
 
-        # Força de vela
         open_prev = float(k[-2][1])
         if (close_prev - open_prev) / (open_prev or 1e-12) < 0.01:
             return
@@ -117,9 +114,11 @@ async def scan_tf(s, sym, tf):
             prob = "78%" if tf == "15m" else "85%" if tf == "30m" else "90%"
             emoji = "⚡" if tf == "15m" else "💪" if tf == "30m" else "🟢"
             color = "🔵" if tf == "15m" else "🟢" if tf == "30m" else "🟣"
+
+            nome = sym.replace("USDT", "")
             msg = (
-                f"<b>{emoji} EMA9 CROSS {tf.upper()} {color} (AO VIVO)</b>\n"
-                f"{sym}\n"
+                f"<b>{emoji} EMA9 CROSS {tf.upper()} {color} (AO VIVO)</b>\n\n"
+                f"{nome}\n\n"
                 f"Preço: <b>{p:.6f}</b>\n"
                 f"RSI: <b>{current_rsi:.1f}</b>\n"
                 f"Volume 24h: <b>${vol24:,.0f}</b>\n"
@@ -135,7 +134,7 @@ async def scan_tf(s, sym, tf):
 
 async def main_loop():
     async with aiohttp.ClientSession() as s:
-        await tg(s, "<b>V20.8 VOLUME 3M ATIVO</b>\nCRUZAMENTO REAL + CONFIRMAÇÃO + FORÇA DE VELA + ALVOS CURTOS 2.5% e 5%")
+        await tg(s, "<b>V21.1 VOLUME 3M ATIVO</b>\nLAYOUT TELEGRAM + NOME LIMPO + ESPAÇAMENTO")
         while True:
             try:
                 data = await (await s.get(f"{BINANCE}/api/v3/ticker/24hr")).json()
@@ -172,4 +171,3 @@ threading.Thread(target=lambda: asyncio.run(main_loop()), daemon=True).start()
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
-
