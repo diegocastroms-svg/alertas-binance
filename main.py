@@ -119,7 +119,7 @@ async def scan_tf(s, sym, tf):
             color = "🔵" if tf == "15m" else "🟢" if tf == "30m" else "🟣"
             msg = (
                 f"<b>{emoji} EMA9 CROSS {tf.upper()} {color} (AO VIVO)</b>\n"
-                f"<code>{sym}</code>\n"
+                f"{sym}\n"
                 f"Preço: <b>{p:.6f}</b>\n"
                 f"RSI: <b>{current_rsi:.1f}</b>\n"
                 f"Volume 24h: <b>${vol24:,.0f}</b>\n"
@@ -172,3 +172,4 @@ threading.Thread(target=lambda: asyncio.run(main_loop()), daemon=True).start()
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+
