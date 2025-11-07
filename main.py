@@ -1,4 +1,4 @@
-# main.py — V21.4 VOLUME 3M (5M ALERTA DINÂMICO COM BOLLINGER ESTREITA)
+# main.py — V21.5 CURTO (5m, 15m, 30m) — CRUZAMENTO REFINADO 0.2%
 import os, asyncio, aiohttp, time
 from datetime import datetime, timedelta, timezone
 from flask import Flask
@@ -7,7 +7,7 @@ import threading, statistics
 app = Flask(__name__)
 @app.route("/")
 def home():
-    return "V21.4 VOLUME 3M ATIVO", 200
+    return "V21.5 CURTO ATIVO", 200
 
 @app.route("/health")
 def health():
@@ -64,7 +64,7 @@ cooldown_30m = {}
 
 def can_alert(tf, sym):
     cd = cooldown_5m if tf == "5m" else cooldown_15m if tf == "15m" else cooldown_30m
-    cooldown_time = 300 if tf == "5m" else 900 if tf == "15m" else 1800
+    cooldown_time = 450 if tf == "5m" else 900 if tf == "15m" else 1800
     n = time.time()
     if n - cd.get(sym, 0) >= cooldown_time:
         cd[sym] = n
@@ -92,27 +92,18 @@ async def scan_tf(s, sym, tf):
         ema9_atual = ema9_prev[-1] * (1 - alpha9) + close[-1] * alpha9
         ema20_atual = ema20_prev[-1] * (1 - alpha20) + close[-1] * alpha20
 
-        cruzamento_agora = ema9_prev[-1] <= ema20_prev[-1] and ema9_atual > ema20_atual * 1.001
-        cruzamento_confirmado = ema9_prev[-2] <= ema20_prev[-2] and ema9_prev[-1] > ema20_prev[-1]
+        # cruzamento com folga mínima de 0.2%
+        cruzamento_agora = ema9_prev[-1] <= ema20_prev[-1] and ema9_atual > ema20_atual * 1.002
+        cruzamento_confirmado = ema9_prev[-2] <= ema20_prev[-2] and ema9_prev[-1] > ema20_prev[-1] * 1.002
         if not (cruzamento_agora or cruzamento_confirmado): return
 
-        # filtro específico de Bandas de Bollinger no 5m
+        # filtro 5m: Bollinger estreita no cruzamento
         if tf == "5m":
             ma20 = sum(close[-20:]) / 20
             std = statistics.pstdev(close[-20:])
-            upper = ma20 + 2 * std
-            lower = ma20 - 2 * std
-            largura = (upper - lower) / ma20
-            if largura > 0.06:  # máximo 6% de abertura
+            largura = (2 * std) / ma20
+            if largura > 0.05:
                 return
-
-        close_prev = float(k[-2][4])
-        if close_prev < ema9_prev[-1] or close_prev < ema20_prev[-1]:
-            return
-
-        open_prev = float(k[-2][1])
-        if (close_prev - open_prev) / (open_prev or 1e-12) < 0.01:
-            return
 
         current_rsi = rsi(close)
         if current_rsi < 40 or current_rsi > 80: return
@@ -121,50 +112,30 @@ async def scan_tf(s, sym, tf):
             stop = min(float(x[3]) for x in k[-10:]) * 0.98
             alvo1 = p * 1.025
             alvo2 = p * 1.05
-            prob = "72%" if tf == "5m" else "78%" if tf == "15m" else "85%"
             nome = sym[:-4]
+            prob = "70%" if tf == "5m" else "78%" if tf == "15m" else "85%"
+            emoji = "⚡" if tf == "5m" else "💫" if tf == "15m" else "💪"
+            color = "🟣" if tf == "5m" else "🔵" if tf == "15m" else "🟢"
 
-            # formatação diferenciada para 5m
-            if tf == "5m":
-                msg = (
-                    f"<b>🚀 ALERTA DINÂMICO 5M 🟠</b>\n"
-                    f"<b>Bandas estreitas + Cruzamento EMA9/MA20 detectado!</b>\n\n"
-                    f"<b>{nome}</b>\n\n"
-                    f"💰 Preço: <b>{p:.6f}</b>\n"
-                    f"📊 RSI: <b>{current_rsi:.1f}</b>\n"
-                    f"💵 Volume 24h: <b>${vol24:,.0f}</b>\n"
-                    f"🎯 Prob: <b>{prob}</b>\n"
-                    f"━━━━━━━━━━━━━━━\n"
-                    f"📉 Stop: <b>{stop:.6f}</b>\n"
-                    f"➡️ Alvo +2.5%: <b>{alvo1:.6f}</b>\n"
-                    f"🏁 Alvo +5%: <b>{alvo2:.6f}</b>\n"
-                    f"━━━━━━━━━━━━━━━\n"
-                    f"⏱️ <i>Compressão detectada — olho no rompimento!</i>\n"
-                    f"<i>{now_br()} BR</i>"
-                )
-            else:
-                emoji = "⚡" if tf == "15m" else "💪"
-                color = "🔵" if tf == "15m" else "🟢"
-                msg = (
-                    f"<b>{emoji} EMA9 CROSS {tf.upper()} {color} (AO VIVO)</b>\n\n\n"
-                    f"<b>{nome}</b>\n\n"
-                    f"Preço: <b>{p:.6f}</b>\n"
-                    f"RSI: <b>{current_rsi:.1f}</b>\n"
-                    f"Volume 24h: <b>${vol24:,.0f}</b>\n"
-                    f"Prob: <b>{prob}</b>\n"
-                    f"Stop: <b>{stop:.6f}</b>\n"
-                    f"Alvo +2.5%: <b>{alvo1:.6f}</b>\n"
-                    f"Alvo +5%: <b>{alvo2:.6f}</b>\n"
-                    f"<i>{now_br()} BR</i>"
-                )
-
+            msg = (
+                f"<b>{emoji} EMA9 CROSS {tf.upper()} {color} (AO VIVO)</b>\n\n"
+                f"<b>{nome}</b>\n\n"
+                f"💰 Preço: <b>{p:.6f}</b>\n"
+                f"📊 RSI: <b>{current_rsi:.1f}</b>\n"
+                f"💵 Volume 24h: <b>${vol24:,.0f}</b>\n"
+                f"📉 Stop: <b>{stop:.6f}</b>\n"
+                f"🎯 Alvo +2.5%: <b>{alvo1:.6f}</b>\n"
+                f"🏁 Alvo +5%: <b>{alvo2:.6f}</b>\n"
+                f"📈 Prob: <b>{prob}</b>\n"
+                f"<i>{now_br()} BR</i>"
+            )
             await tg(s, msg)
     except Exception as e:
         print("Erro scan_tf:", e)
 
 async def main_loop():
     async with aiohttp.ClientSession() as s:
-        await tg(s, "<b>V21.4 VOLUME 3M ATIVO</b>\nINCLUI 5M ALERTA DINÂMICO COM BOLLINGER ESTREITA (≤5%+1%)")
+        await tg(s, "<b>V21.5 CURTO ATIVO</b>\n5M + 15M + 30M | CRUZAMENTO 0.2% | BOLLINGER ESTREITA | NOMES SEM USDT")
         while True:
             try:
                 data = await (await s.get(f"{BINANCE}/api/v3/ticker/24hr")).json()
@@ -172,14 +143,6 @@ async def main_loop():
                     d["symbol"] for d in data
                     if d["symbol"].endswith("USDT")
                     and float(d["quoteVolume"]) > 3_000_000
-                    and (lambda base: not (
-                        base.endswith("USD")
-                        or base in {
-                            "BUSD","FDUSD","USDE","USDC","TUSD","CUSD",
-                            "EUR","GBP","TRY","AUD","BRL","RUB","CAD","CHF","JPY",
-                            "BF","BFC","BFG","BFD","BETA","AEUR","AUSD","CEUR","XAUT"
-                        }
-                    ))(d["symbol"][:-4])
                     and not any(x in d["symbol"] for x in ["UP", "DOWN"])
                 ]
                 symbols = sorted(
@@ -187,6 +150,7 @@ async def main_loop():
                     key=lambda x: next((float(t["quoteVolume"]) for t in data if t["symbol"] == x), 0),
                     reverse=True
                 )[:100]
+
                 tasks = []
                 for sym in symbols:
                     tasks.append(scan_tf(s, sym, "5m"))
@@ -200,4 +164,5 @@ async def main_loop():
 threading.Thread(target=lambda: asyncio.run(main_loop()), daemon=True).start()
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+    port = int(os.environ.get("PORT") or 10000)
+    app.run(host="0.0.0.0", port=port)
