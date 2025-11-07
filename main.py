@@ -1,4 +1,4 @@
-# main.py — V21.5 CURTO (5m, 15m, 30m) — CRUZAMENTO REFINADO 0.2%
+# main.py — V21.6 CURTO (5m, 15m, 30m) — TENDÊNCIA CURTA + BOLLINGER ≤8%
 import os, asyncio, aiohttp, time
 from datetime import datetime, timedelta, timezone
 from flask import Flask
@@ -7,7 +7,7 @@ import threading, statistics
 app = Flask(__name__)
 @app.route("/")
 def home():
-    return "V21.5 CURTO ATIVO", 200
+    return "V21.6 CURTO ATIVO", 200
 
 @app.route("/health")
 def health():
@@ -102,7 +102,7 @@ async def scan_tf(s, sym, tf):
             ma20 = sum(close[-20:]) / 20
             std = statistics.pstdev(close[-20:])
             largura = (2 * std) / ma20
-            if largura > 0.05:
+            if largura > 0.08:
                 return
 
         current_rsi = rsi(close)
@@ -118,7 +118,7 @@ async def scan_tf(s, sym, tf):
             color = "🟣" if tf == "5m" else "🔵" if tf == "15m" else "🟢"
 
             msg = (
-                f"<b>{emoji} EMA9 CROSS {tf.upper()} {color} (AO VIVO)</b>\n\n"
+                f"<b>{emoji} TENDÊNCIA CURTA {tf.upper()} {color}</b>\n\n"
                 f"<b>{nome}</b>\n\n"
                 f"💰 Preço: <b>{p:.6f}</b>\n"
                 f"📊 RSI: <b>{current_rsi:.1f}</b>\n"
@@ -135,7 +135,7 @@ async def scan_tf(s, sym, tf):
 
 async def main_loop():
     async with aiohttp.ClientSession() as s:
-        await tg(s, "<b>V21.5 CURTO ATIVO</b>\n5M + 15M + 30M | CRUZAMENTO 0.2% | BOLLINGER ESTREITA | NOMES SEM USDT")
+        await tg(s, "<b>V21.6 CURTO ATIVO</b>\n5M + 15M + 30M | TENDÊNCIA CURTA | CRUZAMENTO 0.2% | BOLLINGER ≤8% | NOMES SEM USDT")
         while True:
             try:
                 data = await (await s.get(f"{BINANCE}/api/v3/ticker/24hr")).json()
