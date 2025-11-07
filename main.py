@@ -1,4 +1,4 @@
-# main.py — V21.6 CURTO (5m, 15m, 30m) — TENDÊNCIA CURTA + BOLLINGER ≤8%
+# main.py — V21.7 CURTO (5m, 15m, 30m) — CRUZAMENTO FECHADO + TENDÊNCIA CURTA
 import os, asyncio, aiohttp, time
 from datetime import datetime, timedelta, timezone
 from flask import Flask
@@ -7,7 +7,7 @@ import threading, statistics
 app = Flask(__name__)
 @app.route("/")
 def home():
-    return "V21.6 CURTO ATIVO", 200
+    return "V21.7 CURTO ATIVO", 200
 
 @app.route("/health")
 def health():
@@ -85,19 +85,18 @@ async def scan_tf(s, sym, tf):
 
         ema9_prev = ema(close[:-1], 9)
         ema20_prev = ema(close[:-1], 20)
-        if len(ema9_prev) < 2 or len(ema20_prev) < 2: return
+        if len(ema9_prev) < 3 or len(ema20_prev) < 3:
+            return
 
-        alpha9 = 2 / (9 + 1)
-        alpha20 = 2 / (20 + 1)
-        ema9_atual = ema9_prev[-1] * (1 - alpha9) + close[-1] * alpha9
-        ema20_atual = ema20_prev[-1] * (1 - alpha20) + close[-1] * alpha20
+        # cruzamento confirmado somente com velas fechadas
+        cruzamento_confirmado = (
+            ema9_prev[-3] <= ema20_prev[-3]
+            and ema9_prev[-2] > ema20_prev[-2] * 1.002
+        )
+        if not cruzamento_confirmado:
+            return
 
-        # cruzamento com folga mínima de 0.2%
-        cruzamento_agora = ema9_prev[-1] <= ema20_prev[-1] and ema9_atual > ema20_atual * 1.002
-        cruzamento_confirmado = ema9_prev[-2] <= ema20_prev[-2] and ema9_prev[-1] > ema20_prev[-1] * 1.002
-        if not (cruzamento_agora or cruzamento_confirmado): return
-
-        # filtro 5m: Bollinger estreita no cruzamento
+        # filtro 5m: Bollinger estreita (≤ 8%)
         if tf == "5m":
             ma20 = sum(close[-20:]) / 20
             std = statistics.pstdev(close[-20:])
@@ -135,7 +134,7 @@ async def scan_tf(s, sym, tf):
 
 async def main_loop():
     async with aiohttp.ClientSession() as s:
-        await tg(s, "<b>V21.6 CURTO ATIVO</b>\n5M + 15M + 30M | TENDÊNCIA CURTA | CRUZAMENTO 0.2% | BOLLINGER ≤8% | NOMES SEM USDT")
+        await tg(s, "<b>V21.7 CURTO ATIVO</b>\n5M + 15M + 30M | TENDÊNCIA CURTA | CRUZAMENTO FECHADO 0.2% | BOLLINGER ≤8% | NOMES SEM USDT")
         while True:
             try:
                 data = await (await s.get(f"{BINANCE}/api/v3/ticker/24hr")).json()
