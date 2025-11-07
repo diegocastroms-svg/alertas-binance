@@ -1,4 +1,4 @@
-# main.py — V21.3 VOLUME 3M (INCLUI 5M COM BOLLINGER ESTREITA)
+# main.py — V21.4 VOLUME 3M (5M ALERTA DINÂMICO COM BOLLINGER ESTREITA)
 import os, asyncio, aiohttp, time
 from datetime import datetime, timedelta, timezone
 from flask import Flask
@@ -7,7 +7,7 @@ import threading, statistics
 app = Flask(__name__)
 @app.route("/")
 def home():
-    return "V21.3 VOLUME 3M ATIVO", 200
+    return "V21.4 VOLUME 3M ATIVO", 200
 
 @app.route("/health")
 def health():
@@ -122,29 +122,49 @@ async def scan_tf(s, sym, tf):
             alvo1 = p * 1.025
             alvo2 = p * 1.05
             prob = "72%" if tf == "5m" else "78%" if tf == "15m" else "85%"
-            emoji = "🔥" if tf == "5m" else "⚡" if tf == "15m" else "💪"
-            color = "🟠" if tf == "5m" else "🔵" if tf == "15m" else "🟢"
-
             nome = sym[:-4]
-            msg = (
-                f"<b>{emoji} EMA9 CROSS {tf.upper()} {color} (AO VIVO)</b>\n\n\n"
-                f"<b>{nome}</b>\n\n"
-                f"Preço: <b>{p:.6f}</b>\n"
-                f"RSI: <b>{current_rsi:.1f}</b>\n"
-                f"Volume 24h: <b>${vol24:,.0f}</b>\n"
-                f"Prob: <b>{prob}</b>\n"
-                f"Stop: <b>{stop:.6f}</b>\n"
-                f"Alvo +2.5%: <b>{alvo1:.6f}</b>\n"
-                f"Alvo +5%: <b>{alvo2:.6f}</b>\n"
-                f"<i>{now_br()} BR</i>"
-            )
+
+            # formatação diferenciada para 5m
+            if tf == "5m":
+                msg = (
+                    f"<b>🚀 ALERTA DINÂMICO 5M 🟠</b>\n"
+                    f"<b>Bandas estreitas + Cruzamento EMA9/MA20 detectado!</b>\n\n"
+                    f"<b>{nome}</b>\n\n"
+                    f"💰 Preço: <b>{p:.6f}</b>\n"
+                    f"📊 RSI: <b>{current_rsi:.1f}</b>\n"
+                    f"💵 Volume 24h: <b>${vol24:,.0f}</b>\n"
+                    f"🎯 Prob: <b>{prob}</b>\n"
+                    f"━━━━━━━━━━━━━━━\n"
+                    f"📉 Stop: <b>{stop:.6f}</b>\n"
+                    f"➡️ Alvo +2.5%: <b>{alvo1:.6f}</b>\n"
+                    f"🏁 Alvo +5%: <b>{alvo2:.6f}</b>\n"
+                    f"━━━━━━━━━━━━━━━\n"
+                    f"⏱️ <i>Compressão detectada — olho no rompimento!</i>\n"
+                    f"<i>{now_br()} BR</i>"
+                )
+            else:
+                emoji = "⚡" if tf == "15m" else "💪"
+                color = "🔵" if tf == "15m" else "🟢"
+                msg = (
+                    f"<b>{emoji} EMA9 CROSS {tf.upper()} {color} (AO VIVO)</b>\n\n\n"
+                    f"<b>{nome}</b>\n\n"
+                    f"Preço: <b>{p:.6f}</b>\n"
+                    f"RSI: <b>{current_rsi:.1f}</b>\n"
+                    f"Volume 24h: <b>${vol24:,.0f}</b>\n"
+                    f"Prob: <b>{prob}</b>\n"
+                    f"Stop: <b>{stop:.6f}</b>\n"
+                    f"Alvo +2.5%: <b>{alvo1:.6f}</b>\n"
+                    f"Alvo +5%: <b>{alvo2:.6f}</b>\n"
+                    f"<i>{now_br()} BR</i>"
+                )
+
             await tg(s, msg)
     except Exception as e:
         print("Erro scan_tf:", e)
 
 async def main_loop():
     async with aiohttp.ClientSession() as s:
-        await tg(s, "<b>V21.3 VOLUME 3M ATIVO</b>\nINCLUI 5M COM BOLLINGER ESTREITA (≤5%+1%)")
+        await tg(s, "<b>V21.4 VOLUME 3M ATIVO</b>\nINCLUI 5M ALERTA DINÂMICO COM BOLLINGER ESTREITA (≤5%+1%)")
         while True:
             try:
                 data = await (await s.get(f"{BINANCE}/api/v3/ticker/24hr")).json()
