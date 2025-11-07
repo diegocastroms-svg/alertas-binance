@@ -1,13 +1,13 @@
-# main.py — V21.1 VOLUME 3M (LAYOUT TELEGRAM + NOME LIMPO + ESPAÇAMENTO)
+# main.py — V21.3 VOLUME 3M (INCLUI 5M COM BOLLINGER ESTREITA)
 import os, asyncio, aiohttp, time
 from datetime import datetime, timedelta, timezone
 from flask import Flask
-import threading
+import threading, statistics
 
 app = Flask(__name__)
 @app.route("/")
 def home():
-    return "V21.1 VOLUME 3M ATIVO", 200
+    return "V21.3 VOLUME 3M ATIVO", 200
 
 @app.route("/health")
 def health():
@@ -58,13 +58,13 @@ async def ticker(s, sym):
     async with s.get(url, timeout=10) as r:
         return await r.json() if r.status == 200 else None
 
+cooldown_5m = {}
 cooldown_15m = {}
 cooldown_30m = {}
-cooldown_1h = {}
 
 def can_alert(tf, sym):
-    cd = cooldown_15m if tf == "15m" else cooldown_30m if tf == "30m" else cooldown_1h
-    cooldown_time = 900 if tf == "15m" else 1800 if tf == "30m" else 3600
+    cd = cooldown_5m if tf == "5m" else cooldown_15m if tf == "15m" else cooldown_30m
+    cooldown_time = 300 if tf == "5m" else 900 if tf == "15m" else 1800
     n = time.time()
     if n - cd.get(sym, 0) >= cooldown_time:
         cd[sym] = n
@@ -96,6 +96,16 @@ async def scan_tf(s, sym, tf):
         cruzamento_confirmado = ema9_prev[-2] <= ema20_prev[-2] and ema9_prev[-1] > ema20_prev[-1]
         if not (cruzamento_agora or cruzamento_confirmado): return
 
+        # filtro específico de Bandas de Bollinger no 5m
+        if tf == "5m":
+            ma20 = sum(close[-20:]) / 20
+            std = statistics.pstdev(close[-20:])
+            upper = ma20 + 2 * std
+            lower = ma20 - 2 * std
+            largura = (upper - lower) / ma20
+            if largura > 0.06:  # máximo 6% de abertura
+                return
+
         close_prev = float(k[-2][4])
         if close_prev < ema9_prev[-1] or close_prev < ema20_prev[-1]:
             return
@@ -111,14 +121,14 @@ async def scan_tf(s, sym, tf):
             stop = min(float(x[3]) for x in k[-10:]) * 0.98
             alvo1 = p * 1.025
             alvo2 = p * 1.05
-            prob = "78%" if tf == "15m" else "85%" if tf == "30m" else "90%"
-            emoji = "⚡" if tf == "15m" else "💪" if tf == "30m" else "🟢"
-            color = "🔵" if tf == "15m" else "🟢" if tf == "30m" else "🟣"
+            prob = "72%" if tf == "5m" else "78%" if tf == "15m" else "85%"
+            emoji = "🔥" if tf == "5m" else "⚡" if tf == "15m" else "💪"
+            color = "🟠" if tf == "5m" else "🔵" if tf == "15m" else "🟢"
 
-            nome = sym.replace("USDT", "")
+            nome = sym[:-4]
             msg = (
-                f"<b>{emoji} EMA9 CROSS {tf.upper()} {color} (AO VIVO)</b>\n\n"
-                f"{nome}\n\n"
+                f"<b>{emoji} EMA9 CROSS {tf.upper()} {color} (AO VIVO)</b>\n\n\n"
+                f"<b>{nome}</b>\n\n"
                 f"Preço: <b>{p:.6f}</b>\n"
                 f"RSI: <b>{current_rsi:.1f}</b>\n"
                 f"Volume 24h: <b>${vol24:,.0f}</b>\n"
@@ -134,7 +144,7 @@ async def scan_tf(s, sym, tf):
 
 async def main_loop():
     async with aiohttp.ClientSession() as s:
-        await tg(s, "<b>V21.1 VOLUME 3M ATIVO</b>\nLAYOUT TELEGRAM + NOME LIMPO + ESPAÇAMENTO")
+        await tg(s, "<b>V21.3 VOLUME 3M ATIVO</b>\nINCLUI 5M COM BOLLINGER ESTREITA (≤5%+1%)")
         while True:
             try:
                 data = await (await s.get(f"{BINANCE}/api/v3/ticker/24hr")).json()
@@ -159,9 +169,9 @@ async def main_loop():
                 )[:100]
                 tasks = []
                 for sym in symbols:
+                    tasks.append(scan_tf(s, sym, "5m"))
                     tasks.append(scan_tf(s, sym, "15m"))
                     tasks.append(scan_tf(s, sym, "30m"))
-                    tasks.append(scan_tf(s, sym, "1h"))
                 await asyncio.gather(*tasks)
             except Exception as e:
                 print("Erro main_loop:", e)
