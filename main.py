@@ -1,4 +1,4 @@
-# main.py — V21.7 VOLUME 3M (3M OTIMIZADO BANDAS BB + VOLUME + EARLY CROSS)
+# main.py — V21.8 VOLUME 3M (EARLY PUMP FIX)
 import os, asyncio, aiohttp, time, math
 from datetime import datetime, timedelta, timezone
 from flask import Flask
@@ -7,7 +7,7 @@ import threading
 app = Flask(__name__)
 @app.route("/")
 def home():
-    return "V21.7 VOLUME 3M (3M OTIMIZADO BANDAS BB + VOLUME + EARLY CROSS) ATIVO", 200
+    return "V21.8 VOLUME 3M (EARLY PUMP FIX) ATIVO", 200
 
 @app.route("/health")
 def health():
@@ -69,7 +69,7 @@ cooldown_30m = {}
 
 def can_alert(tf, sym):
     cd = cooldown_3m if tf == "3m" else cooldown_15m if tf == "15m" else cooldown_30m
-    cooldown_time = 180 if tf == "3m" else 900 if tf == "15m" else 1800
+    cooldown_time = 120 if tf == "3m" else 900 if tf == "15m" else 1800
     n = time.time()
     if n - cd.get(sym, 0) >= cooldown_time:
         cd[sym] = n
@@ -102,16 +102,14 @@ async def scan_tf(s, sym, tf):
         ema9_atual = ema9_prev[-1] * (1 - alpha9) + close[-1] * alpha9
         ema20_atual = ema20_prev[-1] * (1 - alpha20) + close[-1] * alpha20
 
-        bb_width = None
+        # === BLOCO 3M EARLY PUMP FIX ===
         if tf == "3m":
-            # BB atual
             mb = sum(close[-20:]) / 20
             std = math.sqrt(sum((x - mb) ** 2 for x in close[-20:]) / 20)
             up = mb + (1.8 * std)
             dn = mb - (1.8 * std)
             bb_width_atual = (up - dn) / mb
 
-            # BB anterior
             prev20 = close[-21:-1]
             mb_ant = sum(prev20[-20:]) / 20
             std_ant = math.sqrt(sum((x - mb_ant) ** 2 for x in prev20[-20:]) / 20)
@@ -119,19 +117,25 @@ async def scan_tf(s, sym, tf):
             dn_ant = mb_ant - (1.8 * std_ant)
             bb_width_ant = (up_ant - dn_ant) / mb_ant
 
-            bb_width = bb_width_atual
+            # Bandas abrindo mais cedo
+            if not (bb_width_ant < 0.06 and bb_width_atual > bb_width_ant * 1.02):
+                return
 
-            # Filtros refinados
-            if not (bb_width_ant < 0.04 and bb_width_atual > bb_width_ant * 1.05):
+            # Volume crescente leve
+            vol_media9 = sum(vol[-10:-1]) / 9
+            if vol[-1] < vol_media9 * 1.05:
                 return
-            if vol[-1] < (sum(vol[-10:-1]) / 9) * 1.2:
-                return
+
+            # RSI ganhando força
             rsi_prev = rsi(close[:-1])
             current_rsi = rsi(close)
-            if current_rsi <= rsi_prev or current_rsi < 40 or current_rsi > 85:
+            if not (current_rsi > 40 and current_rsi < 85 and current_rsi > rsi_prev):
                 return
 
+            # Cruzamento EMA9 acima da MA20
             cruzamento_valido = ema9_prev[-1] <= ema20_prev[-1] and ema9_atual > ema20_atual
+            if not cruzamento_valido:
+                return
         else:
             current_rsi = rsi(close)
             if current_rsi < 40 or current_rsi > 85:
@@ -145,34 +149,32 @@ async def scan_tf(s, sym, tf):
             stop = min(float(x[3]) for x in k[-10:]) * 0.98
             alvo1 = p * 1.025
             alvo2 = p * 1.05
-            prob = "70%" if tf == "3m" else "78%" if tf == "15m" else "85%"
+            prob = "72%" if tf == "3m" else "78%" if tf == "15m" else "85%"
             emoji = "🔥" if tf == "3m" else "⚡" if tf == "15m" else "💪"
             color = "🟡" if tf == "3m" else "🔵" if tf == "15m" else "🟢"
 
             nome = sym.replace("USDT", "")
-            msg = f"<b>{emoji} EMA9 CROSS {tf.upper()} {color} (AO VIVO)</b>\n\n"
-            msg += f"{nome}\n\n"
-            msg += f"Preço: <b>{p:.6f}</b>\n"
-            msg += f"RSI: <b>{current_rsi:.1f}</b>\n"
-            if tf == "3m" and bb_width is not None:
-                msg += f"BB Width: <b>{bb_width*100:.2f}%</b>\n"
-            msg += f"Volume 24h: <b>${vol24:,.0f}</b>\n"
-            msg += f"Prob: <b>{prob}</b>\n"
-            msg += f"Stop: <b>{stop:.6f}\n"
-            msg += f"Alvo +2.5%: <b>{alvo1:.6f}</b>\n"
-            msg += f"Alvo +5%: <b>{alvo2:.6f}</b>\n"
-            msg += f"<i>{now_br()} BR</i>"
-
+            msg = (
+                f"<b>{emoji} EMA9 CROSS {tf.upper()} {color} (AO VIVO)</b>\n\n"
+                f"{nome}\n\n"
+                f"Preço: <b>{p:.6f}</b>\n"
+                f"RSI: <b>{current_rsi:.1f}</b>\n"
+                f"BB Width: <b>{bb_width_atual*100:.2f}%</b>\n"
+                f"Volume 24h: <b>${vol24:,.0f}</b>\n"
+                f"Prob: <b>{prob}</b>\n"
+                f"Stop: <b>{stop:.6f}</b>\n"
+                f"Alvo +2.5%: <b>{alvo1:.6f}</b>\n"
+                f"Alvo +5%: <b>{alvo2:.6f}</b>\n"
+                f"<i>{now_br()} BR</i>"
+            )
             await tg(s, msg)
+
     except Exception as e:
         print("Erro scan_tf:", e)
 
 async def main_loop():
     async with aiohttp.ClientSession() as s:
-        await tg(
-            s,
-            "<b>V21.7 VOLUME 3M (3M OTIMIZADO BANDAS BB + VOLUME + EARLY CROSS) ATIVO</b>\nLAYOUT TELEGRAM + NOME LIMPO + ESPAÇAMENTO",
-        )
+        await tg(s, "<b>V21.8 VOLUME 3M (EARLY PUMP FIX) ATIVO</b>")
         while True:
             try:
                 data = await (await s.get(f"{BINANCE}/api/v3/ticker/24hr")).json()
@@ -213,4 +215,3 @@ threading.Thread(target=lambda: asyncio.run(main_loop()), daemon=True).start()
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
-
