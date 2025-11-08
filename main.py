@@ -1,4 +1,4 @@
-# main.py — V21.4 VOLUME 3M (5M COM BB + EARLY CROSS 15M/30M)
+# main.py — V21.5 VOLUME 3M (5M COM ABERTURA BB + EARLY CROSS 15M/30M)
 import os, asyncio, aiohttp, time, math
 from datetime import datetime, timedelta, timezone
 from flask import Flask
@@ -7,7 +7,7 @@ import threading
 app = Flask(__name__)
 @app.route("/")
 def home():
-    return "V21.4 VOLUME 3M (5M COM BB + EARLY CROSS 15M/30M) ATIVO", 200
+    return "V21.5 VOLUME 3M (5M COM ABERTURA BB + EARLY CROSS 15M/30M) ATIVO", 200
 
 @app.route("/health")
 def health():
@@ -101,16 +101,30 @@ async def scan_tf(s, sym, tf):
         ema9_atual = ema9_prev[-1] * (1 - alpha9) + close[-1] * alpha9
         ema20_atual = ema20_prev[-1] * (1 - alpha20) + close[-1] * alpha20
 
-        # === BLOCO 5M COM BANDAS DE BOLLINGER ===
+        # === BLOCO 5M — ABERTURA DAS BANDAS BB ===
         bb_width = None
         if tf == "5m":
+            # bandas atuais
             mb = sum(close[-20:]) / 20
             std = math.sqrt(sum((x - mb) ** 2 for x in close[-20:]) / 20)
             up = mb + (1.8 * std)
             dn = mb - (1.8 * std)
-            bb_width = (up - dn) / mb
-            if not (0.02 < bb_width < 0.04):
+            bb_width_atual = (up - dn) / mb
+
+            # bandas anteriores
+            prev20 = close[-21:-1]
+            mb_ant = sum(prev20[-20:]) / 20
+            std_ant = math.sqrt(sum((x - mb_ant) ** 2 for x in prev20[-20:]) / 20)
+            up_ant = mb_ant + (1.8 * std_ant)
+            dn_ant = mb_ant - (1.8 * std_ant)
+            bb_width_ant = (up_ant - dn_ant) / mb_ant
+
+            bb_width = bb_width_atual
+
+            # condição: antes estreita (<3%) e agora abrindo (>10% maior)
+            if not (bb_width_ant < 0.03 and bb_width_atual > bb_width_ant * 1.1):
                 return
+
             cruzamento_valido = (
                 ema9_prev[-1] <= ema20_prev[-1] and ema9_atual > ema20_atual * 1.001
             )
@@ -155,7 +169,7 @@ async def main_loop():
     async with aiohttp.ClientSession() as s:
         await tg(
             s,
-            "<b>V21.4 VOLUME 3M (5M COM BB + EARLY CROSS 15M/30M) ATIVO</b>\nLAYOUT TELEGRAM + NOME LIMPO + ESPAÇAMENTO",
+            "<b>V21.5 VOLUME 3M (5M COM ABERTURA BB + EARLY CROSS 15M/30M) ATIVO</b>\nLAYOUT TELEGRAM + NOME LIMPO + ESPAÇAMENTO",
         )
         while True:
             try:
