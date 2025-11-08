@@ -1,4 +1,4 @@
-# main.py — V22.0 CURTO (5m, 15m, 30m) — CRUZAMENTO UNIFICADO E CONFIRMADO
+# main.py — V22.4 CURTO (5m, 15m, 30m) — PRECISÃO TOTAL
 import os, asyncio, aiohttp, time
 from datetime import datetime, timedelta, timezone
 from flask import Flask
@@ -7,7 +7,7 @@ import threading, statistics
 app = Flask(__name__)
 @app.route("/")
 def home():
-    return "V22.0 CURTO ATIVO", 200
+    return "V22.4 CURTO ATIVO", 200
 
 @app.route("/health")
 def health():
@@ -81,37 +81,36 @@ async def scan_tf(s, sym, tf):
         if len(k) < 50: return
         close = [float(x[4]) for x in k]
 
-        ema9_vals = ema(close[:-1], 9)
-        ema20_vals = ema(close[:-1], 20)
+        # --- EMA cálculo completo (inclui candle atual) ---
+        ema9_vals = ema(close, 9)
+        ema20_vals = ema(close, 20)
         if len(ema9_vals) < 2 or len(ema20_vals) < 2: return
 
-        ema9 = ema9_vals[-1]
-        ema20 = ema20_vals[-1]
-        ema9_prev = ema9_vals[-2]
-        ema20_prev = ema20_vals[-2]
+        ema9, ema20 = ema9_vals[-1], ema20_vals[-1]
+        ema9_prev, ema20_prev = ema9_vals[-2], ema20_vals[-2]
 
-        # --- CRUZAMENTO UNIFICADO E CONFIRMADO ---
-        cruzamento = ema9_prev <= ema20_prev and ema9 > ema20 * 1.002
+        # --- CRUZAMENTO DE ALTA REAL (com 0.1%) ---
+        cruzamento = ema9_prev <= ema20_prev and ema9 > ema20 * 1.001
         if not cruzamento:
             return
-        # confirmação de que ainda está acima
-        if ema9 <= ema20:
+        # confirmação de subida
+        if ema9 - ema9_prev <= 0:
             return
-        # ------------------------------------------------
+        # -------------------------------------------------
 
-        # --- FILTRO 5M: BOLLINGER + MA200 PROXIMIDADE ---
+        # --- FILTRO 5M: BOLLINGER + MA200 ---
         if tf == "5m":
             ma20 = sum(close[-20:]) / 20
             std = statistics.pstdev(close[-20:])
             largura = (2 * std) / ma20
-            if largura > 0.08:
+            if largura > 0.05:
                 return
 
             ma200 = sum(close[-200:]) / 200
             distancia = abs(p - ma200) / ma200
             if distancia > 0.02:
                 return
-        # -------------------------------------------------
+        # ------------------------------------
 
         current_rsi = rsi(close)
         if current_rsi < 40 or current_rsi > 80: return
@@ -142,7 +141,7 @@ async def scan_tf(s, sym, tf):
 
 async def main_loop():
     async with aiohttp.ClientSession() as s:
-        await tg(s, "<b>V22.0 CURTO ATIVO</b>\n5M + 15M + 30M | TENDÊNCIA CURTA | CRUZAMENTO UNIFICADO 0.2% | BOLLINGER ≤8% | MA200 ±2% | NOMES SEM USDT")
+        await tg(s, "<b>V22.4 CURTO ATIVO</b>\n5M + 15M + 30M | CRUZAMENTO 0.1% | BB ≤5% | MA200 ±2% | DIREÇÃO CONFIRMADA | NOMES SEM USDT")
         while True:
             try:
                 data = await (await s.get(f"{BINANCE}/api/v3/ticker/24hr")).json()
