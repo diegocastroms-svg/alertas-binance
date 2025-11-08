@@ -6,7 +6,7 @@ import threading, statistics
 app = Flask(__name__)
 @app.route("/")
 def home():
-    return "V22.4 CURTO ATIVO", 200
+    return "V22.5 CURTO ATIVO", 200
 
 @app.route("/health")
 def health():
@@ -57,9 +57,7 @@ async def ticker(s, sym):
     async with s.get(url, timeout=10) as r:
         return await r.json() if r.status == 200 else None
 
-cooldown_5m = {}
-cooldown_15m = {}
-cooldown_30m = {}
+cooldown_5m, cooldown_15m, cooldown_30m = {}, {}, {}
 
 def can_alert(tf, sym):
     cd = cooldown_5m if tf == "5m" else cooldown_15m if tf == "15m" else cooldown_30m
@@ -81,28 +79,27 @@ async def scan_tf(s, sym, tf):
         k = await klines(s, sym, tf, 100)
         if len(k) < 50: return
         close = [float(x[4]) for x in k]
+        vol = [float(x[5]) for x in k]
 
-        ema9_prev = ema(close[:-1], 9)
-        ema20_prev = ema(close[:-1], 20)
-        if len(ema9_prev) < 2 or len(ema20_prev) < 2: return
+        ema9 = ema(close, 9)
+        ema20 = ema(close, 20)
 
-        alpha9 = 2 / (9 + 1)
-        alpha20 = 2 / (20 + 1)
-        ema9_atual = ema9_prev[-1] * (1 - alpha9) + close[-1] * alpha9
-        ema20_atual = ema20_prev[-1] * (1 - alpha20) + close[-1] * alpha20
+        # Verifica cruzamento nos últimos 2 candles
+        cruzou = False
+        for i in range(2):
+            if ema9[-(2+i)] <= ema20[-(2+i)] and ema9[-(1+i)] > ema20[-(1+i)]:
+                cruzou = True
+                break
+        if not cruzou: return
 
-        cruzamento_agora = ema9_prev[-1] <= ema20_prev[-1] and ema9_atual > ema20_atual * 1.002
-        cruzamento_confirmado = ema9_prev[-2] <= ema20_prev[-2] and ema9_prev[-1] > ema20_prev[-1] * 1.002
-        if not (cruzamento_agora or cruzamento_confirmado): return
-
-        # filtro 5m: Bollinger dinâmica + EMA200 próxima
+        # Filtros exclusivos do 5m
         if tf == "5m":
             ma20 = sum(close[-20:]) / 20
             std = statistics.pstdev(close[-20:])
             largura = (2 * std) / ma20
 
-            # Bollinger entre 0.02 e 0.09
-            if largura < 0.02 or largura > 0.09:
+            # Bollinger entre 0.02 e 0.12
+            if largura < 0.02 or largura > 0.12:
                 return
 
             # preço próximo da MA200 (±3%)
@@ -111,9 +108,18 @@ async def scan_tf(s, sym, tf):
             if dist > 0.03:
                 return
 
+        # RSI dinâmico
         current_rsi = rsi(close)
-        if current_rsi < 40 or current_rsi > 80:
-            return
+        avg_vol = sum(vol[-20:]) / 20
+        vol_ratio = vol[-1] / avg_vol if avg_vol else 1
+
+        if tf == "5m":
+            # Permite RSI até 85 se volume for >5x
+            if current_rsi < 40 or (current_rsi > 80 and vol_ratio < 5):
+                return
+        else:
+            if current_rsi < 40 or current_rsi > 80:
+                return
 
         if can_alert(tf, sym):
             stop = min(float(x[3]) for x in k[-10:]) * 0.98
@@ -142,7 +148,7 @@ async def scan_tf(s, sym, tf):
 
 async def main_loop():
     async with aiohttp.ClientSession() as s:
-        await tg(s, "<b>V22.4 CURTO ATIVO</b>\n5M + 15M + 30M | BB DINÂMICA | RSI 40–80 | MA200 ±3% | NOMES SEM USDT")
+        await tg(s, "<b>V22.5 CURTO ATIVO</b>\nRSI dinâmico | BB 0.02–0.12 | MA200 ±3% | cruzamento até 2 velas atrás")
         while True:
             try:
                 data = await (await s.get(f"{BINANCE}/api/v3/ticker/24hr")).json()
