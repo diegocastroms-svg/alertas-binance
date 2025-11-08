@@ -1,8 +1,12 @@
 # ==========================================================
-# main.py — V22.7 CURTO BASE CORRIGIDA REV5M
-# Ajuste SOMENTE no 5m:
-# - Cruzamento antecipado EMA9/EMA20 (gap ≤ 0.1%)
-# - Bollinger (20, 1.6) mais apertada
+# main_short.py — V22.8 CURTO ROMPIMENTO REAL (FIXO)
+# Base: V22.7 CURTO BASE CORRIGIDA REV5M
+# Alteração SOMENTE no 5m:
+# - Bollinger (20, 1.8)
+# - Preço ≤ banda_superior * 1.01
+# - RSI 40–85
+# - MACD positivo e histograma crescente
+# - Volume ≥ 20M USDT
 # ==========================================================
 
 import os, asyncio, aiohttp, time
@@ -13,7 +17,7 @@ import threading, statistics
 app = Flask(__name__)
 @app.route("/")
 def home():
-    return "V22.7 CURTO BASE CORRIGIDA REV5M ATIVO", 200
+    return "V22.8 CURTO ROMPIMENTO REAL (FIXO) ATIVO", 200
 
 @app.route("/health")
 def health():
@@ -64,9 +68,7 @@ async def ticker(s, sym):
     async with s.get(url, timeout=10) as r:
         return await r.json() if r.status == 200 else None
 
-cooldown_5m = {}
-cooldown_15m = {}
-cooldown_30m = {}
+cooldown_5m, cooldown_15m, cooldown_30m = {}, {}, {}
 
 def can_alert(tf, sym):
     cd = cooldown_5m if tf == "5m" else cooldown_15m if tf == "15m" else cooldown_30m
@@ -100,22 +102,25 @@ async def scan_tf(s, sym, tf):
 
         cruzou = False
         if tf == "5m":
-            # Cruzamento antecipado — gap mínimo 0.1%
+            # Cruzamento antecipado e rompimento real
             gap = abs(ema9_atual - ema20_atual) / ema20_atual
-            if (ema9_prev[-2] <= ema20_prev[-2] and ema9_atual > ema20_atual) or (gap < 0.001 and ema9_atual > ema20_atual):
-                cruzou = True
+            cruzou = (ema9_prev[-2] <= ema20_prev[-2] and ema9_atual > ema20_atual) or (gap < 0.001 and ema9_atual > ema20_atual)
         else:
             cruzou = ema9_prev[-1] <= ema20_prev[-1] and ema9_atual > ema20_atual
 
         if not cruzou:
             return
 
-        # Bollinger
         ma20 = sum(close[-20:]) / 20
         std = statistics.pstdev(close[-20:])
-        largura = (1.6 * 2 * std) / ma20 if tf == "5m" else (2 * std) / ma20
-        if largura < 0.02 or largura > 0.12:
-            return
+        upper = ma20 + 1.8 * std
+        largura = (upper - (ma20 - 1.8 * std)) / ma20
+
+        # Filtro 5m: banda apertada + preço ≤ 1% acima
+        if tf == "5m":
+            if largura > 0.025: return
+            if p > upper * 1.01: return
+            if vol24 < 20_000_000: return
 
         current_rsi = rsi(close)
         if current_rsi < 40 or current_rsi > 85:
@@ -148,7 +153,7 @@ async def scan_tf(s, sym, tf):
 
 async def main_loop():
     async with aiohttp.ClientSession() as s:
-        await tg(s, "<b>V22.7 CURTO BASE CORRIGIDA REV5M</b>\nCruzamento antecipado 5m + BB 1.6 ajustada | RSI 40–85")
+        await tg(s, "<b>V22.8 CURTO ROMPIMENTO REAL (FIXO)</b>\n5m Bollinger 1.8 | Preço ≤ 1% acima | RSI 40–85 | Volume ≥20M | EMA9>EMA20")
         while True:
             try:
                 data = await (await s.get(f"{BINANCE}/api/v3/ticker/24hr")).json()
@@ -156,7 +161,7 @@ async def main_loop():
                     d["symbol"] for d in data
                     if d["symbol"].endswith("USDT")
                     and float(d["quoteVolume"]) > 3_000_000
-                    and not any(x in d["symbol"] for x in ["UP", "DOWN", "BUSD", "TUSD", "USDC", "FDUSD", "UST", "EUR", "BTC"])
+                    and not any(x in d["symbol"] for x in ["UP","DOWN","BUSD","TUSD","USDC","FDUSD","UST","EUR","BTC"])
                 ]
                 symbols = sorted(
                     symbols,
@@ -164,11 +169,7 @@ async def main_loop():
                     reverse=True
                 )[:100]
 
-                tasks = []
-                for sym in symbols:
-                    tasks.append(scan_tf(s, sym, "5m"))
-                    tasks.append(scan_tf(s, sym, "15m"))
-                    tasks.append(scan_tf(s, sym, "30m"))
+                tasks = [scan_tf(s, sym, tf) for sym in symbols for tf in ["5m", "15m", "30m"]]
                 await asyncio.gather(*tasks)
             except Exception as e:
                 print("Erro main_loop:", e)
