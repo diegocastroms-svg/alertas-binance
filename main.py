@@ -1,4 +1,3 @@
-# main.py — V22.4 CURTO (5m, 15m, 30m) — PRECISÃO TOTAL
 import os, asyncio, aiohttp, time
 from datetime import datetime, timedelta, timezone
 from flask import Flask
@@ -48,7 +47,7 @@ def rsi(prices, p=14):
     ag, al = sum(g) / p, sum(l) / p or 1e-12
     return 100 - 100 / (1 + ag / al)
 
-async def klines(s, sym, tf, lim=200):
+async def klines(s, sym, tf, lim=100):
     url = f"{BINANCE}/api/v3/klines?symbol={sym}&interval={tf}&limit={lim}"
     async with s.get(url, timeout=10) as r:
         return await r.json() if r.status == 200 else []
@@ -58,7 +57,9 @@ async def ticker(s, sym):
     async with s.get(url, timeout=10) as r:
         return await r.json() if r.status == 200 else None
 
-cooldown_5m, cooldown_15m, cooldown_30m = {}, {}, {}
+cooldown_5m = {}
+cooldown_15m = {}
+cooldown_30m = {}
 
 def can_alert(tf, sym):
     cd = cooldown_5m if tf == "5m" else cooldown_15m if tf == "15m" else cooldown_30m
@@ -77,47 +78,47 @@ async def scan_tf(s, sym, tf):
         vol24 = float(t["quoteVolume"])
         if vol24 < 3_000_000: return
 
-        k = await klines(s, sym, tf, 200)
+        k = await klines(s, sym, tf, 100)
         if len(k) < 50: return
         close = [float(x[4]) for x in k]
 
-        # --- EMA cálculo completo (inclui candle atual) ---
-        ema9_vals = ema(close, 9)
-        ema20_vals = ema(close, 20)
-        if len(ema9_vals) < 2 or len(ema20_vals) < 2: return
+        ema9_prev = ema(close[:-1], 9)
+        ema20_prev = ema(close[:-1], 20)
+        if len(ema9_prev) < 2 or len(ema20_prev) < 2: return
 
-        ema9, ema20 = ema9_vals[-1], ema20_vals[-1]
-        ema9_prev, ema20_prev = ema9_vals[-2], ema20_vals[-2]
+        alpha9 = 2 / (9 + 1)
+        alpha20 = 2 / (20 + 1)
+        ema9_atual = ema9_prev[-1] * (1 - alpha9) + close[-1] * alpha9
+        ema20_atual = ema20_prev[-1] * (1 - alpha20) + close[-1] * alpha20
 
-        # --- CRUZAMENTO DE ALTA REAL (com 0.1%) ---
-        cruzamento = ema9_prev <= ema20_prev and ema9 > ema20 * 1.001
-        if not cruzamento:
-            return
-        # confirmação de subida
-        if ema9 - ema9_prev <= 0:
-            return
-        # -------------------------------------------------
+        cruzamento_agora = ema9_prev[-1] <= ema20_prev[-1] and ema9_atual > ema20_atual * 1.002
+        cruzamento_confirmado = ema9_prev[-2] <= ema20_prev[-2] and ema9_prev[-1] > ema20_prev[-1] * 1.002
+        if not (cruzamento_agora or cruzamento_confirmado): return
 
-        # --- FILTRO 5M: BOLLINGER + MA200 ---
+        # filtro 5m: Bollinger dinâmica + EMA200 próxima
         if tf == "5m":
             ma20 = sum(close[-20:]) / 20
             std = statistics.pstdev(close[-20:])
             largura = (2 * std) / ma20
-            if largura > 0.05:
+
+            # Bollinger entre 0.02 e 0.09
+            if largura < 0.02 or largura > 0.09:
                 return
 
+            # preço próximo da MA200 (±3%)
             ma200 = sum(close[-200:]) / 200
-            distancia = abs(p - ma200) / ma200
-            if distancia > 0.02:
+            dist = abs(close[-1] - ma200) / ma200
+            if dist > 0.03:
                 return
-        # ------------------------------------
 
         current_rsi = rsi(close)
-        if current_rsi < 40 or current_rsi > 80: return
+        if current_rsi < 40 or current_rsi > 80:
+            return
 
         if can_alert(tf, sym):
             stop = min(float(x[3]) for x in k[-10:]) * 0.98
-            alvo1, alvo2 = p * 1.025, p * 1.05
+            alvo1 = p * 1.025
+            alvo2 = p * 1.05
             nome = sym[:-4]
             prob = "70%" if tf == "5m" else "78%" if tf == "15m" else "85%"
             emoji = "⚡" if tf == "5m" else "💫" if tf == "15m" else "💪"
@@ -141,7 +142,7 @@ async def scan_tf(s, sym, tf):
 
 async def main_loop():
     async with aiohttp.ClientSession() as s:
-        await tg(s, "<b>V22.4 CURTO ATIVO</b>\n5M + 15M + 30M | CRUZAMENTO 0.1% | BB ≤5% | MA200 ±2% | DIREÇÃO CONFIRMADA | NOMES SEM USDT")
+        await tg(s, "<b>V22.4 CURTO ATIVO</b>\n5M + 15M + 30M | BB DINÂMICA | RSI 40–80 | MA200 ±3% | NOMES SEM USDT")
         while True:
             try:
                 data = await (await s.get(f"{BINANCE}/api/v3/ticker/24hr")).json()
@@ -157,7 +158,11 @@ async def main_loop():
                     reverse=True
                 )[:100]
 
-                tasks = [scan_tf(s, sym, tf) for sym in symbols for tf in ["5m", "15m", "30m"]]
+                tasks = []
+                for sym in symbols:
+                    tasks.append(scan_tf(s, sym, "5m"))
+                    tasks.append(scan_tf(s, sym, "15m"))
+                    tasks.append(scan_tf(s, sym, "30m"))
                 await asyncio.gather(*tasks)
             except Exception as e:
                 print("Erro main_loop:", e)
