@@ -1,4 +1,4 @@
-# main.py — V21.6 VOLUME 3M (3M COM ABERTURA BB + EARLY CROSS 15M/30M)
+# main.py — V21.7 VOLUME 3M (3M OTIMIZADO BANDAS BB + VOLUME + EARLY CROSS)
 import os, asyncio, aiohttp, time, math
 from datetime import datetime, timedelta, timezone
 from flask import Flask
@@ -7,7 +7,7 @@ import threading
 app = Flask(__name__)
 @app.route("/")
 def home():
-    return "V21.6 VOLUME 3M (3M COM ABERTURA BB + EARLY CROSS 15M/30M) ATIVO", 200
+    return "V21.7 VOLUME 3M (3M OTIMIZADO BANDAS BB + VOLUME + EARLY CROSS) ATIVO", 200
 
 @app.route("/health")
 def health():
@@ -90,6 +90,7 @@ async def scan_tf(s, sym, tf):
         if len(k) < 50:
             return
         close = [float(x[4]) for x in k]
+        vol = [float(x[5]) for x in k]
 
         ema9_prev = ema(close[:-1], 9)
         ema20_prev = ema(close[:-1], 20)
@@ -101,15 +102,16 @@ async def scan_tf(s, sym, tf):
         ema9_atual = ema9_prev[-1] * (1 - alpha9) + close[-1] * alpha9
         ema20_atual = ema20_prev[-1] * (1 - alpha20) + close[-1] * alpha20
 
-        # === BLOCO 3M — ABERTURA DAS BANDAS BB ===
         bb_width = None
         if tf == "3m":
+            # BB atual
             mb = sum(close[-20:]) / 20
             std = math.sqrt(sum((x - mb) ** 2 for x in close[-20:]) / 20)
             up = mb + (1.8 * std)
             dn = mb - (1.8 * std)
             bb_width_atual = (up - dn) / mb
 
+            # BB anterior
             prev20 = close[-21:-1]
             mb_ant = sum(prev20[-20:]) / 20
             std_ant = math.sqrt(sum((x - mb_ant) ** 2 for x in prev20[-20:]) / 20)
@@ -119,21 +121,24 @@ async def scan_tf(s, sym, tf):
 
             bb_width = bb_width_atual
 
-            if not (bb_width_ant < 0.03 and bb_width_atual > bb_width_ant * 1.1):
+            # Filtros refinados
+            if not (bb_width_ant < 0.04 and bb_width_atual > bb_width_ant * 1.05):
+                return
+            if vol[-1] < (sum(vol[-10:-1]) / 9) * 1.2:
+                return
+            rsi_prev = rsi(close[:-1])
+            current_rsi = rsi(close)
+            if current_rsi <= rsi_prev or current_rsi < 40 or current_rsi > 85:
                 return
 
-            cruzamento_valido = (
-                ema9_prev[-1] <= ema20_prev[-1] and ema9_atual > ema20_atual * 1.001
-            )
+            cruzamento_valido = ema9_prev[-1] <= ema20_prev[-1] and ema9_atual > ema20_atual
         else:
-            # === BLOCO 15M / 30M (EARLY CROSS) ===
+            current_rsi = rsi(close)
+            if current_rsi < 40 or current_rsi > 85:
+                return
             cruzamento_valido = ema9_atual > ema20_atual and ema9_prev[-1] <= ema20_prev[-1]
 
         if not cruzamento_valido:
-            return
-
-        current_rsi = rsi(close)
-        if current_rsi < 40 or current_rsi > 85:
             return
 
         if can_alert(tf, sym):
@@ -153,7 +158,7 @@ async def scan_tf(s, sym, tf):
                 msg += f"BB Width: <b>{bb_width*100:.2f}%</b>\n"
             msg += f"Volume 24h: <b>${vol24:,.0f}</b>\n"
             msg += f"Prob: <b>{prob}</b>\n"
-            msg += f"Stop: <b>{stop:.6f}</b>\n"
+            msg += f"Stop: <b>{stop:.6f}\n"
             msg += f"Alvo +2.5%: <b>{alvo1:.6f}</b>\n"
             msg += f"Alvo +5%: <b>{alvo2:.6f}</b>\n"
             msg += f"<i>{now_br()} BR</i>"
@@ -166,7 +171,7 @@ async def main_loop():
     async with aiohttp.ClientSession() as s:
         await tg(
             s,
-            "<b>V21.6 VOLUME 3M (3M COM ABERTURA BB + EARLY CROSS 15M/30M) ATIVO</b>\nLAYOUT TELEGRAM + NOME LIMPO + ESPAÇAMENTO",
+            "<b>V21.7 VOLUME 3M (3M OTIMIZADO BANDAS BB + VOLUME + EARLY CROSS) ATIVO</b>\nLAYOUT TELEGRAM + NOME LIMPO + ESPAÇAMENTO",
         )
         while True:
             try:
@@ -176,17 +181,14 @@ async def main_loop():
                     for d in data
                     if d["symbol"].endswith("USDT")
                     and float(d["quoteVolume"]) > 3_000_000
-                    and (
-                        lambda base: not (
-                            base.endswith("USD")
-                            or base
-                            in {
-                                "BUSD","FDUSD","USDE","USDC","TUSD","CUSD",
-                                "EUR","GBP","TRY","AUD","BRL","RUB","CAD","CHF","JPY",
-                                "BF","BFC","BFG","BFD","BETA","AEUR","AUSD","CEUR","XAUT",
-                            }
-                        )
-                    )(d["symbol"][:-4])
+                    and (lambda base: not (
+                          base.endswith("USD")
+                          or base in {
+                              "BUSD","FDUSD","USDE","USDC","TUSD","CUSD",
+                              "EUR","GBP","TRY","AUD","BRL","RUB","CAD","CHF","JPY",
+                              "BF","BFC","BFG","BFD","BETA","AEUR","AUSD","CEUR","XAUT",
+                          }
+                      ))(d["symbol"][:-4])
                     and not any(x in d["symbol"] for x in ["UP", "DOWN"])
                 ]
                 symbols = sorted(
