@@ -1,9 +1,8 @@
 # ==========================================================
-# main.py — V22.7 CURTO (5m, 15m, 30m) — BASE CORRIGIDA
-# Ajustes apenas nos frames 5m, 15m e 30m:
-# - RSI calibrado (40–85)
-# - Bollinger dinâmica (faixa entre 0.02 e 0.12)
-# - Cruzamento EMA9 > EMA20 refinado e confirmado
+# main.py — V22.7 CURTO BASE CORRIGIDA REV5M
+# Ajuste SOMENTE no 5m:
+# - Cruzamento antecipado EMA9/EMA20 (gap ≤ 0.1%)
+# - Bollinger (20, 1.6) mais apertada
 # ==========================================================
 
 import os, asyncio, aiohttp, time
@@ -14,7 +13,7 @@ import threading, statistics
 app = Flask(__name__)
 @app.route("/")
 def home():
-    return "V22.7 CURTO BASE CORRIGIDA ATIVO", 200
+    return "V22.7 CURTO BASE CORRIGIDA REV5M ATIVO", 200
 
 @app.route("/health")
 def health():
@@ -99,18 +98,22 @@ async def scan_tf(s, sym, tf):
         ema9_atual = ema9_prev[-1] * (1 - alpha9) + close[-1] * alpha9
         ema20_atual = ema20_prev[-1] * (1 - alpha20) + close[-1] * alpha20
 
-        # cruzamento refinado
-        cruzamento_agora = ema9_prev[-1] <= ema20_prev[-1] and ema9_atual > ema20_atual
-        cruzamento_confirmado = ema9_prev[-2] <= ema20_prev[-2] and ema9_prev[-1] > ema20_prev[-1]
-        if not (cruzamento_agora or cruzamento_confirmado):
+        cruzou = False
+        if tf == "5m":
+            # Cruzamento antecipado — gap mínimo 0.1%
+            gap = abs(ema9_atual - ema20_atual) / ema20_atual
+            if (ema9_prev[-2] <= ema20_prev[-2] and ema9_atual > ema20_atual) or (gap < 0.001 and ema9_atual > ema20_atual):
+                cruzou = True
+        else:
+            cruzou = ema9_prev[-1] <= ema20_prev[-1] and ema9_atual > ema20_atual
+
+        if not cruzou:
             return
 
-        # filtro 5m, 15m e 30m com Bollinger e RSI
+        # Bollinger
         ma20 = sum(close[-20:]) / 20
         std = statistics.pstdev(close[-20:])
-        largura = (2 * std) / ma20
-
-        # Bollinger dinâmica: aceita entre 0.02 e 0.12
+        largura = (1.6 * 2 * std) / ma20 if tf == "5m" else (2 * std) / ma20
         if largura < 0.02 or largura > 0.12:
             return
 
@@ -145,7 +148,7 @@ async def scan_tf(s, sym, tf):
 
 async def main_loop():
     async with aiohttp.ClientSession() as s:
-        await tg(s, "<b>V22.7 CURTO BASE CORRIGIDA ATIVO</b>\nApenas ajustes em 5m, 15m e 30m | RSI 40–85 | BB 0.02–0.12 | Cruzamento refinado")
+        await tg(s, "<b>V22.7 CURTO BASE CORRIGIDA REV5M</b>\nCruzamento antecipado 5m + BB 1.6 ajustada | RSI 40–85")
         while True:
             try:
                 data = await (await s.get(f"{BINANCE}/api/v3/ticker/24hr")).json()
