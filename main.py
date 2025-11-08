@@ -1,3 +1,8 @@
+# ==============================================================
+# main.py — V22.6 CURTO — TENDÊNCIA CURTA PRO
+# Frames: 5m / 15m / 30m
+# RSI dinâmico até 85 | Bollinger flexível | Cruzamento expandido
+# ==============================================================
 import os, asyncio, aiohttp, time
 from datetime import datetime, timedelta, timezone
 from flask import Flask
@@ -6,7 +11,7 @@ import threading, statistics
 app = Flask(__name__)
 @app.route("/")
 def home():
-    return "V22.5 CURTO ATIVO", 200
+    return "V22.6 CURTO — TENDÊNCIA CURTA PRO ATIVO", 200
 
 @app.route("/health")
 def health():
@@ -47,7 +52,7 @@ def rsi(prices, p=14):
     ag, al = sum(g) / p, sum(l) / p or 1e-12
     return 100 - 100 / (1 + ag / al)
 
-async def klines(s, sym, tf, lim=100):
+async def klines(s, sym, tf, lim=120):
     url = f"{BINANCE}/api/v3/klines?symbol={sym}&interval={tf}&limit={lim}"
     async with s.get(url, timeout=10) as r:
         return await r.json() if r.status == 200 else []
@@ -76,50 +81,46 @@ async def scan_tf(s, sym, tf):
         vol24 = float(t["quoteVolume"])
         if vol24 < 3_000_000: return
 
-        k = await klines(s, sym, tf, 100)
-        if len(k) < 50: return
+        k = await klines(s, sym, tf, 120)
+        if len(k) < 60: return
         close = [float(x[4]) for x in k]
         vol = [float(x[5]) for x in k]
 
         ema9 = ema(close, 9)
         ema20 = ema(close, 20)
 
-        # Verifica cruzamento nos últimos 2 candles
+        max_candles = 2 if tf == "5m" else 3 if tf == "15m" else 4
         cruzou = False
-        for i in range(2):
+        for i in range(max_candles):
             if ema9[-(2+i)] <= ema20[-(2+i)] and ema9[-(1+i)] > ema20[-(1+i)]:
                 cruzou = True
                 break
         if not cruzou: return
 
-        # Filtros exclusivos do 5m
+        # Filtro específico do 5m
         if tf == "5m":
             ma20 = sum(close[-20:]) / 20
             std = statistics.pstdev(close[-20:])
             largura = (2 * std) / ma20
-
-            # Bollinger entre 0.02 e 0.12
             if largura < 0.02 or largura > 0.12:
                 return
 
-            # preço próximo da MA200 (±3%)
             ma200 = sum(close[-200:]) / 200
-            dist = abs(close[-1] - ma200) / ma200
+            dist = abs(p - ma200) / ma200
             if dist > 0.03:
                 return
 
-        # RSI dinâmico
+        # RSI dinâmico e volume
         current_rsi = rsi(close)
         avg_vol = sum(vol[-20:]) / 20
         vol_ratio = vol[-1] / avg_vol if avg_vol else 1
 
-        if tf == "5m":
-            # Permite RSI até 85 se volume for >5x
-            if current_rsi < 40 or (current_rsi > 80 and vol_ratio < 5):
-                return
-        else:
-            if current_rsi < 40 or current_rsi > 80:
-                return
+        bb_limit = 0.12 if tf == "5m" else 0.15 if tf == "15m" else 0.18
+        rsi_max = 85 if (tf == "5m" and vol_ratio >= 5) else (85 if tf in ["15m", "30m"] else 80)
+        rsi_min = 40
+
+        if current_rsi < rsi_min or current_rsi > rsi_max:
+            return
 
         if can_alert(tf, sym):
             stop = min(float(x[3]) for x in k[-10:]) * 0.98
@@ -148,7 +149,7 @@ async def scan_tf(s, sym, tf):
 
 async def main_loop():
     async with aiohttp.ClientSession() as s:
-        await tg(s, "<b>V22.5 CURTO ATIVO</b>\nRSI dinâmico | BB 0.02–0.12 | MA200 ±3% | cruzamento até 2 velas atrás")
+        await tg(s, "<b>V22.6 CURTO — TENDÊNCIA CURTA PRO ATIVO</b>\nBB flexível | RSI até 85 | cruzamento expandido | MA200 ±3%")
         while True:
             try:
                 data = await (await s.get(f"{BINANCE}/api/v3/ticker/24hr")).json()
@@ -164,11 +165,7 @@ async def main_loop():
                     reverse=True
                 )[:100]
 
-                tasks = []
-                for sym in symbols:
-                    tasks.append(scan_tf(s, sym, "5m"))
-                    tasks.append(scan_tf(s, sym, "15m"))
-                    tasks.append(scan_tf(s, sym, "30m"))
+                tasks = [scan_tf(s, sym, tf) for sym in symbols for tf in ["5m", "15m", "30m"]]
                 await asyncio.gather(*tasks)
             except Exception as e:
                 print("Erro main_loop:", e)
