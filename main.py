@@ -1,4 +1,4 @@
-# main.py — V21.8 CURTO (5m, 15m, 30m) — CRUZAMENTO OTIMIZADO + TENDÊNCIA CURTA
+# main.py — V21.9 CURTO (5m, 15m, 30m) — 5M + MA200 PROXIMIDADE
 import os, asyncio, aiohttp, time
 from datetime import datetime, timedelta, timezone
 from flask import Flask
@@ -7,7 +7,7 @@ import threading, statistics
 app = Flask(__name__)
 @app.route("/")
 def home():
-    return "V21.8 CURTO ATIVO", 200
+    return "V21.9 CURTO ATIVO", 200
 
 @app.route("/health")
 def health():
@@ -79,8 +79,8 @@ async def scan_tf(s, sym, tf):
         vol24 = float(t["quoteVolume"])
         if vol24 < 3_000_000: return
 
-        k = await klines(s, sym, tf, 100)
-        if len(k) < 50: return
+        k = await klines(s, sym, tf, 200)
+        if len(k) < 200: return
         close = [float(x[4]) for x in k]
 
         ema9_prev = ema(close[:-1], 9)
@@ -88,19 +88,25 @@ async def scan_tf(s, sym, tf):
         if len(ema9_prev) < 2 or len(ema20_prev) < 2:
             return
 
-        # --- CRUZAMENTO OTIMIZADO (equilíbrio tempo real / vela fechada) ---
+        # --- CRUZAMENTO OTIMIZADO ---
         cruzamento_agora = ema9_prev[-1] <= ema20_prev[-1] and close[-1] > ema20_prev[-1] * 1.002
         cruzamento_confirmado = ema9_prev[-2] <= ema20_prev[-2] and ema9_prev[-1] > ema20_prev[-1] * 1.002
         if not (cruzamento_agora or cruzamento_confirmado):
             return
-        # --------------------------------------------------------------------
+        # -----------------------------
 
-        # filtro 5m: Bollinger estreita (≤ 8%)
+        # filtro 5m: Bollinger estreita (≤8%) + proximidade MA200
         if tf == "5m":
             ma20 = sum(close[-20:]) / 20
             std = statistics.pstdev(close[-20:])
             largura = (2 * std) / ma20
             if largura > 0.08:
+                return
+
+            # novo filtro: preço próximo da média 200 (±2%)
+            ma200 = sum(close[-200:]) / 200
+            distancia = abs(p - ma200) / ma200
+            if distancia > 0.02:
                 return
 
         current_rsi = rsi(close)
@@ -133,7 +139,7 @@ async def scan_tf(s, sym, tf):
 
 async def main_loop():
     async with aiohttp.ClientSession() as s:
-        await tg(s, "<b>V21.8 CURTO ATIVO</b>\n5M + 15M + 30M | TENDÊNCIA CURTA | CRUZAMENTO OTIMIZADO 0.2% | BOLLINGER ≤8% | NOMES SEM USDT")
+        await tg(s, "<b>V21.9 CURTO ATIVO</b>\n5M + 15M + 30M | TENDÊNCIA CURTA | CRUZAMENTO OTIMIZADO 0.2% | BOLLINGER ≤8% | MA200 ±2% | NOMES SEM USDT")
         while True:
             try:
                 data = await (await s.get(f"{BINANCE}/api/v3/ticker/24hr")).json()
