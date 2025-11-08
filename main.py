@@ -1,4 +1,4 @@
-# main.py — V21.3 VOLUME 3M (5M COM BANDAS BB)
+# main.py — V21.4 VOLUME 3M (5M COM BB + EARLY CROSS 15M/30M)
 import os, asyncio, aiohttp, time, math
 from datetime import datetime, timedelta, timezone
 from flask import Flask
@@ -7,7 +7,7 @@ import threading
 app = Flask(__name__)
 @app.route("/")
 def home():
-    return "V21.3 VOLUME 3M (5M COM BANDAS BB) ATIVO", 200
+    return "V21.4 VOLUME 3M (5M COM BB + EARLY CROSS 15M/30M) ATIVO", 200
 
 @app.route("/health")
 def health():
@@ -101,7 +101,7 @@ async def scan_tf(s, sym, tf):
         ema9_atual = ema9_prev[-1] * (1 - alpha9) + close[-1] * alpha9
         ema20_atual = ema20_prev[-1] * (1 - alpha20) + close[-1] * alpha20
 
-        # === NOVO BLOCO — SOMENTE PARA 5M ===
+        # === BLOCO 5M COM BANDAS DE BOLLINGER ===
         bb_width = None
         if tf == "5m":
             mb = sum(close[-20:]) / 20
@@ -109,18 +109,16 @@ async def scan_tf(s, sym, tf):
             up = mb + (1.8 * std)
             dn = mb - (1.8 * std)
             bb_width = (up - dn) / mb
-
-            # Bandas devem estar apertadas (entre 2% e 4%)
             if not (0.02 < bb_width < 0.04):
                 return
+            cruzamento_valido = (
+                ema9_prev[-1] <= ema20_prev[-1] and ema9_atual > ema20_atual * 1.001
+            )
+        else:
+            # === BLOCO 15M / 30M (EARLY CROSS) ===
+            cruzamento_valido = ema9_atual > ema20_atual and ema9_prev[-1] <= ema20_prev[-1]
 
-        cruzamento_agora = (
-            ema9_prev[-1] <= ema20_prev[-1] and ema9_atual > ema20_atual * 1.001
-        )
-        cruzamento_confirmado = (
-            ema9_prev[-2] <= ema20_prev[-2] and ema9_prev[-1] > ema20_prev[-1]
-        )
-        if not (cruzamento_agora or cruzamento_confirmado):
+        if not cruzamento_valido:
             return
 
         current_rsi = rsi(close)
@@ -157,7 +155,7 @@ async def main_loop():
     async with aiohttp.ClientSession() as s:
         await tg(
             s,
-            "<b>V21.3 VOLUME 3M (5M COM BANDAS BB) ATIVO</b>\nLAYOUT TELEGRAM + NOME LIMPO + ESPAÇAMENTO",
+            "<b>V21.4 VOLUME 3M (5M COM BB + EARLY CROSS 15M/30M) ATIVO</b>\nLAYOUT TELEGRAM + NOME LIMPO + ESPAÇAMENTO",
         )
         while True:
             try:
