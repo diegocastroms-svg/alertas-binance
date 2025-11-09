@@ -1,4 +1,4 @@
-# main.py — V22.3 (3M AJUSTADO + FORÇA REAL + CRUZAMENTO PRECISO)
+# main.py — V22.4 (3M FORÇA REAL + 15M/30M SINCRONIZADOS)
 import os, asyncio, aiohttp, time, math
 from datetime import datetime, timedelta, timezone
 from flask import Flask
@@ -7,7 +7,7 @@ import threading
 app = Flask(__name__)
 @app.route("/")
 def home():
-    return "V22.3 (3M AJUSTADO + FORÇA REAL + CRUZAMENTO PRECISO) ATIVO", 200
+    return "V22.4 (3M FORÇA REAL + 15M/30M SINCRONIZADOS) ATIVO", 200
 
 @app.route("/health")
 def health():
@@ -106,32 +106,35 @@ async def scan_tf(s, sym, tf):
 
         # 🔹 BLOCO ESPECIAL PARA 3M — leitura real de força
         if tf == "3m":
-            # volume_strength (força do volume atual)
             ma9 = sum(vol[-9:]) / 9
             ma21 = sum(vol[-21:]) / 21
             avg_vol = (ma9 + ma21) / 2
             volume_strength = (vol[-1] / avg_vol) * 100 if avg_vol else 0
 
-            # momentum_confluence (sincronia entre RSI, volume e MACD simulado)
             macd_line = ema(close, 12)[-1] - ema(close, 26)[-1]
             signal_line = ema(close, 9)[-1]
             macd_hist = macd_line - signal_line
             momentum_confluence = (current_rsi / 100) * (1 if macd_hist > 0 else 0) * (volume_strength / 100)
 
-            # real_money_flow (entrada real de grana)
             taker_buy = float(t.get("takerBuyQuoteAssetVolume", 0))
             taker_sell = vol24 - taker_buy
             real_money_flow = (taker_buy / (taker_buy + taker_sell) * 100) if (taker_buy + taker_sell) > 0 else 50
 
-            # filtros antes do alerta
             if volume_strength < 120 or momentum_confluence < 0.5 or real_money_flow < 55:
                 return
 
-        # 🔸 Cruzamento mais sensível (aceita até 2 velas atrás)
-        cruzamento_valido = (
-            (ema9_prev[-1] <= ema20_prev[-1] and ema9_atual > ema20_atual * 1.0002)
-            or (ema9_prev[-2] <= ema20_prev[-2] and ema9_prev[-1] > ema20_prev[-1])
-        )
+            cruzamento_valido = (
+                (ema9_prev[-1] <= ema20_prev[-1] and ema9_atual > ema20_atual * 1.0002)
+                or (ema9_prev[-2] <= ema20_prev[-2] and ema9_prev[-1] > ema20_prev[-1])
+            )
+
+        # 🔸 BLOCO PARA 15M / 30M — sincronismo imediato
+        else:
+            cruzamento_valido = (
+                (ema9_prev[-1] <= ema20_prev[-1] and ema9_atual > ema20_atual)
+                or (ema9_atual > ema20_atual and ema9_prev[-1] <= ema20_prev[-1])
+            )
+
         if not cruzamento_valido:
             return
 
@@ -173,7 +176,7 @@ async def scan_tf(s, sym, tf):
 
 async def main_loop():
     async with aiohttp.ClientSession() as s:
-        await tg(s, "<b>V22.3 (3M AJUSTADO + FORÇA REAL + CRUZAMENTO PRECISO) ATIVO</b>")
+        await tg(s, "<b>V22.4 (3M FORÇA REAL + 15M/30M SINCRONIZADOS) ATIVO</b>")
         while True:
             try:
                 data = await (await s.get(f"{BINANCE}/api/v3/ticker/24hr")).json()
