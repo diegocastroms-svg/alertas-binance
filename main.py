@@ -1,4 +1,4 @@
-# main.py — V21.9 VOLUME 3M FIX (ALERTAS RESTAURADOS)
+# main.py — V22.1 (SOMENTE 3M, 15M e 30M)
 import os, asyncio, aiohttp, time, math
 from datetime import datetime, timedelta, timezone
 from flask import Flask
@@ -7,7 +7,7 @@ import threading
 app = Flask(__name__)
 @app.route("/")
 def home():
-    return "V21.9 VOLUME 3M FIX (ALERTAS RESTAURADOS) ATIVO", 200
+    return "V22.1 (SOMENTE 3M, 15M e 30M) ATIVO", 200
 
 @app.route("/health")
 def health():
@@ -54,23 +54,21 @@ def rsi(prices, p=14):
     return 100 - 100 / (1 + ag / al)
 
 async def klines(s, sym, tf, lim=100):
-    url = f"{BINANCE}/api/v3/klines?symbol={sym}&interval={tf}&limit={lim}"
+    url = f"https://api.binance.com/api/v3/klines?symbol={sym}&interval={tf}&limit={lim}"
     async with s.get(url, timeout=10) as r:
         return await r.json() if r.status == 200 else []
 
 async def ticker(s, sym):
-    url = f"{BINANCE}/api/v3/ticker/24hr?symbol={sym}"
+    url = f"https://api.binance.com/api/v3/ticker/24hr?symbol={sym}"
     async with s.get(url, timeout=10) as r:
         return await r.json() if r.status == 200 else None
 
-cooldown_3m = {}
-cooldown_15m = {}
-cooldown_30m = {}
+cooldown = {"3m": {}, "15m": {}, "30m": {}}
 
 def can_alert(tf, sym):
-    cd = cooldown_3m if tf == "3m" else cooldown_15m if tf == "15m" else cooldown_30m
-    cooldown_time = 120 if tf == "3m" else 900 if tf == "15m" else 1800
+    cd = cooldown[tf]
     n = time.time()
+    cooldown_time = 120 if tf == "3m" else 300 if tf == "15m" else 900
     if n - cd.get(sym, 0) >= cooldown_time:
         cd[sym] = n
         return True
@@ -102,47 +100,14 @@ async def scan_tf(s, sym, tf):
         ema9_atual = ema9_prev[-1] * (1 - alpha9) + close[-1] * alpha9
         ema20_atual = ema20_prev[-1] * (1 - alpha20) + close[-1] * alpha20
 
-        # 🔧 PREVINE ERRO NOS OUTROS TIMEFRAMES
-        bb_width_atual = 0
+        current_rsi = rsi(close)
+        if not (35 <= current_rsi <= 88):
+            return
 
-        if tf == "3m":
-            mb = sum(close[-20:]) / 20
-            std = math.sqrt(sum((x - mb) ** 2 for x in close[-20:]) / 20)
-            up = mb + (1.8 * std)
-            dn = mb - (1.8 * std)
-            bb_width_atual = (up - dn) / mb
-
-            prev20 = close[-21:-1]
-            mb_ant = sum(prev20[-20:]) / 20
-            std_ant = math.sqrt(sum((x - mb_ant) ** 2 for x in prev20[-20:]) / 20)
-            up_ant = mb_ant + (1.8 * std_ant)
-            dn_ant = mb_ant - (1.8 * std_ant)
-            bb_width_ant = (up_ant - dn_ant) / mb_ant
-
-            # Bandas abrindo mais cedo
-            if not (bb_width_ant < 0.06 and bb_width_atual > bb_width_ant * 1.02):
-                return
-
-            # Volume crescente leve
-            vol_media9 = sum(vol[-10:-1]) / 9
-            if vol[-1] < vol_media9 * 1.05:
-                return
-
-            # RSI ganhando força
-            rsi_prev = rsi(close[:-1])
-            current_rsi = rsi(close)
-            if not (current_rsi > 40 and current_rsi < 85 and current_rsi > rsi_prev):
-                return
-
-            cruzamento_valido = ema9_prev[-1] <= ema20_prev[-1] and ema9_atual > ema20_atual
-
-        else:
-            # 5m, 15m, 30m — alertas normais
-            current_rsi = rsi(close)
-            if not (40 <= current_rsi <= 85):
-                return
-            cruzamento_valido = ema9_prev[-1] <= ema20_prev[-1] and ema9_atual > ema20_atual
-
+        cruzamento_valido = (
+            (ema9_prev[-1] <= ema20_prev[-1] and ema9_atual > ema20_atual)
+            or (ema9_prev[-2] <= ema20_prev[-2] and ema9_prev[-1] > ema20_prev[-1])
+        )
         if not cruzamento_valido:
             return
 
@@ -151,7 +116,7 @@ async def scan_tf(s, sym, tf):
             alvo1 = p * 1.025
             alvo2 = p * 1.05
             prob = "72%" if tf == "3m" else "78%" if tf == "15m" else "85%"
-            emoji = "🔥" if tf == "3m" else "⚡" if tf == "15m" else "💪"
+            emoji = "🔥" if tf == "3m" else "💪" if tf == "15m" else "🟢"
             color = "🟡" if tf == "3m" else "🔵" if tf == "15m" else "🟢"
 
             nome = sym.replace("USDT", "")
@@ -160,10 +125,6 @@ async def scan_tf(s, sym, tf):
                 f"{nome}\n\n"
                 f"Preço: <b>{p:.6f}</b>\n"
                 f"RSI: <b>{current_rsi:.1f}</b>\n"
-            )
-            if tf == "3m":
-                msg += f"BB Width: <b>{bb_width_atual*100:.2f}%</b>\n"
-            msg += (
                 f"Volume 24h: <b>${vol24:,.0f}</b>\n"
                 f"Prob: <b>{prob}</b>\n"
                 f"Stop: <b>{stop:.6f}</b>\n"
@@ -178,23 +139,15 @@ async def scan_tf(s, sym, tf):
 
 async def main_loop():
     async with aiohttp.ClientSession() as s:
-        await tg(s, "<b>V21.9 VOLUME 3M FIX (ALERTAS RESTAURADOS) ATIVO</b>")
+        await tg(s, "<b>V22.1 (SOMENTE 3M, 15M e 30M) ATIVO</b>")
         while True:
             try:
-                data = await (await s.get(f"{BINANCE}/api/v3/ticker/24hr")).json()
+                data = await (await s.get("https://api.binance.com/api/v3/ticker/24hr")).json()
                 symbols = [
                     d["symbol"]
                     for d in data
                     if d["symbol"].endswith("USDT")
                     and float(d["quoteVolume"]) > 3_000_000
-                    and (lambda base: not (
-                          base.endswith("USD")
-                          or base in {
-                              "BUSD","FDUSD","USDE","USDC","TUSD","CUSD",
-                              "EUR","GBP","TRY","AUD","BRL","RUB","CAD","CHF","JPY",
-                              "BF","BFC","BFG","BFD","BETA","AEUR","AUSD","CEUR","XAUT",
-                          }
-                      ))(d["symbol"][:-4])
                     and not any(x in d["symbol"] for x in ["UP", "DOWN"])
                 ]
                 symbols = sorted(
