@@ -1,4 +1,4 @@
-# main.py — V22.4 (Render Safe + RSI/MACD Filtro Ativo + 3m Força Real)
+# main.py — V22.4.1 (Correção Visual OURO + 3m Força Real + 15m/30m Filtros)
 import os, asyncio, aiohttp, time
 from datetime import datetime, timedelta, timezone
 from flask import Flask
@@ -7,7 +7,7 @@ import threading, statistics
 app = Flask(__name__)
 @app.route("/")
 def home():
-    return "V22.4 ATIVO (3M REAL + 15M/30M FORÇA REAL)", 200
+    return "V22.4.1 ATIVO (VISUAL OURO + FILTROS REAIS)", 200
 
 @app.route("/health")
 def health():
@@ -98,7 +98,6 @@ async def scan_tf(s, sym, tf):
 
         current_rsi = rsi(close)
         if tf in ["15m", "30m"]:
-            # filtros de força real
             if current_rsi < 50 or current_rsi > 85:
                 return
             macd_12 = ema(close, 12)
@@ -113,7 +112,7 @@ async def scan_tf(s, sym, tf):
             alvo2 = p * 1.05
             prob = "78%" if tf == "3m" else "85%" if tf == "15m" else "90%"
             emoji = "⚡" if tf == "3m" else "💪" if tf == "15m" else "🟢"
-            color = "🔵" if tf == "3m" else "🟢" if tf == "15m" else "🟣"
+            color = "🟡" if tf == "3m" else "🔵" if tf == "15m" else "🟣"
 
             nome = sym.replace("USDT", "")
             msg = (
@@ -134,7 +133,7 @@ async def scan_tf(s, sym, tf):
 
 async def main_loop():
     async with aiohttp.ClientSession() as s:
-        await tg(s, "<b>V22.4 ATIVO</b>\n3M REAL + 15M/30M FORÇA REAL")
+        await tg(s, "<b>V22.4.1 ATIVO</b>\nVisual OURO + Filtros Reais")
         while True:
             try:
                 data = await (await s.get(f"{BINANCE}/api/v3/ticker/24hr")).json()
