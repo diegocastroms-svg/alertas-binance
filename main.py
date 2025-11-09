@@ -1,4 +1,4 @@
-# main.py — V21.8 VOLUME 3M (EARLY PUMP FIX)
+# main.py — V21.9 VOLUME 3M FIX (ALERTAS RESTAURADOS)
 import os, asyncio, aiohttp, time, math
 from datetime import datetime, timedelta, timezone
 from flask import Flask
@@ -7,7 +7,7 @@ import threading
 app = Flask(__name__)
 @app.route("/")
 def home():
-    return "V21.8 VOLUME 3M (EARLY PUMP FIX) ATIVO", 200
+    return "V21.9 VOLUME 3M FIX (ALERTAS RESTAURADOS) ATIVO", 200
 
 @app.route("/health")
 def health():
@@ -102,7 +102,9 @@ async def scan_tf(s, sym, tf):
         ema9_atual = ema9_prev[-1] * (1 - alpha9) + close[-1] * alpha9
         ema20_atual = ema20_prev[-1] * (1 - alpha20) + close[-1] * alpha20
 
-        # === BLOCO 3M EARLY PUMP FIX ===
+        # 🔧 PREVINE ERRO NOS OUTROS TIMEFRAMES
+        bb_width_atual = 0
+
         if tf == "3m":
             mb = sum(close[-20:]) / 20
             std = math.sqrt(sum((x - mb) ** 2 for x in close[-20:]) / 20)
@@ -132,15 +134,14 @@ async def scan_tf(s, sym, tf):
             if not (current_rsi > 40 and current_rsi < 85 and current_rsi > rsi_prev):
                 return
 
-            # Cruzamento EMA9 acima da MA20
             cruzamento_valido = ema9_prev[-1] <= ema20_prev[-1] and ema9_atual > ema20_atual
-            if not cruzamento_valido:
-                return
+
         else:
+            # 5m, 15m, 30m — alertas normais
             current_rsi = rsi(close)
-            if current_rsi < 40 or current_rsi > 85:
+            if not (40 <= current_rsi <= 85):
                 return
-            cruzamento_valido = ema9_atual > ema20_atual and ema9_prev[-1] <= ema20_prev[-1]
+            cruzamento_valido = ema9_prev[-1] <= ema20_prev[-1] and ema9_atual > ema20_atual
 
         if not cruzamento_valido:
             return
@@ -159,7 +160,10 @@ async def scan_tf(s, sym, tf):
                 f"{nome}\n\n"
                 f"Preço: <b>{p:.6f}</b>\n"
                 f"RSI: <b>{current_rsi:.1f}</b>\n"
-                f"BB Width: <b>{bb_width_atual*100:.2f}%</b>\n"
+            )
+            if tf == "3m":
+                msg += f"BB Width: <b>{bb_width_atual*100:.2f}%</b>\n"
+            msg += (
                 f"Volume 24h: <b>${vol24:,.0f}</b>\n"
                 f"Prob: <b>{prob}</b>\n"
                 f"Stop: <b>{stop:.6f}</b>\n"
@@ -174,7 +178,7 @@ async def scan_tf(s, sym, tf):
 
 async def main_loop():
     async with aiohttp.ClientSession() as s:
-        await tg(s, "<b>V21.8 VOLUME 3M (EARLY PUMP FIX) ATIVO</b>")
+        await tg(s, "<b>V21.9 VOLUME 3M FIX (ALERTAS RESTAURADOS) ATIVO</b>")
         while True:
             try:
                 data = await (await s.get(f"{BINANCE}/api/v3/ticker/24hr")).json()
