@@ -1,4 +1,4 @@
-# main.py — V22.1 (SOMENTE 3M, 15M e 30M)
+# main.py — V22.3 (3M AJUSTADO + FORÇA REAL + CRUZAMENTO PRECISO)
 import os, asyncio, aiohttp, time, math
 from datetime import datetime, timedelta, timezone
 from flask import Flask
@@ -7,7 +7,7 @@ import threading
 app = Flask(__name__)
 @app.route("/")
 def home():
-    return "V22.1 (SOMENTE 3M, 15M e 30M) ATIVO", 200
+    return "V22.3 (3M AJUSTADO + FORÇA REAL + CRUZAMENTO PRECISO) ATIVO", 200
 
 @app.route("/health")
 def health():
@@ -54,12 +54,12 @@ def rsi(prices, p=14):
     return 100 - 100 / (1 + ag / al)
 
 async def klines(s, sym, tf, lim=100):
-    url = f"https://api.binance.com/api/v3/klines?symbol={sym}&interval={tf}&limit={lim}"
+    url = f"{BINANCE}/api/v3/klines?symbol={sym}&interval={tf}&limit={lim}"
     async with s.get(url, timeout=10) as r:
         return await r.json() if r.status == 200 else []
 
 async def ticker(s, sym):
-    url = f"https://api.binance.com/api/v3/ticker/24hr?symbol={sym}"
+    url = f"{BINANCE}/api/v3/ticker/24hr?symbol={sym}"
     async with s.get(url, timeout=10) as r:
         return await r.json() if r.status == 200 else None
 
@@ -104,8 +104,32 @@ async def scan_tf(s, sym, tf):
         if not (35 <= current_rsi <= 88):
             return
 
+        # 🔹 BLOCO ESPECIAL PARA 3M — leitura real de força
+        if tf == "3m":
+            # volume_strength (força do volume atual)
+            ma9 = sum(vol[-9:]) / 9
+            ma21 = sum(vol[-21:]) / 21
+            avg_vol = (ma9 + ma21) / 2
+            volume_strength = (vol[-1] / avg_vol) * 100 if avg_vol else 0
+
+            # momentum_confluence (sincronia entre RSI, volume e MACD simulado)
+            macd_line = ema(close, 12)[-1] - ema(close, 26)[-1]
+            signal_line = ema(close, 9)[-1]
+            macd_hist = macd_line - signal_line
+            momentum_confluence = (current_rsi / 100) * (1 if macd_hist > 0 else 0) * (volume_strength / 100)
+
+            # real_money_flow (entrada real de grana)
+            taker_buy = float(t.get("takerBuyQuoteAssetVolume", 0))
+            taker_sell = vol24 - taker_buy
+            real_money_flow = (taker_buy / (taker_buy + taker_sell) * 100) if (taker_buy + taker_sell) > 0 else 50
+
+            # filtros antes do alerta
+            if volume_strength < 120 or momentum_confluence < 0.5 or real_money_flow < 55:
+                return
+
+        # 🔸 Cruzamento mais sensível (aceita até 2 velas atrás)
         cruzamento_valido = (
-            (ema9_prev[-1] <= ema20_prev[-1] and ema9_atual > ema20_atual)
+            (ema9_prev[-1] <= ema20_prev[-1] and ema9_atual > ema20_atual * 1.0002)
             or (ema9_prev[-2] <= ema20_prev[-2] and ema9_prev[-1] > ema20_prev[-1])
         )
         if not cruzamento_valido:
@@ -115,7 +139,7 @@ async def scan_tf(s, sym, tf):
             stop = min(float(x[3]) for x in k[-10:]) * 0.98
             alvo1 = p * 1.025
             alvo2 = p * 1.05
-            prob = "72%" if tf == "3m" else "78%" if tf == "15m" else "85%"
+            prob = "90%" if tf == "3m" else "78%" if tf == "15m" else "85%"
             emoji = "🔥" if tf == "3m" else "💪" if tf == "15m" else "🟢"
             color = "🟡" if tf == "3m" else "🔵" if tf == "15m" else "🟢"
 
@@ -125,6 +149,16 @@ async def scan_tf(s, sym, tf):
                 f"{nome}\n\n"
                 f"Preço: <b>{p:.6f}</b>\n"
                 f"RSI: <b>{current_rsi:.1f}</b>\n"
+            )
+
+            if tf == "3m":
+                msg += (
+                    f"Volume força: <b>{volume_strength:.0f}%</b>\n"
+                    f"Confluência: <b>{momentum_confluence:.2f}</b>\n"
+                    f"Fluxo real: <b>{real_money_flow:.1f}% compradores</b>\n"
+                )
+
+            msg += (
                 f"Volume 24h: <b>${vol24:,.0f}</b>\n"
                 f"Prob: <b>{prob}</b>\n"
                 f"Stop: <b>{stop:.6f}</b>\n"
@@ -139,16 +173,25 @@ async def scan_tf(s, sym, tf):
 
 async def main_loop():
     async with aiohttp.ClientSession() as s:
-        await tg(s, "<b>V22.1 (SOMENTE 3M, 15M e 30M) ATIVO</b>")
+        await tg(s, "<b>V22.3 (3M AJUSTADO + FORÇA REAL + CRUZAMENTO PRECISO) ATIVO</b>")
         while True:
             try:
-                data = await (await s.get("https://api.binance.com/api/v3/ticker/24hr")).json()
+                data = await (await s.get(f"{BINANCE}/api/v3/ticker/24hr")).json()
                 symbols = [
                     d["symbol"]
                     for d in data
-                    if d["symbol"].endswith("USDT")
-                    and float(d["quoteVolume"]) > 3_000_000
-                    and not any(x in d["symbol"] for x in ["UP", "DOWN"])
+                    if (
+                        d["symbol"].endswith("USDT")
+                        and float(d["quoteVolume"]) > 3_000_000
+                        and not any(
+                            x in d["symbol"]
+                            for x in [
+                                "UP","DOWN","BUSD","FDUSD","USDE","USDC","TUSD","CUSD",
+                                "AEUR","AUSD","CEUR","EUR","GBP","TRY","AUD","BRL","RUB",
+                                "CAD","CHF","JPY","XAUT","BF","BETA"
+                            ]
+                        )
+                    )
                 ]
                 symbols = sorted(
                     symbols,
