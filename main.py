@@ -1,10 +1,11 @@
-# main.py — V7.1 OURO CONFLUÊNCIA CURTA (Destravada)
+# main.py — V7.2 OURO CONFLUÊNCIA CURTA (Destravada + Ajuste Realista)
 # Timeframes: 15m, 30m, 1h
-# Fluxo: Rompimento EMA200 → Reteste (EMA50/EMA100/EMA200) → Continuação
+# Fluxo: Rompimento EMA200→ Reteste (EMA50/EMA100/EMA200) → Continuação
 # Filtros: RSI, MACD (corrigido), VolumeStrength, Book (takerBuy vs takerSell)
 # Confluência: FLEX (não bloqueia — apenas loga)
 # Cooldown: 15m=15min, 30m=30min, 1h=60min
-# Debug: prints detalhados para cada motivo de não-alerta
+# Scan interval: 30s
+# Debug: logs detalhados no Render
 
 import os, asyncio, aiohttp, time
 from datetime import datetime, timedelta, timezone
@@ -15,7 +16,7 @@ from math import inf
 app = Flask(__name__)
 @app.route("/")
 def home():
-    return "V7.1 OURO CONFLUÊNCIA CURTA (Destravada) ATIVO", 200
+    return "V7.2 OURO CONFLUÊNCIA CURTA (Destravada + Ajuste Realista) ATIVO", 200
 
 @app.route("/health")
 def health():
@@ -25,16 +26,16 @@ BINANCE = "https://api.binance.com"
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 CHAT_ID = os.getenv("CHAT_ID", "").strip()
 
-# ===== PARÂMETROS (Destravados) =====
+# ===== PARÂMETROS (Ajuste Realista) =====
 MIN_VOL24 = 3_000_000   # volume mínimo 24h
-TOP_N = 150             # mais pares escaneados
-COOLDOWN = {"15m": 15*60, "30m": 30*60, "1h": 60*60}  # 1 alerta por candle
+TOP_N = 150             # pares escaneados (TOP N por volume)
+COOLDOWN = {"15m": 15*60, "30m": 30*60, "1h": 60*60}
 
-RETEST_TOL = 0.003      # 0,3% tolerância de "toque" na média
-BREAK_TOL = 0.0015      # 0,15% acima da EMA200 para considerar rompimento
+RETEST_TOL = 0.003      # 0,3% tolerância no "toque" da média
+BREAK_TOL = 0.0015      # 0,15% acima da média base (200 ou 100 fallback) para rompimento
 
-VOL_STRENGTH_MIN_BREAK = 120  # % vs base (rompimento)
-VOL_STRENGTH_MIN_CONT  = 110  # % vs base (continuação)
+VOL_STRENGTH_MIN_BREAK = 90   # % vs base (rompimento)
+VOL_STRENGTH_MIN_CONT  = 85   # % vs base (continuação)
 
 BOOK_DOMINANCE_BREAK = 1.10   # takerBuyQuote >= 1.1 * takerSellQuote (rompimento)
 BOOK_DOMINANCE_CONT  = 1.10   # takerBuy atual >= 1.1 * takerBuy anterior (continuação)
@@ -42,6 +43,8 @@ BOOK_DOMINANCE_CONT  = 1.10   # takerBuy atual >= 1.1 * takerBuy anterior (conti
 RSI_MIN_BREAK = 50
 RSI_MIN_RETEST_HOLD = 45
 RSI_MIN_CONT = 50
+
+SCAN_INTERVAL = 30  # segundos entre varreduras
 
 # ===== HELPERS =====
 def now_br():
@@ -68,15 +71,6 @@ def ema_last(data, p):
     s = ema_series(data, p)
     return s[-1] if s else 0.0
 
-def sma_series(data, p):
-    if len(data) < p: return []
-    out = []
-    s = sum(data[:p]); out.append(s/p)
-    for i in range(p, len(data)):
-        s += data[i] - data[i-p]
-        out.append(s/p)
-    return out
-
 def rsi(prices, p=14):
     if len(prices) < p+1: return 50
     d = [prices[i]-prices[i-1] for i in range(1,len(prices))]
@@ -86,7 +80,7 @@ def rsi(prices, p=14):
     return 100 - 100/(1 + ag/al)
 
 def macd_correct(close):
-    # MACD padrão 12/26/9 — sinal é EMA do macd_line (não do close!)
+    # MACD padrão 12/26/9 — sinal = EMA do macd_line
     if len(close) < 26: return 0.0, 0.0, 0.0
     ema12 = ema_series(close, 12)
     ema26 = ema_series(close, 26)
@@ -103,7 +97,7 @@ def volume_strength(vol_series):
     ma9  = sum(vol_series[-9:])/9
     ma21 = sum(vol_series[-21:])/21
     base = (ma9 + ma21)/2 or 1e-12
-    return (vol_series[-1]/base) * 100
+    return (vol_series[-1]/base) * 100, base, vol_series[-1]
 
 def taker_split_24h(t24):
     vol_quote = float(t24.get("quoteVolume", 0) or 0.0)
@@ -137,14 +131,13 @@ def can_alert(tf, sym, kind):
 state = {}
 def ensure_state(key):
     if key not in state:
-        state[key] = {"broke200": False, "last_taker_buy": 0.0, "watch_retest": False}
+        state[key] = {"broke200": False, "last_taker_buy": 0.0, "watch_retest": False, "base_ma": "EMA200"}
 
 # Confluência (FLEX — não bloqueia; só loga)
 confluence = {}
-def set_confluence(sym, tf, macd_ok):
+def set_conf(sym, tf, macd_ok):
     confluence[(sym, tf)] = macd_ok
-
-def get_confluence(sym, tf):
+def get_conf(sym, tf):
     return confluence.get((sym, tf), False)
 
 # ===== CORE =====
@@ -174,10 +167,10 @@ async def scan_tf(s, sym, tf):
         p = float(t24["lastPrice"])
         vol24 = float(t24["quoteVolume"])
         if vol24 < MIN_VOL24:
-            print(f"[{tf}] {sym} skip: vol24 {vol24:,.0f} < {MIN_VOL24:,.0f}")
+            # reduzir ruído de log
             return
 
-        k = await klines(s, sym, tf, 120)
+        k = await klines(s, sym, tf, 220)
         if len(k) < 60:
             print(f"[{tf}] {sym} poucas klines ({len(k)})")
             return
@@ -186,65 +179,76 @@ async def scan_tf(s, sym, tf):
         low   = [float(x[3]) for x in k]
         vol   = [float(x[5]) for x in k]
 
-        # Médias
-        ema50 = ema_last(close, 50) if len(close)>=50 else inf
-        ema100= ema_last(close,100) if len(close)>=100 else inf
-        ema200= ema_last(close,200) if len(close)>=200 else inf
+        # Médias e Fallback (EMA100 se não há dados p/ EMA200)
+        have200 = len(close) >= 200
+        ema50  = ema_last(close, 50)  if len(close)>=50  else inf
+        ema100 = ema_last(close,100)  if len(close)>=100 else inf
+        ema200 = ema_last(close,200)  if have200         else None
+        base_ma_val = ema200 if have200 else ema100
+        base_ma_tag = "EMA200" if have200 else "EMA100(🧩fallback)"
 
         # Indicadores
         r = rsi(close)
         macd_line, signal_line, hist = macd_correct(close)
         macd_pos = (macd_line > 0 and hist >= 0)
-        vs = volume_strength(vol)
+        vs, vs_base, vs_now = volume_strength(vol)
         vol_quote, taker_buy_q, taker_sell_q = taker_split_24h(t24)
 
-        # Confluência (apenas informativa)
-        if tf == "1h":
-            set_confluence(sym, "1h", macd_pos)
-        if tf == "30m":
-            set_confluence(sym, "30m", macd_pos)
-        log_conf = f"conf30={get_confluence(sym,'30m')} conf1h={get_confluence(sym,'1h')}"
+        # Confluência (informativa)
+        if tf == "1h":  set_conf(sym, "1h", macd_pos)
+        if tf == "30m": set_conf(sym, "30m", macd_pos)
+        log_conf = f"conf30={get_conf(sym,'30m')} conf1h={get_conf(sym,'1h')}"
 
         key = (sym, tf)
         ensure_state(key)
 
-        # ===== 1) ROMPIMENTO EMA200 =====
-        broke200_now = (close[-1] > ema200*(1+BREAK_TOL)) and (r >= RSI_MIN_BREAK) and macd_pos and (vs >= VOL_STRENGTH_MIN_BREAK)
-        book_ok_break = (taker_buy_q >= taker_sell_q * BOOK_DOMINANCE_BREAK)
+        # ===== 1) ROMPIMENTO (base=EMA200, fallback=EMA100) =====
+        if base_ma_val and base_ma_val != 0:
+            broke_now = (close[-1] > base_ma_val*(1+BREAK_TOL)) and (r >= RSI_MIN_BREAK) and macd_pos and (vs >= VOL_STRENGTH_MIN_BREAK)
+        else:
+            broke_now = False
 
-        if broke200_now and book_ok_break:
+        # Book: se taker_buy=0 (dados ausentes), não bloqueia — só loga
+        book_ok_break = (taker_buy_q >= taker_sell_q * BOOK_DOMINANCE_BREAK) or (taker_buy_q == 0.0)
+        book_note = "bookOK" if taker_buy_q >= taker_sell_q * BOOK_DOMINANCE_BREAK else ("book=0 ignorado" if taker_buy_q==0.0 else "book fraco")
+
+        if broke_now and book_ok_break:
             state[key]["broke200"] = True
             state[key]["watch_retest"] = True
             state[key]["last_taker_buy"] = taker_buy_q
+            state[key]["base_ma"] = base_ma_tag
 
             if can_alert(tf, sym, "break"):
                 nome = sym.replace("USDT","")
                 msg = (
-                    f"<b>⚡ TENDÊNCIA CURTA — ROMPIMENTO EMA200 ({tf.upper()})</b>\n\n"
+                    f"<b>⚡ TENDÊNCIA CURTA — ROMPIMENTO {base_ma_tag} ({tf.upper()})</b>\n\n"
                     f"{nome}\n\n"
                     f"Entrada sugerida: <b>{p:.6f}</b>\n"
                     f"RSI: <b>{r:.1f}</b> | MACD: <b>positivo</b>\n"
-                    f"Vol força: <b>{vs:.0f}%</b>\n"
-                    f"💰 Fluxo real: <b>{taker_buy_q:,.0f}</b> vs <b>{taker_sell_q:,.0f}</b>\n"
+                    f"Vol força: <b>{vs:.0f}%</b> (atual {vs_now:,.0f} vs base {vs_base:,.0f})\n"
+                    f"💰 Fluxo real: <b>{taker_buy_q:,.0f}</b> vs <b>{taker_sell_q:,.0f}</b> ({book_note})\n"
                     f"<i>{now_br()} BR | {log_conf}</i>"
                 )
                 await tg(s, msg)
         else:
-            print(f"[{tf}] {sym} no-break "
-                  f"(price>{ema200*(1+BREAK_TOL):.6f}? {close[-1]>ema200*(1+BREAK_TOL)} | "
-                  f"RSI {r:.1f} ok? {r>=RSI_MIN_BREAK} | "
-                  f"MACD+? {macd_pos} | "
-                  f"Vol% {vs:.0f} >= {VOL_STRENGTH_MIN_BREAK}? {vs>=VOL_STRENGTH_MIN_BREAK} | "
-                  f"Book {taker_buy_q:,.0f} >= 1.1*{taker_sell_q:,.0f}? {book_ok_break})")
+            if base_ma_val:
+                print(f"[{tf}] {sym} no-break ({base_ma_tag}) "
+                      f"price>{base_ma_val*(1+BREAK_TOL):.6f}? {close[-1]>base_ma_val*(1+BREAK_TOL)} | "
+                      f"RSI {r:.1f}>={RSI_MIN_BREAK}? {r>=RSI_MIN_BREAK} | "
+                      f"MACD+? {macd_pos} | "
+                      f"Vol% {vs:.0f}>={VOL_STRENGTH_MIN_BREAK}? {vs>=VOL_STRENGTH_MIN_BREAK} | "
+                      f"Book: {book_note} | conf30={get_conf(sym,'30m')} conf1h={get_conf(sym,'1h')}")
+            else:
+                print(f"[{tf}] {sym} no-break (sem base_ma) — close len={len(close)}")
 
-        # ===== 2) RETESTE =====
+        # ===== 2) RETESTE (EMA50/EMA100/EMA200) =====
         if state[key]["watch_retest"]:
             prev = k[-2]; curr = k[-1]
             prev_low  = float(prev[3]); prev_close = float(prev[4])
 
-            touched50  = touched(ema50,  prev_low,  prev_close)
-            touched100 = touched(ema100, prev_low,  prev_close)
-            touched200 = touched(ema200, prev_low,  prev_close)
+            touched50  = touched(ema50,  prev_low,  prev_close) if ema50  != inf else False
+            touched100 = touched(ema100, prev_low,  prev_close) if ema100 != inf else False
+            touched200 = touched(ema200, prev_low,  prev_close) if ema200 is not None else False
             touched_any = touched50 or touched100 or touched200
 
             hold_strength = (r >= RSI_MIN_RETEST_HOLD) and (macd_line >= 0)
@@ -257,23 +261,27 @@ async def scan_tf(s, sym, tf):
                     msg = (
                         f"<b>🔁 TENDÊNCIA CURTA — RETESTE VALIDADO ({tf.upper()})</b>\n\n"
                         f"{nome}\n\n"
-                        f"Média testada: <b>{which}</b>\n"
+                        f"Média testada: <b>{which}</b> | Base do ciclo: <b>{state[key]['base_ma']}</b>\n"
                         f"RSI: <b>{r:.1f}</b> | MACD: <b>{'positivo' if macd_pos else 'neutro'}</b>\n"
                         f"Vol do recuo: <b>ok</b>\n"
                         f"<i>{now_br()} BR | {log_conf}</i>"
                     )
                     await tg(s, msg)
             else:
-                print(f"[{tf}] {sym} no-retest "
-                      f"(touch={touched_any} [50={touched50} 100={touched100} 200={touched200}] | "
-                      f"holdRSI/MACD={hold_strength} (RSI {r:.1f}, macd_line {macd_line:.5f}) | "
-                      f"volPull={vol_pullback_ok})")
+                # log resumido pra não poluir
+                print(f"[{tf}] {sym} no-retest (touch={touched_any} [50={touched50} 100={touched100} 200={touched200}] | "
+                      f"holdRSI/MACD={hold_strength} | volPull={vol_pullback_ok})")
 
         # ===== 3) CONTINUAÇÃO =====
         if state[key]["broke200"]:
             prev = k[-2]; curr = k[-1]
-            cont_ok = is_green_candle(curr) and broke_prev_high(curr, prev) and (vs >= VOL_STRENGTH_MIN_CONT) and (r >= RSI_MIN_CONT) and (macd_line > 0 and hist >= 0)
-            book_growth = taker_buy_q >= max(state[key]["last_taker_buy"] * BOOK_DOMINANCE_CONT, state[key]["last_taker_buy"]+1e-9)
+            cont_ok = is_green_candle(curr) and broke_prev_high(curr, prev) \
+                      and (vs >= VOL_STRENGTH_MIN_CONT) and (r >= RSI_MIN_CONT) \
+                      and (macd_line > 0 and hist >= 0)
+
+            # Book precisa melhorar vs registro do ciclo; se last=0, aceita (ciclo recém-iniciado)
+            last_tb = state[key]["last_taker_buy"]
+            book_growth = (taker_buy_q >= max(last_tb * BOOK_DOMINANCE_CONT, last_tb+1e-9)) or (last_tb == 0.0)
 
             if cont_ok and book_growth:
                 if can_alert(tf, sym, "continue"):
@@ -299,15 +307,15 @@ async def scan_tf(s, sym, tf):
             else:
                 print(f"[{tf}] {sym} no-continue "
                       f"(green={is_green_candle(curr)} | breakPrevHigh={broke_prev_high(curr, prev)} | "
-                      f"Vol% {vs:.0f}>= {VOL_STRENGTH_MIN_CONT}? {vs>=VOL_STRENGTH_MIN_CONT} | "
-                      f"RSI {r:.1f}>= {RSI_MIN_CONT}? {r>=RSI_MIN_CONT} | "
+                      f"Vol% {vs:.0f}>={VOL_STRENGTH_MIN_CONT}? {vs>=VOL_STRENGTH_MIN_CONT} | "
+                      f"RSI {r:.1f}>={RSI_MIN_CONT}? {r>=RSI_MIN_CONT} | "
                       f"MACD+? {(macd_line>0 and hist>=0)} | "
-                      f"BookGrowth {taker_buy_q:,.0f} >= 1.1*last({state[key]['last_taker_buy']:,.0f})? {book_growth})")
+                      f"BookGrowth {taker_buy_q:,.0f} >= 1.1*last({last_tb:,.0f})? {book_growth})")
 
         # ===== CANCELAMENTO =====
         if state[key]["broke200"]:
             lost_strength = (r < RSI_MIN_RETEST_HOLD) or (macd_line < 0 and hist < 0)
-            below50 = close[-1] < ema50*(1-RETEST_TOL)
+            below50 = close[-1] < ema50*(1-RETEST_TOL) if ema50 != inf else False
             if lost_strength or below50:
                 print(f"[{tf}] {sym} cancel-cycle (lost={lost_strength} below50={below50})")
                 state[key]["broke200"] = False
@@ -319,13 +327,13 @@ async def scan_tf(s, sym, tf):
 
 async def main_loop():
     async with aiohttp.ClientSession() as s:
-        await tg(s, "<b>V7.1 ATIVO — TENDÊNCIA CURTA (Destravada)</b>\n15m/30m/1h + Book + Reteste 50/100/200\nConfluência FLEX (não bloqueia)")
+        await tg(s, "<b>V7.2 ATIVO — TENDÊNCIA CURTA (Destravada + Ajuste Realista)</b>\n15m/30m/1h + Book + Reteste 50/100/200\nConfluência FLEX | Scan 30s")
         while True:
             try:
                 resp = await s.get(f"{BINANCE}/api/v3/ticker/24hr", timeout=10)
                 if resp.status != 200:
                     print(f"[TICKER LIST] HTTP {resp.status}")
-                    await asyncio.sleep(60); continue
+                    await asyncio.sleep(SCAN_INTERVAL); continue
                 data = await resp.json()
 
                 symbols = [
@@ -349,11 +357,11 @@ async def main_loop():
                     reverse=True
                 )[:TOP_N]
 
-                print(f"[SCAN] {len(symbols)} pares: exemplo {symbols[:10]}")
+                print(f"[SCAN] {len(symbols)} pares (ex.: {symbols[:10]})")
 
                 tasks = []
                 for sym in symbols:
-                    # Rodamos 1h, 30m e 15m — confluência é só log
+                    # Rodamos 1h, 30m e 15m — confluência é apenas log
                     tasks.append(scan_tf(s, sym, "1h"))
                     tasks.append(scan_tf(s, sym, "30m"))
                     tasks.append(scan_tf(s, sym, "15m"))
@@ -361,7 +369,7 @@ async def main_loop():
 
             except Exception as e:
                 print("Erro main_loop:", e)
-            await asyncio.sleep(60)
+            await asyncio.sleep(SCAN_INTERVAL)
 
 threading.Thread(target=lambda: asyncio.run(main_loop()), daemon=True).start()
 
