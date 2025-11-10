@@ -28,7 +28,7 @@ CHAT_ID = os.getenv("CHAT_ID", "").strip()
 
 # ===== PARÂMETROS (Ajuste Realista) =====
 MIN_VOL24 = 3_000_000   # volume mínimo 24h
-TOP_N = 150             # pares escaneados (TOP N por volume)
+TOP_N = 50             # pares escaneados (TOP N por volume)
 COOLDOWN = {"15m": 15*60, "30m": 30*60, "1h": 60*60}
 
 RETEST_TOL = 0.003      # 0,3% tolerância no "toque" da média
@@ -375,3 +375,4 @@ threading.Thread(target=lambda: asyncio.run(main_loop()), daemon=True).start()
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+
