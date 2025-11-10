@@ -38,9 +38,9 @@ BREAK_TOL = 0.0015        # 0,15% acima da média base p/ romper
 RETEST_TOL = 0.005        # 0,5% de aproximação/“toque” da média no reteste
 
 VOL_STRENGTH_MIN_EARLY = 120  # entrada antecipada (15m)
-VOL_STRENGTH_MIN_BREAK = 90   # rompimento (30m/1h)
-VOL_STRENGTH_MIN_RETEST = 90  # reteste antecipado (15m)
-VOL_STRENGTH_MIN_CONT = 85    # continuação (1h)
+VOL_STRENGTH_MIN_BREAK = 120   # rompimento (30m/1h)
+VOL_STRENGTH_MIN_RETEST = 120  # reteste antecipado (15m)
+VOL_STRENGTH_MIN_CONT = 120    # continuação (1h)
 
 RSI_MIN_EARLY = 50
 RSI_MIN_BREAK = 50
@@ -361,3 +361,4 @@ threading.Thread(target=lambda: asyncio.run(main_loop()), daemon=True).start()
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+
