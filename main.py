@@ -1,12 +1,13 @@
-# main_short.py — V6.3C TENDÊNCIA CURTA (15m/30m/1h) — Render Safe
+# main_short.py — v7.0D TENDÊNCIA CURTA (15m/30m/1h) — Render Safe
+# - Timeframes: 15m, 30m, 1h (somente esses alertam)
 # - Médias: EMA9/20/50/200
-# - Indicadores: RSI(14), MACD(12,26,9), Volume Strength (vs MA9/MA21 de volume)
+# - Indicadores: RSI(14), MACD(12,26,9), ATR(14), Volume Strength (vs MA9/MA21 do volume)
 # - Filtros: volume 24h >= 10M USDT, remove UP/DOWN/stables/exóticos
-# - Alertas: SOMENTE 15m, 30m e 1h (nome "TENDÊNCIA CURTA"), símbolo sem "USDT"
+# - Alertas dinâmicos com negrito + Entrada/Stop/Alvo (ATR) + Probabilidade (%)
 # - Cooldowns: 15m=15min, 30m=30min, 1h=60min
-# - Render-safe: Flask + /health, loop assíncrono com aiohttp
+# - Render-safe: Flask + /health, loop assíncrono (aiohttp)
 
-import os, asyncio, aiohttp, time
+import os, asyncio, aiohttp, time, math
 from datetime import datetime, timedelta, timezone
 from flask import Flask
 
@@ -15,7 +16,7 @@ app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return "V6.3C TENDÊNCIA CURTA (15m/30m/1h) ATIVO", 200
+    return "v7.0D TENDÊNCIA CURTA (15m/30m/1h) ATIVO", 200
 
 @app.route("/health")
 def health():
@@ -28,13 +29,13 @@ CHAT_ID = os.getenv("CHAT_ID", "").strip()
 
 VOLUME_MIN_USDT = 10_000_000  # filtro de liquidez
 
-# ----------------- Util -----------------
+# ----------------- Utils -----------------
 def now_br():
     return (datetime.now(timezone.utc) - timedelta(hours=3)).strftime("%d/%m %H:%M")
 
 async def tg(session, text):
     if not TELEGRAM_TOKEN or not CHAT_ID:
-        print(text)
+        print("\n================ TELEGRAM (preview) ================\n" + text + "\n====================================================\n")
         return
     try:
         await session.post(
@@ -87,13 +88,30 @@ def macd(prices, fast=12, slow=26, signal=9):
         return 0.0, 0.0, 0.0
     ef = ema(prices, fast)
     es = ema(prices, slow)
-    macd_line = [a-b for a,b in zip(ef[-len(es):], es)]
-    signal_line = ema(macd_line, signal)
-    hist = macd_line[-1] - signal_line[-1]
-    return macd_line[-1], signal_line[-1], hist
+    macd_line_full = [a-b for a,b in zip(ef[-len(es):], es)]
+    signal_line_full = ema(macd_line_full, signal)
+    macd_line = macd_line_full[-1]
+    signal_line = signal_line_full[-1]
+    hist = macd_line - signal_line
+    return macd_line, signal_line, hist
+
+def atr(highs, lows, closes, p=14):
+    # True Range: max( high-low, abs(high-prev_close), abs(low-prev_close) )
+    if len(closes) < p + 1: 
+        return None
+    trs = []
+    for i in range(1, len(closes)):
+        hl = highs[i] - lows[i]
+        hc = abs(highs[i] - closes[i-1])
+        lc = abs(lows[i] - closes[i-1])
+        trs.append(max(hl, hc, lc))
+    if len(trs) < p: 
+        return None
+    # EMA do TR (ATR clássico) — simples média para robustez
+    return sum(trs[-p:]) / p
 
 def volume_strength(volumes):
-    # volume atual vs média MA9/MA21 do próprio volume
+    # volume atual vs médias MA9/MA21 do próprio volume
     if len(volumes) < 22: return 100.0
     v_now = volumes[-1]
     ma9 = sma(volumes, 9)
@@ -137,51 +155,113 @@ def analyze_tf(opens, highs, lows, closes, volumes):
     r = rsi(closes, 14)
     m_line, m_sig, m_hist = macd(closes, 12, 26, 9)
     vs = volume_strength(volumes)
+    a = atr(highs, lows, closes, 14)
     prev_close = closes[-2] if len(closes) >= 2 else price
     body_pct = ((price - prev_close) / prev_close) * 100 if prev_close else 0.0
     return {
         "price": price, "ema9": e9, "ema20": e20, "ema50": e50, "ema200": e200,
         "rsi": r, "macd": m_line, "macd_sig": m_sig, "macd_hist": m_hist,
-        "vol_strength": vs, "body_pct": body_pct
+        "atr": a, "vol_strength": vs, "body_pct": body_pct
     }
 
-def fmt_msg(tf_tag, sym, t, extra=None):
+# ----------------- Probabilidade -----------------
+def prob_score(tf_data, context_above_200=False):
+    # Base: 50%. Ajustes por confluência.
+    score = 50.0
+    rsi = tf_data["rsi"]
+    macd_hist = tf_data["macd_hist"]
+    vs = tf_data["vol_strength"]
+    price = tf_data["price"]
+    e9 = tf_data["ema9"]; e20 = tf_data["ema20"]
+
+    # RSI faixa boa (55–65): +8 | >65:+5 | <45:-8
+    if rsi >= 55 and rsi <= 65: score += 8
+    elif rsi > 65: score += 5
+    elif rsi < 45: score -= 8
+
+    # MACD hist > 0: +10 | leve >0: +6 | <0: -10
+    if macd_hist > 0.002: score += 10
+    elif macd_hist > 0: score += 6
+    else: score -= 10
+
+    # Volume strength
+    if vs >= 140: score += 12
+    elif vs >= 110: score += 8
+    elif vs < 90: score -= 6
+
+    # Estrutura: preço acima de EMA20 e EMA9
+    if price > e20 and price > e9: score += 6
+
+    # Contexto 1h acima da 200 reforça
+    if context_above_200: score += 6
+
+    # Limites
+    score = max(5.0, min(95.0, score))
+    return round(score)
+
+# ----------------- Mensagens -----------------
+def fmt_alert(tf_tag, sym, t, msg_tipo, entry_price, stop, target, prob):
     name = remove_usdt(sym)
-    lines = [
-        f"📊 TENDÊNCIA CURTA ({tf_tag.upper()})",
-        f"{name}",
-        "",
-        f"Preço: {t['price']:.6f}",
-        f"RSI: {t['rsi']:.1f} | MACD: {t['macd']:.3f}",
-        f"VS: {t['vol_strength']:.0f}%",
-    ]
-    if extra:
-        lines.append(extra)
-    lines.append(f"{now_br()} BR")
-    return "\n".join(lines)
+    return (
+        f"{msg_tipo} <b>TENDÊNCIA CURTA ({tf_tag.upper()})</b>\n"
+        f"<b>{name}</b>\n\n"
+        f"<b>Preço:</b> <code>{entry_price:.6f}</code>\n"
+        f"<b>RSI:</b> <code>{t['rsi']:.1f}</code> | <b>MACD:</b> <code>{t['macd']:.3f}</code>\n"
+        f"<b>VS:</b> <code>{t['vol_strength']:.0f}%</code>\n"
+        f"<b>🎯 Entrada:</b> <code>{entry_price:.6f}</code>\n"
+        f"<b>🟥 Stop:</b> <code>{stop:.6f}</code>\n"
+        f"<b>🟩 Alvo:</b> <code>{target:.6f}</code>\n"
+        f"<b>📈 Probabilidade:</b> <code>{prob}%</code>\n"
+        f"<i>{now_br()} BR</i>"
+    )
 
 # ----------------- Regras de alerta -----------------
 def decide_alerts(sym, tf1h, tf30, tf15):
     out = []
 
-    # 1) 1h — Rompimento/força sobre EMA200 (tendência válida)
-    if tf1h["ema200"] and tf1h["price"] > tf1h["ema200"] and tf1h["rsi"] > 50 and tf1h["macd"] > 0 and tf1h["vol_strength"] > 110:
-        out.append(("1h", "ROMP200", fmt_msg("1h", sym, tf1h, extra="Estrutura acima da EMA200")))
+    # Contexto: 1h acima da 200 = estrutura forte
+    context_1h_above200 = bool(tf1h["ema200"] and tf1h["price"] > tf1h["ema200"])
 
-    # 2) 30m — Continuação / Reteste curto (próxima perna)
-    near20 = abs(tf30["price"] - tf30["ema20"]) / tf30["price"] < 0.006
-    near50 = (tf30["ema50"] is not None) and abs(tf30["price"] - tf30["ema50"]) / tf30["price"] < 0.006
-    if tf1h["ema200"] and tf1h["price"] > tf1h["ema200"]:
-        if (near20 or near50) and tf30["rsi"] > 50 and tf30["macd"] >= 0 and tf30["vol_strength"] >= 100 and tf30["body_pct"] >= 0:
-            alvo = "EMA50" if near50 else "EMA20"
-            out.append(("30m", "RETESTE", fmt_msg("30m", sym, tf30, extra=f"Reteste {alvo} respeitado")))
+    # 1) 1h — Estrutura acima da EMA200 (força principal)
+    if tf1h["ema200"] and tf1h["price"] > tf1h["ema200"] and tf1h["rsi"] > 50 and tf1h["macd"] > 0 and tf1h["vol_strength"] > 110 and tf1h["atr"]:
+        atrv = tf1h["atr"]
+        entry = tf1h["price"]
+        stop = entry - 1.5*atrv
+        target = entry + 2.5*atrv
+        prob = prob_score(tf1h, context_above_200=True)
+        msg = fmt_alert("1h", sym, tf1h, "🏗️", entry, stop, target, prob)
+        out.append(("1h", "ESTRUTURA", msg))
+
+    # 2) 30m — Continuação / Reteste
+    if tf30["atr"]:
+        entry = tf30["price"]
+        atrv = tf30["atr"]
+        stop = entry - 1.5*atrv
+        target = entry + 2.5*atrv
+
+        # Reteste curto (EMA20 ou EMA50 por proximidade) com reação positiva
+        near20 = abs(tf30["price"] - tf30["ema20"]) / tf30["price"] < 0.006
+        near50 = (tf30["ema50"] is not None) and abs(tf30["price"] - tf30["ema50"]) / tf30["price"] < 0.006
+        if context_1h_above200 and (near20 or near50) and tf30["rsi"] > 50 and tf30["macd"] >= 0 and tf30["vol_strength"] >= 100 and tf30["body_pct"] >= 0:
+            prob = prob_score(tf30, context_above_200=context_1h_above200)
+            extra_emoji = "🔁"
+            msg = fmt_alert("30m", sym, tf30, extra_emoji, entry, stop, target, prob)
+            out.append(("30m", "RETESTE", msg))
+        # Continuação em força
         elif tf30["ema9"] > tf30["ema20"] and tf30["rsi"] > 55 and tf30["macd"] > 0 and tf30["vol_strength"] > 110:
-            out.append(("30m", "CONTINUACAO", fmt_msg("30m", sym, tf30, extra="Continuação confirmada")))
+            prob = prob_score(tf30, context_above_200=context_1h_above200)
+            msg = fmt_alert("30m", sym, tf30, "💪", entry, stop, target, prob)
+            out.append(("30m", "CONTINUACAO", msg))
 
-    # 3) 15m — Gatilho curto (reentrada inteligente)
-    # Fechamento acima da EMA9 + MACD/Volume confirmando
-    if tf15["ema9"] and tf15["price"] > tf15["ema9"] and tf15["rsi"] >= 52 and tf15["macd"] >= 0 and tf15["vol_strength"] >= 105:
-        out.append(("15m", "GATILHO", fmt_msg("15m", sym, tf15, extra="Fechamento acima da EMA9")))
+    # 3) 15m — Gatilho (fechamento acima da EMA9 com força)
+    if tf15["atr"] and tf15["ema9"] and tf15["price"] > tf15["ema9"] and tf15["rsi"] >= 52 and tf15["macd"] >= 0 and tf15["vol_strength"] >= 105:
+        entry = tf15["price"]
+        atrv = tf15["atr"]
+        stop = entry - 1.5*atrv
+        target = entry + 2.5*atrv
+        prob = prob_score(tf15, context_above_200=context_1h_above200)
+        msg = fmt_alert("15m", sym, tf15, "🚀", entry, stop, target, prob)
+        out.append(("15m", "GATILHO", msg))
 
     return out
 
@@ -195,7 +275,7 @@ async def scan_symbol(session, symbol):
     except:
         vol_quote_24h = 0.0
     if vol_quote_24h < VOLUME_MIN_USDT:
-        return  # moeda morta/baixa liquidez
+        return  # moeda fraca
 
     k15 = await klines(session, symbol, "15m", 240)
     k30 = await klines(session, symbol, "30m", 240)
@@ -227,18 +307,21 @@ async def scan_symbol(session, symbol):
 # ----------------- Loop principal -----------------
 async def main_loop():
     async with aiohttp.ClientSession() as session:
-        await tg(session, f"<b>V6.3C TENDÊNCIA CURTA ATIVO</b>\n15m/30m/1h • {now_br()} BR")
+        await tg(session, f"<b>v7.0D TENDÊNCIA CURTA ATIVO</b>\n15m/30m/1h • {now_br()} BR")
         while True:
             try:
                 data = await all_tickers24(session)
                 if not data:
                     await asyncio.sleep(10); continue
-                # Filtra pares bons
+                # Filtra pares válidos
                 syms = [
                     d["symbol"] for d in data
                     if d["symbol"].endswith("USDT")
                     and "UP" not in d["symbol"] and "DOWN" not in d["symbol"]
-                    and not any(x in d["symbol"] for x in ["BUSD","FDUSD","USDC","TUSD","AEUR","XAUT","EUR","GBP","TRY","AUD","BRL","RUB","CAD","CHF","JPY"])
+                    and not any(x in d["symbol"] for x in [
+                        "BUSD","FDUSD","USDC","TUSD","AEUR","XAUT",  # stables e sintéticos
+                        "EUR","GBP","TRY","AUD","BRL","RUB","CAD","CHF","JPY"  # fiat
+                    ])
                 ]
                 # Top por volume
                 top = sorted(
