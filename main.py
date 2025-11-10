@@ -1,23 +1,34 @@
-# main.py — OURO CONFLUÊNCIA EMA (15m/30m/1h) — v1.1 Render Safe
-# - Só 15m, 30m e 1h
-# - Médias: EMA9/20/50/200 (tudo EMA)
-# - Indicadores: RSI(14), MACD(12,26,9), Bollinger(EMA20, desvio 1.8)
-# - Personalizados: volume_strength (vs MA9/MA21 de volume), real_money_flow (taker buy vs sell)
+# main_short.py — V6.3C TENDÊNCIA CURTA (15m/30m/1h) — Render Safe
+# - Médias: EMA9/20/50/200
+# - Indicadores: RSI(14), MACD(12,26,9), Volume Strength (vs MA9/MA21 de volume)
 # - Filtros: volume 24h >= 10M USDT, remove UP/DOWN/stables/exóticos
-# - 6 alertas: Romp200 (1h), Reteste (30m), Continuação (15m), Reteste no Tempo (30m), Perda de Força (15m), Entrada Antecipada (15m)
-# - Mensagens: sem <code>, símbolo sem "USDT", com espaçamento
+# - Alertas: SOMENTE 15m, 30m e 1h (nome "TENDÊNCIA CURTA"), símbolo sem "USDT"
+# - Cooldowns: 15m=15min, 30m=30min, 1h=60min
+# - Render-safe: Flask + /health, loop assíncrono com aiohttp
 
-import os, asyncio, aiohttp, time, math
+import os, asyncio, aiohttp, time
 from datetime import datetime, timedelta, timezone
 from flask import Flask
 
+# ----------------- Flask (Render-safe) -----------------
 app = Flask(__name__)
 
+@app.route("/")
+def home():
+    return "V6.3C TENDÊNCIA CURTA (15m/30m/1h) ATIVO", 200
+
+@app.route("/health")
+def health():
+    return "OK", 200
+
+# ----------------- Config -----------------
 BINANCE = "https://api.binance.com"
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 CHAT_ID = os.getenv("CHAT_ID", "").strip()
 
-# ----------------- Utils -----------------
+VOLUME_MIN_USDT = 10_000_000  # filtro de liquidez
+
+# ----------------- Util -----------------
 def now_br():
     return (datetime.now(timezone.utc) - timedelta(hours=3)).strftime("%d/%m %H:%M")
 
@@ -43,10 +54,12 @@ async def get_json(session, url, timeout=12):
         print("HTTP erro:", e, url)
     return None
 
-# ----------------- Indicators -----------------
+def remove_usdt(sym: str) -> str:
+    return sym[:-4] if sym.endswith("USDT") else sym
+
+# ----------------- Indicadores -----------------
 def ema(series, period):
-    n = len(series)
-    if n == 0: return []
+    if not series: return []
     a = 2.0 / (period + 1.0)
     e = series[0]
     out = [e]
@@ -72,41 +85,21 @@ def rsi(prices, p=14):
 def macd(prices, fast=12, slow=26, signal=9):
     if len(prices) < slow + signal: 
         return 0.0, 0.0, 0.0
-    ema_fast = ema(prices, fast)
-    ema_slow = ema(prices, slow)
-    macd_line = [a-b for a,b in zip(ema_fast[-len(ema_slow):], ema_slow)]
+    ef = ema(prices, fast)
+    es = ema(prices, slow)
+    macd_line = [a-b for a,b in zip(ef[-len(es):], es)]
     signal_line = ema(macd_line, signal)
     hist = macd_line[-1] - signal_line[-1]
     return macd_line[-1], signal_line[-1], hist
 
-def bollinger_ema(prices, period=20, dev=1.8):
-    # base na EMA20 + desvio padrão das últimas 'period' velas
-    if len(prices) < period: 
-        return None, None, None, None
-    ema20_series = ema(prices, period)
-    basis = ema20_series[-1]
-    last = prices[-period:]
-    m = sum(last) / period
-    var = sum((x - m) ** 2 for x in last) / period
-    sd = var ** 0.5
-    upper = basis + dev * sd
-    lower = basis - dev * sd
-    width = (upper - lower) / basis if basis else 0.0
-    return lower, basis, upper, width
-
 def volume_strength(volumes):
-    # volume atual comparado à média MA9 e MA21 de volume
+    # volume atual vs média MA9/MA21 do próprio volume
     if len(volumes) < 22: return 100.0
     v_now = volumes[-1]
     ma9 = sma(volumes, 9)
     ma21 = sma(volumes, 21)
     base = (ma9 + ma21) / 2 if (ma9 and ma21) else (ma9 or ma21 or 1e-9)
     return 100.0 * (v_now / base) if base > 0 else 100.0
-
-def real_money_flow(taker_buy_q, taker_sell_q):
-    total = (taker_buy_q or 0.0) + (taker_sell_q or 0.0)
-    if total <= 0: return 0.0
-    return 100.0 * ((taker_buy_q or 0.0) - (taker_sell_q or 0.0)) / total
 
 # ----------------- Binance helpers -----------------
 async def klines(session, symbol, interval, limit=240):
@@ -134,121 +127,75 @@ def can_alert(tf, sym, key):
         return True
     return False
 
-def remove_usdt(sym):
-    return sym[:-4] if sym.endswith("USDT") else sym
-
-# ----------------- TF analyzer -----------------
-def analyze_tf(opens, highs, lows, closes, volumes, tfname):
+# ----------------- Análise por timeframe -----------------
+def analyze_tf(opens, highs, lows, closes, volumes):
     price = closes[-1]
-    e9 = ema(closes, 9)[-1]
+    e9  = ema(closes, 9)[-1]
     e20 = ema(closes, 20)[-1]
-    e50 = ema(closes, 50)[-1] if len(closes) >= 50 else None
-    e200 = ema(closes, 200)[-1] if len(closes) >= 200 else None
+    e50 = ema(closes, 50)[-1]  if len(closes) >= 50  else None
+    e200= ema(closes, 200)[-1] if len(closes) >= 200 else None
     r = rsi(closes, 14)
     m_line, m_sig, m_hist = macd(closes, 12, 26, 9)
-    bl, bm, bu, bw = bollinger_ema(closes, 20, 1.8)
     vs = volume_strength(volumes)
-    # tamanho do corpo da última vela (%)
     prev_close = closes[-2] if len(closes) >= 2 else price
     body_pct = ((price - prev_close) / prev_close) * 100 if prev_close else 0.0
     return {
         "price": price, "ema9": e9, "ema20": e20, "ema50": e50, "ema200": e200,
         "rsi": r, "macd": m_line, "macd_sig": m_sig, "macd_hist": m_hist,
-        "boll_low": bl, "boll_mid": bm, "boll_up": bu, "boll_w": bw,
-        "vol_strength": vs, "body_pct": body_pct,
-        "high": highs[-1], "low": lows[-1]
+        "vol_strength": vs, "body_pct": body_pct
     }
 
-# ----------------- Decisão (regras dos 6 alertas) -----------------
-def decide_alerts(sym, tf1h, tf30, tf15, taker_buy_q, taker_sell_q):
+def fmt_msg(tf_tag, sym, t, extra=None):
+    name = remove_usdt(sym)
+    lines = [
+        f"📊 TENDÊNCIA CURTA ({tf_tag.upper()})",
+        f"{name}",
+        "",
+        f"Preço: {t['price']:.6f}",
+        f"RSI: {t['rsi']:.1f} | MACD: {t['macd']:.3f}",
+        f"VS: {t['vol_strength']:.0f}%",
+    ]
+    if extra:
+        lines.append(extra)
+    lines.append(f"{now_br()} BR")
+    return "\n".join(lines)
+
+# ----------------- Regras de alerta -----------------
+def decide_alerts(sym, tf1h, tf30, tf15):
     out = []
-    rmf = real_money_flow(taker_buy_q, taker_sell_q)
 
-    # 1) Rompimento da EMA200 (1h)
-    if tf1h["ema200"] and tf1h["price"] > tf1h["ema200"] and tf1h["rsi"] > 50 and tf1h["macd"] > 0 and tf1h["vol_strength"] > 120 and rmf > 0:
-        out.append(("1h","ROMP200",
-            f"⚡ ROMPIMENTO CONFIRMADO (1H)\n"
-            f"{remove_usdt(sym)}\n\n"
-            f"Preço: {tf1h['price']:.6f}\n"
-            f"RSI: {tf1h['rsi']:.1f} | MACD: {tf1h['macd']:.3f}\n"
-            f"VS: {tf1h['vol_strength']:.0f}% | RMF: {rmf:.0f}\n"
-            f"{now_br()} BR"
-        ))
+    # 1) 1h — Rompimento/força sobre EMA200 (tendência válida)
+    if tf1h["ema200"] and tf1h["price"] > tf1h["ema200"] and tf1h["rsi"] > 50 and tf1h["macd"] > 0 and tf1h["vol_strength"] > 110:
+        out.append(("1h", "ROMP200", fmt_msg("1h", sym, tf1h, extra="Estrutura acima da EMA200")))
 
-    # 2) Reteste (30m) — encosta na EMA20 ou EMA50 e reage
-    near50 = tf30["ema50"] and abs(tf30["price"] - tf30["ema50"]) / tf30["price"] < 0.006
+    # 2) 30m — Continuação / Reteste curto (próxima perna)
     near20 = abs(tf30["price"] - tf30["ema20"]) / tf30["price"] < 0.006
-    if (near20 or near50) and tf1h["ema200"] and tf1h["price"] > tf1h["ema200"] and tf30["rsi"] > 50 and tf30["macd"] >= 0 and tf30["body_pct"] > 0 and rmf >= 0:
-        alvo = "EMA50" if near50 else "EMA20"
-        out.append(("30m","RETESTE",
-            f"🟡 RETESTE CONFIRMADO {alvo} (30M)\n"
-            f"{remove_usdt(sym)}\n\n"
-            f"Preço: {tf30['price']:.6f}\n"
-            f"RSI: {tf30['rsi']:.1f} | MACD: {tf30['macd']:.3f}\n"
-            f"VS: {tf30['vol_strength']:.0f}% | RMF: {rmf:.0f}\n"
-            f"{now_br()} BR"
-        ))
+    near50 = (tf30["ema50"] is not None) and abs(tf30["price"] - tf30["ema50"]) / tf30["price"] < 0.006
+    if tf1h["ema200"] and tf1h["price"] > tf1h["ema200"]:
+        if (near20 or near50) and tf30["rsi"] > 50 and tf30["macd"] >= 0 and tf30["vol_strength"] >= 100 and tf30["body_pct"] >= 0:
+            alvo = "EMA50" if near50 else "EMA20"
+            out.append(("30m", "RETESTE", fmt_msg("30m", sym, tf30, extra=f"Reteste {alvo} respeitado")))
+        elif tf30["ema9"] > tf30["ema20"] and tf30["rsi"] > 55 and tf30["macd"] > 0 and tf30["vol_strength"] > 110:
+            out.append(("30m", "CONTINUACAO", fmt_msg("30m", sym, tf30, extra="Continuação confirmada")))
 
-    # 3) Continuação (15m)
-    if tf1h["ema200"] and tf1h["price"] > tf1h["ema200"] and tf30["rsi"] > 50 and tf30["macd"] > 0:
-        if tf15["ema9"] > tf15["ema20"] and tf15["rsi"] > 55 and tf15["macd"] > 0 and tf15["vol_strength"] > 110 and rmf > 0:
-            out.append(("15m","CONTINUACAO",
-                f"🔵 CONTINUAÇÃO CONFIRMADA (15M)\n"
-                f"{remove_usdt(sym)}\n\n"
-                f"Preço: {tf15['price']:.6f}\n"
-                f"RSI: {tf15['rsi']:.1f} | MACD: {tf15['macd']:.3f}\n"
-                f"VS: {tf15['vol_strength']:.0f}% | RMF: {rmf:.0f}\n"
-                f"Alvos: +2.5% e +5%\n"
-                f"{now_br()} BR"
-            ))
+    # 3) 15m — Gatilho curto (reentrada inteligente)
+    # Fechamento acima da EMA9 + MACD/Volume confirmando
+    if tf15["ema9"] and tf15["price"] > tf15["ema9"] and tf15["rsi"] >= 52 and tf15["macd"] >= 0 and tf15["vol_strength"] >= 105:
+        out.append(("15m", "GATILHO", fmt_msg("15m", sym, tf15, extra="Fechamento acima da EMA9")))
 
-    # 4) Reteste no Tempo (30m): lateral com Bollinger apertando e força voltando no 15m
-    if tf30["rsi"] >= 50 and tf30["rsi"] <= 60 and tf30["boll_w"] and tf30["boll_w"] < 0.02:
-        if tf15["vol_strength"] > 110 and rmf > 0 and tf15["macd"] >= 0:
-            out.append(("30m","RETESTE_TEMPO",
-                f"🟣 RETESTE NO TEMPO (30M)\n"
-                f"{remove_usdt(sym)}\n\n"
-                f"Lateral com força mantida; Bollinger apertando.\n"
-                f"RSI30: {tf30['rsi']:.1f} | VS15: {tf15['vol_strength']:.0f}% | RMF: {rmf:.0f}\n"
-                f"{now_br()} BR"
-            ))
-
-    # 5) Perda de Força (15m)
-    if tf15["rsi"] < 45 and tf15["macd"] < 0 and rmf < 0 and tf15["vol_strength"] < 90:
-        out.append(("15m","PERDA_FORCA",
-            f"🔴 TENDÊNCIA ENFRAQUECENDO (15M)\n"
-            f"{remove_usdt(sym)}\n\n"
-            f"RSI: {tf15['rsi']:.1f} | MACD: {tf15['macd']:.3f}\n"
-            f"VS: {tf15['vol_strength']:.0f}% | RMF: {rmf:.0f}\n"
-            f"Evitar novas entradas por enquanto.\n"
-            f"{now_br()} BR"
-        ))
-
-    # 6) Entrada Antecipada Real (15m)
-    if tf15["macd_hist"] > 0 and tf15["rsi"] > 50 and tf15["vol_strength"] > 120 and rmf > 0 and (tf15["ema9"] >= tf15["ema20"] or tf30["macd"] > 0):
-        out.append(("15m","ANTECIPADA",
-            f"⚡ ENTRADA ANTECIPADA REAL (15M)\n"
-            f"{remove_usdt(sym)}\n\n"
-            f"RSI: {tf15['rsi']:.1f} | MACD(H): {tf15['macd_hist']:.3f}\n"
-            f"VS: {tf15['vol_strength']:.0f}% | RMF: {rmf:.0f}\n"
-            f"Bollinger abrindo? {'SIM' if (tf15['boll_w'] and tf15['boll_w']>0.02) else 'NÃO'}\n"
-            f"{now_br()} BR"
-        ))
     return out
 
-# ----------------- Scan de símbolo -----------------
+# ----------------- Scan por símbolo -----------------
 async def scan_symbol(session, symbol):
     t24 = await ticker24(session, symbol)
     if not t24: return
+
     try:
-        vol_quote_24h = float(t24.get("quoteVolume", "0") or 0)
+        vol_quote_24h = float(t24.get("quoteVolume", "0") or 0.0)
     except:
         vol_quote_24h = 0.0
-    if vol_quote_24h < 10_000_000:  # bloqueio moedas mortas
-        return
-
-    taker_buy_q = float(t24.get("takerBuyQuoteAssetVolume", "0") or 0.0)
-    taker_sell_q = max(vol_quote_24h - taker_buy_q, 0.0)
+    if vol_quote_24h < VOLUME_MIN_USDT:
+        return  # moeda morta/baixa liquidez
 
     k15 = await klines(session, symbol, "15m", 240)
     k30 = await klines(session, symbol, "30m", 240)
@@ -268,11 +215,11 @@ async def scan_symbol(session, symbol):
     o30,h30,l30,c30,v30 = extract(k30)
     o1h,h1h,l1h,c1h,v1h = extract(k1h)
 
-    tf15 = analyze_tf(o15, h15, l15, c15, v15, "15m")
-    tf30 = analyze_tf(o30, h30, l30, c30, v30, "30m")
-    tf1h = analyze_tf(o1h, h1h, l1h, c1h, v1h, "1h")
+    tf15 = analyze_tf(o15,h15,l15,c15,v15)
+    tf30 = analyze_tf(o30,h30,l30,c30,v30)
+    tf1h = analyze_tf(o1h,h1h,l1h,c1h,v1h)
 
-    alerts = decide_alerts(symbol, tf1h, tf30, tf15, taker_buy_q, taker_sell_q)
+    alerts = decide_alerts(symbol, tf1h, tf30, tf15)
     for tf, key, msg in alerts:
         if can_alert(tf, symbol, key):
             await tg(session, msg)
@@ -280,38 +227,30 @@ async def scan_symbol(session, symbol):
 # ----------------- Loop principal -----------------
 async def main_loop():
     async with aiohttp.ClientSession() as session:
-        await tg(session, f"<b>OURO CONFLUÊNCIA EMA ATIVO</b>\n15m/30m/1h • {now_br()} BR")
+        await tg(session, f"<b>V6.3C TENDÊNCIA CURTA ATIVO</b>\n15m/30m/1h • {now_br()} BR")
         while True:
             try:
                 data = await all_tickers24(session)
                 if not data:
                     await asyncio.sleep(10); continue
+                # Filtra pares bons
                 syms = [
                     d["symbol"] for d in data
                     if d["symbol"].endswith("USDT")
                     and "UP" not in d["symbol"] and "DOWN" not in d["symbol"]
-                    and not any(x in d["symbol"] for x in ["BUSD","FDUSD","USDC","TUSD","AEUR","XAUT"])
+                    and not any(x in d["symbol"] for x in ["BUSD","FDUSD","USDC","TUSD","AEUR","XAUT","EUR","GBP","TRY","AUD","BRL","RUB","CAD","CHF","JPY"])
                 ]
+                # Top por volume
                 top = sorted(
                     syms,
                     key=lambda s: float(next((x["quoteVolume"] for x in data if x["symbol"]==s), "0") or 0.0),
                     reverse=True
                 )[:80]
 
-                tasks = [scan_symbol(session, s) for s in top]
-                await asyncio.gather(*tasks)
+                await asyncio.gather(*(scan_symbol(session, s) for s in top))
             except Exception as e:
                 print("Loop erro:", e)
             await asyncio.sleep(60)
-
-# ----------------- Flask -----------------
-@app.route("/")
-def home():
-    return "OURO CONFLUÊNCIA EMA v1.1 (15m/30m/1h) ATIVO", 200
-
-@app.route("/health")
-def health():
-    return "OK", 200
 
 # ----------------- Start -----------------
 if __name__ == "__main__":
