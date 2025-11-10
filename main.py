@@ -1,369 +1,325 @@
-# main_short.py — V7.1D (TENDÊNCIA CURTA — ALERTAS INTELIGENTES)
-# - Timeframes: 15m, 30m, 1h (somente esses alertam)
-# - Filtros: volume 24h >= 10M USDT; remove UP/DOWN/stables/fiat/sintéticos
-# - Indicadores: EMA9/20/50/200, RSI(14), MACD(12,26,9), ATR(14), Volume Strength (vs MA9/MA21 do volume)
-# - Alertas: ROMPIMENTO / RETESTE(20/50) / CONTINUAÇÃO / ANTECIPADA
-# - Mensagem: Entrada/Stop/Alvo (ATR), Probabilidade (%), moeda sem "USDT"
-# - Render Safe: Flask + /health, loop assíncrono
+# main_short.py — V7.2D (Render Safe)
+# TENDÊNCIA CURTA (15m, 30m, 1h) — EMAs, filtros de volume, alertas didáticos (rompimento/reteste/continuação),
+# mensagens com Entrada/Stop/Alvo/Probabilidade, nomes sem “USDT” e cooldown anti-spam.
+#
+# VARS DE AMBIENTE ESPERADAS NO RENDER:
+#   TELEGRAM_TOKEN, CHAT_ID
+#
+# Requisitos: aiohttp, flask
 
-import os, asyncio, aiohttp, time
-from datetime import datetime, timedelta, timezone
+import os, asyncio, aiohttp, time, math, statistics
+from datetime import datetime, timezone, timedelta
 from flask import Flask
 
-# ----------------- Flask (Render-safe) -----------------
+# ---------- CONFIG ----------
+BINANCE = "https://api.binance.com"
+TF_LIST = ["15m","30m","1h"]                 # timeframes ativos
+LOOKBACK = 300                               # candles por símbolo/TF (suficiente p/ EMA200)
+COOLDOWN_MIN = 15                            # min p/ repetir o MESMO tipo de alerta do mesmo TF
+USDTVOL_MIN = 10_000_000                     # volume mínimo 24h em USDT (10M)
+STABLES = {"USDT","USDC","FDUSD","TUSD","DAI","PYUSD","EUR","BUSD"}
+EXCLUDE_SUBSTR = ("UPUSDT","DOWNUSDT","BULL","BEAR","3LUSDT","3SUSDT","5LUSDT","5SUSDT")
+EMA_FAST = 12; EMA_SLOW = 26; EMA_SIG = 9
+# tolerâncias de reteste (proximidade da média)
+RET_200_TOL = 0.004    # 0,4%
+RET_50_TOL  = 0.006    # 0,6%
+
+# ---------- WEB / APP ----------
 app = Flask(__name__)
-
-@app.route("/")
+@app.get("/")
 def home():
-    return "V7.1D TENDÊNCIA CURTA (15m/30m/1h) ATIVO", 200
+    return "V7.2D TENDÊNCIA CURTA ON", 200
 
-@app.route("/health")
+@app.get("/health")
 def health():
     return "OK", 200
 
-# ----------------- Config -----------------
-BINANCE = "https://api.binance.com"
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
-CHAT_ID = os.getenv("CHAT_ID", "").strip()
-
-VOLUME_MIN_USDT = 10_000_000  # filtro de liquidez
-COOLDOWN_SECONDS = {"15m": 15*60, "30m": 30*60, "1h": 60*60}
-cooldowns = {"15m": {}, "30m": {}, "1h": {}}
-
-# ----------------- Utils -----------------
+# ---------- UTILS ----------
 def now_br():
-    return (datetime.now(timezone.utc) - timedelta(hours=3)).strftime("%d/%m %H:%M BR")
+    return datetime.now(timezone(timedelta(hours=-3)))  # BRT fixo
 
-def remove_usdt(sym: str) -> str:
-    return sym[:-4] if sym.endswith("USDT") else sym
+def ema(series, period):
+    if len(series) < period: return [None]*len(series)
+    k = 2/(period+1)
+    out = []
+    ema_val = None
+    for i, x in enumerate(series):
+        if i == period-1:
+            ema_val = sum(series[:period])/period
+            out.append(ema_val)
+        elif i >= period:
+            ema_val = x*k + ema_val*(1-k)
+            out.append(ema_val)
+        else:
+            out.append(None)
+    return out
 
-async def tg(session, text):
-    if not TELEGRAM_TOKEN or not CHAT_ID:
-        print("\n===== TELEGRAM (preview) =====\n" + text + "\n==============================\n")
+def macd(close):
+    e12 = ema(close, EMA_FAST)
+    e26 = ema(close, EMA_SLOW)
+    macd_line = []
+    for a,b in zip(e12, e26):
+        macd_line.append(None if (a is None or b is None) else a-b)
+    # signal
+    sig = ema([x if x is not None else 0 for x in macd_line], EMA_SIG)
+    hist = []
+    for m, s in zip(macd_line, sig):
+        hist.append(None if (m is None or s is None) else m - s)
+    return macd_line, sig, hist
+
+def rsi(close, period=14):
+    if len(close) < period+1: return [None]*len(close)
+    gains, losses = [], []
+    out = [None]*(period)
+    for i in range(1, period+1):
+        ch = close[i]-close[i-1]
+        gains.append(max(ch,0)); losses.append(max(-ch,0))
+    avg_gain = sum(gains)/period
+    avg_loss = sum(losses)/period
+    rs = (avg_gain/(avg_loss if avg_loss!=0 else 1e-9))
+    out.append(100 - (100/(1+rs)))
+    for i in range(period+1, len(close)):
+        ch = close[i]-close[i-1]
+        gain = max(ch,0); loss = max(-ch,0)
+        avg_gain = (avg_gain*(period-1)+gain)/period
+        avg_loss = (avg_loss*(period-1)+loss)/period
+        rs = (avg_gain/(avg_loss if avg_loss!=0 else 1e-9))
+        out.append(100 - (100/(1+rs)))
+    return out
+
+def sma(series, n):
+    out = []
+    s = 0
+    for i,x in enumerate(series):
+        s += x
+        if i>=n: s -= series[i-n]
+        out.append(None if i<n-1 else s/n)
+    return out
+
+def pct(a,b):
+    if b == 0: return 0
+    return (a-b)/b*100
+
+def near(x,y, tol):
+    return abs((x-y)/y) <= tol
+
+def fmt(x, digits=6):
+    try:
+        # formatação numérica curta sem notação científica pra cripto
+        return f"{x:.6f}".rstrip('0').rstrip('.')
+    except:
+        return str(x)
+
+# ---------- TELEGRAM ----------
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN","").strip()
+CHAT_ID = os.getenv("CHAT_ID","").strip()
+
+async def send_tele(session, text):
+    if not TELEGRAM_TOKEN or not CHAT_ID: 
         return
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": CHAT_ID,
+        "text": text,
+        "parse_mode": "Markdown"
+    }
     try:
-        await session.post(
-            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-            data={"chat_id": CHAT_ID, "text": text, "parse_mode": "HTML", "disable_web_page_preview": True},
-            timeout=12
-        )
-    except Exception as e:
-        print("Erro Telegram:", e)
+        async with session.post(url, json=payload, timeout=20) as r:
+            await r.text()
+    except:
+        pass
 
-async def get_json(session, url, timeout=12):
-    try:
-        async with session.get(url, timeout=timeout) as r:
-            if r.status == 200:
+# ---------- CACHE DE ALERTAS ----------
+_last_alert = {}  # key: (symbol, tf, kind) -> ts
+
+def can_alert(symbol, tf, kind):
+    key = (symbol, tf, kind)
+    ts = _last_alert.get(key, 0)
+    return (time.time() - ts) >= COOLDOWN_MIN*60
+
+def mark_alert(symbol, tf, kind):
+    _last_alert[(symbol, tf, kind)] = time.time()
+
+# ---------- BINANCE HELPERS ----------
+async def fetch_json(session, url, params=None):
+    for _ in range(2):
+        try:
+            async with session.get(url, params=params, timeout=25) as r:
                 return await r.json()
-    except Exception as e:
-        print("HTTP erro:", e, url)
+        except:
+            await asyncio.sleep(0.8)
     return None
 
-def can_alert(tf, sym, key):
-    bucket = cooldowns[tf].setdefault(sym, {})
-    now = time.time()
-    last = bucket.get(key, 0)
-    if now - last >= COOLDOWN_SECONDS[tf]:
-        bucket[key] = now
-        return True
-    return False
+async def get_usdt_symbols(session):
+    info = await fetch_json(session, f"{BINANCE}/api/v3/exchangeInfo")
+    syms = []
+    if not info or "symbols" not in info: return syms
+    for s in info["symbols"]:
+        sym = s["symbol"]
+        q = s.get("quoteAsset","")
+        if q=="USDT" and s.get("status")=="TRADING":
+            if any(tag in sym for tag in EXCLUDE_SUBSTR): 
+                continue
+            base = sym.replace("USDT","")
+            if base in STABLES: 
+                continue
+            syms.append(sym)
+    return syms
 
-# ----------------- Indicadores -----------------
-def ema(series, period):
-    if not series: return []
-    a = 2.0 / (period + 1.0)
-    e = series[0]
-    out = [e]
-    for x in series[1:]:
-        e = a * x + (1 - a) * e
-        out.append(e)
+async def get_24h(session, symbols):
+    # retorna dict symbol -> quoteVolume (float), lastPrice
+    out = {}
+    data = await fetch_json(session, f"{BINANCE}/api/v3/ticker/24hr")
+    if not data: return out
+    m = {d["symbol"]: d for d in data}
+    for s in symbols:
+        d = m.get(s)
+        if d:
+            qv = float(d.get("quoteVolume","0"))
+            lastp = float(d.get("lastPrice","0"))
+            out[s] = (qv, lastp)
     return out
 
-def sma(values, p):
-    if len(values) < p: return None
-    return sum(values[-p:]) / p
-
-def rsi(prices, p=14):
-    if len(prices) < p + 1: return 50.0
-    dif = [prices[i] - prices[i-1] for i in range(1, len(prices))]
-    gains = [max(x, 0) for x in dif[-p:]]
-    losses = [abs(min(x, 0)) for x in dif[-p:]]
-    ag = sum(gains) / p
-    al = sum(losses) / p if sum(losses) != 0 else 1e-12
-    rs = ag / al
-    return 100 - 100/(1+rs)
-
-def macd(prices, fast=12, slow=26, signal=9):
-    if len(prices) < slow + signal:
-        return 0.0, 0.0, 0.0
-    ef = ema(prices, fast)
-    es = ema(prices, slow)
-    macd_line_full = [a-b for a,b in zip(ef[-len(es):], es)]
-    signal_line_full = ema(macd_line_full, signal)
-    macd_line = macd_line_full[-1]
-    signal_line = signal_line_full[-1]
-    hist = macd_line - signal_line
-    return macd_line, signal_line, hist
-
-def atr(highs, lows, closes, p=14):
-    if len(closes) < p + 1: return None
-    trs = []
-    for i in range(1, len(closes)):
-        hl = highs[i] - lows[i]
-        hc = abs(highs[i] - closes[i-1])
-        lc = abs(lows[i] - closes[i-1])
-        trs.append(max(hl, hc, lc))
-    if len(trs) < p: return None
-    return sum(trs[-p:]) / p  # média simples (robusta)
-
-def volume_strength(volumes):
-    if len(volumes) < 22: return 100.0
-    v_now = volumes[-1]
-    ma9 = sma(volumes, 9)
-    ma21 = sma(volumes, 21)
-    base = (ma9 + ma21) / 2 if (ma9 and ma21) else (ma9 or ma21 or 1e-9)
-    return 100.0 * (v_now / base) if base > 0 else 100.0
-
-# ----------------- Binance helpers -----------------
-async def klines(session, symbol, interval, limit=240):
-    url = f"{BINANCE}/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
-    return await get_json(session, url) or []
-
-async def ticker24(session, symbol):
-    url = f"{BINANCE}/api/v3/ticker/24hr?symbol={symbol}"
-    return await get_json(session, url)
-
-async def all_tickers24(session):
-    url = f"{BINANCE}/api/v3/ticker/24hr"
-    return await get_json(session, url) or []
-
-# ----------------- Parsing de klines -----------------
-def extract_ohlcv(k):
-    o = [float(x[1]) for x in k]
-    h = [float(x[2]) for x in k]
-    l = [float(x[3]) for x in k]
-    c = [float(x[4]) for x in k]
-    v = [float(x[7]) for x in k]  # volume base
-    return o,h,l,c,v
-
-def analyze_tf(opens, highs, lows, closes, volumes):
-    price = closes[-1]
-    e9  = ema(closes, 9)[-1]
-    e20 = ema(closes, 20)[-1]
-    e50 = ema(closes, 50)[-1]  if len(closes) >= 50  else None
-    e200= ema(closes, 200)[-1] if len(closes) >= 200 else None
-    r = rsi(closes, 14)
-    m_line, m_sig, m_hist = macd(closes, 12, 26, 9)
-    vs = volume_strength(volumes)
-    a = atr(highs, lows, closes, 14)
-    prev_close = closes[-2] if len(closes) >= 2 else price
-    body_pct = ((price - prev_close) / prev_close) * 100 if prev_close else 0.0
-    return {
-        "price": price, "ema9": e9, "ema20": e20, "ema50": e50, "ema200": e200,
-        "rsi": r, "macd": m_line, "macd_sig": m_sig, "macd_hist": m_hist,
-        "atr": a, "vol_strength": vs, "body_pct": body_pct
+async def get_klines(session, symbol, interval, limit=LOOKBACK):
+    params = {"symbol": symbol, "interval": interval, "limit": limit}
+    data = await fetch_json(session, f"{BINANCE}/api/v3/klines", params)
+    if not data: return None
+    # kline: [open time, open, high, low, close, volume, ...]
+    out = {
+        "open_time":[int(k[0]) for k in data],
+        "open":[float(k[1]) for k in data],
+        "high":[float(k[2]) for k in data],
+        "low":[float(k[3]) for k in data],
+        "close":[float(k[4]) for k in data],
+        "vol":[float(k[5]) for k in data],
+        "close_time":[int(k[6]) for k in data]
     }
-
-# ----------------- Probabilidade -----------------
-def prob_score(tf_data, context_above_200=False):
-    score = 50.0
-    rsi_v = tf_data["rsi"]
-    hist = tf_data["macd_hist"]
-    vs = tf_data["vol_strength"]
-    price = tf_data["price"]
-    e9 = tf_data["ema9"]; e20 = tf_data["ema20"]
-
-    # RSI
-    if 55 <= rsi_v <= 65: score += 8
-    elif rsi_v > 65: score += 5
-    elif rsi_v < 45: score -= 8
-
-    # MACD hist
-    if hist > 0.002: score += 10
-    elif hist > 0: score += 6
-    else: score -= 10
-
-    # Volume
-    if vs >= 140: score += 12
-    elif vs >= 110: score += 8
-    elif vs < 90: score -= 6
-
-    # Estrutura
-    if price > e20 and price > e9: score += 6
-    if context_above_200: score += 6
-
-    return int(max(5.0, min(95.0, score)))
-
-# ----------------- Classificação do alerta (sem mudar gatilho) -----------------
-def classify_flags(tf_tag, t, prev_t=None, allow_anticipada=True):
-    """
-    Gera flags para rótulo do alerta:
-      - break_ema50 / break_ema200
-      - retest_ema20 / retest_ema50
-      - continuation
-      - antecipada
-    Usa comparação simples com médias e corpo/VS/MACD; não altera o momento do disparo.
-    """
-    flags = {}
-
-    # Rompimento (quando preço cruza/regressa e agora está acima)
-    if t["ema50"] and t["price"] > t["ema50"] and prev_t and prev_t["price"] <= prev_t["ema50"]:
-        flags["break_ema50"] = True
-    if t["ema200"] and t["price"] > t["ema200"] and prev_t and prev_t["price"] <= prev_t["ema200"]:
-        flags["break_ema200"] = True
-
-    # Reteste (preço próximo da 20 ou 50 e reagindo positivo)
-    near20 = abs(t["price"] - t["ema20"]) / t["price"] < 0.006
-    near50 = (t["ema50"] is not None) and abs(t["price"] - t["ema50"]) / t["price"] < 0.006
-    if near20 and t["body_pct"] >= 0 and t["rsi"] >= 50:
-        flags["retest_ema20"] = True
-    if near50 and t["body_pct"] >= 0 and t["rsi"] >= 50:
-        flags["retest_ema50"] = True
-
-    # Continuação (acima da 9 e histograma positivo/subindo)
-    if t["price"] > t["ema9"] and t["macd_hist"] >= 0:
-        flags["continuation"] = True
-
-    # Antecipada (momento antes do “setup clássico”)
-    if allow_anticipada and (t["rsi"] >= 52 and t["macd_hist"] > 0 and t["vol_strength"] >= 120):
-        flags["antecipada"] = True
-
-    return flags
-
-def kind_from_flags(flags):
-    if flags.get("retest_ema200"): return "🔁 RETESTE EMA200"
-    if flags.get("retest_ema50"):  return "🔁 RETESTE EMA50"
-    if flags.get("break_ema200"):  return "⚡ ROMPIMENTO EMA200"
-    if flags.get("break_ema50"):   return "⚡ ROMPIMENTO EMA50"
-    if flags.get("antecipada"):    return "🚀 ENTRADA ANTECIPADA"
-    if flags.get("continuation"):  return "💪 CONTINUAÇÃO"
-    return "📊 OPORTUNIDADE"
-
-def fmt_alert(tf_tag, sym, t, entry, stop, target, prob, flags):
-    name = remove_usdt(sym)
-    titulo = f"{kind_from_flags(flags)} <b>TENDÊNCIA CURTA ({tf_tag.upper()})</b>\n<b>{name}</b>"
-    corpo = (
-        f"\n\n<b>Preço:</b> <code>{t['price']:.6f}</code>"
-        f"\n<b>RSI:</b> <code>{t['rsi']:.1f}</code> | <b>MACD:</b> <code>{t['macd']:.3f}</code> | <b>VS:</b> <code>{int(t['vol_strength'])}%</code>"
-        f"\n<b>🎯 Entrada:</b> <code>{entry:.6f}</code>"
-        f"\n<b>🟥 Stop:</b> <code>{stop:.6f}</code>"
-        f"\n<b>🟩 Alvo:</b> <code>{target:.6f}</code>"
-        f"\n<b>📈 Probabilidade:</b> <code>{prob}%</code>"
-        f"\n<i>{now_br()}</i>"
-    )
-    return titulo + corpo
-
-# ----------------- Regras de alerta (mantendo lógica de disparo base) -----------------
-def decide_alerts(sym, tf1h, tf30, tf15, prev1h=None, prev30=None, prev15=None):
-    out = []
-
-    context_1h_above200 = bool(tf1h["ema200"] and tf1h["price"] > tf1h["ema200"])
-
-    # 1) 1h — confirmação estrutural (sem mudar timing)
-    if tf1h["atr"] and tf1h["ema200"] and tf1h["price"] > tf1h["ema200"] and tf1h["rsi"] > 50 and tf1h["macd"] > 0 and tf1h["vol_strength"] > 110:
-        entry = tf1h["price"]; atrv = tf1h["atr"]
-        stop  = entry - 1.5*atrv
-        target= entry + 2.5*atrv
-        prob  = prob_score(tf1h, context_above_200=True)
-        flags = classify_flags("1h", tf1h, prev1h, allow_anticipada=False)  # 1h foca estrutura
-        out.append(("1h", "ESTRUTURA", fmt_alert("1h", sym, tf1h, entry, stop, target, prob, flags)))
-
-    # 2) 30m — reteste/continuação (sem mudar timing)
-    if tf30["atr"]:
-        entry = tf30["price"]; atrv = tf30["atr"]
-        stop  = entry - 1.5*atrv
-        target= entry + 2.5*atrv
-        flags = classify_flags("30m", tf30, prev30, allow_anticipada=False)
-        prob  = prob_score(tf30, context_above_200=context_1h_above200)
-        out.append(("30m", "M30", fmt_alert("30m", sym, tf30, entry, stop, target, prob, flags)))
-
-    # 3) 15m — gatilho curto (sem mudar timing)
-    if tf15["atr"]:
-        entry = tf15["price"]; atrv = tf15["atr"]
-        stop  = entry - 1.5*atrv
-        target= entry + 2.5*atrv
-        flags = classify_flags("15m", tf15, prev15, allow_anticipada=True)
-        prob  = prob_score(tf15, context_above_200=context_1h_above200)
-        out.append(("15m", "M15", fmt_alert("15m", sym, tf15, entry, stop, target, prob, flags)))
-
     return out
 
-# ----------------- Scan por símbolo -----------------
-async def scan_symbol(session, symbol):
-    t24 = await ticker24(session, symbol)
-    if not t24: return
+# ---------- LÓGICA DE SINAL ----------
+def build_signal(symbol, tf, ohlc):
+    close = ohlc["close"]; high=ohlc["high"]; low=ohlc["low"]; vol=ohlc["vol"]
+    if len(close) < 210: return None
 
-    try:
-        vol_quote_24h = float(t24.get("quoteVolume", "0") or 0.0)
-    except:
-        vol_quote_24h = 0.0
-    if vol_quote_24h < VOLUME_MIN_USDT:
-        return
+    ema9  = ema(close, 9)
+    ema50 = ema(close, 50)
+    ema200= ema(close, 200)
+    rsi14 = rsi(close, 14)
+    m_line, m_sig, m_hist = macd(close)
 
-    k15 = await klines(session, symbol, "15m", 240)
-    k30 = await klines(session, symbol, "30m", 240)
-    k1h = await klines(session, symbol, "1h", 300)
-    if not (k15 and k30 and k1h): 
-        return
+    i = len(close)-1
+    c  = close[i]; p1 = close[i-1]
+    e9 = ema9[i]; e50= ema50[i]; e200= ema200[i]
+    r  = rsi14[i] if rsi14[i] is not None else 50
+    mac = m_line[i] if m_line[i] is not None else 0
+    mac_prev = m_line[i-1] if m_line[i-1] is not None else 0
 
-    o15,h15,l15,c15,v15 = extract_ohlcv(k15)
-    o30,h30,l30,c30,v30 = extract_ohlcv(k30)
-    o1h,h1h,l1h,c1h,v1h = extract_ohlcv(k1h)
+    # Volume Strength simples: vol atual vs SMA9/SMA21
+    vma9  = sma(vol, 9)[i]
+    vma21 = sma(vol,21)[i]
+    vs = 0
+    if vma9 and vma21 and vma21>0:
+        vs = max(0, (vol[i]/max(vma9,vma21))*100)  # %
+    vs_cap = max(1, min(500, vs))                 # clamp para texto
 
-    tf15 = analyze_tf(o15,h15,l15,c15,v15)
-    tf30 = analyze_tf(o30,h30,l30,c30,v30)
-    tf1h = analyze_tf(o1h,h1h,l1h,c1h,v1h)
+    # CONDIÇÕES
+    bullish_struct = (c>e9 and c>e50 and c>e200)
+    macd_rising = mac > mac_prev
+    rsi_ok = r >= 55
 
-    # estados anteriores (para detectar rompimento/reteste recente)
-    if len(c15) > 1:
-        prev15 = analyze_tf(o15[:-1], h15[:-1], l15[:-1], c15[:-1], v15[:-1])
+    # 1) Rompimento EMA200 (primeiro fechamento acima com filtros)
+    romp_200 = (p1 <= ema200[i-1] and c > e200 and rsi_ok and macd_rising)
+
+    # 2) Reteste EMA200 (mínima toca/região e fecha acima da EMA9)
+    ret_200 = (near(low[i], e200, RET_200_TOL) or low[i] <= e200*(1+RET_200_TOL)) and (c>e9 and e50>=e200*0.99)
+
+    # 3) Reteste EMA50 (toque/região + fechamento acima da EMA9)
+    ret_50 = (near(low[i], e50, RET_50_TOL) or low[i] <= e50*(1+RET_50_TOL)) and (c>e9 and c>e50 and e50>=e200*0.9)
+
+    # 4) Continuação confirmada (break do topo recente com estrutura alinhada)
+    prev_high = max(high[i-3:i]) if i>=3 else high[i-1]
+    cont = bullish_struct and c>prev_high and rsi_ok and macd_rising
+
+    kind = None
+    if romp_200: kind = "Rompimento EMA200"
+    elif ret_200: kind = "Reteste EMA200"
+    elif ret_50:  kind = "Reteste EMA50"
+    elif cont:    kind = "Continuação confirmada"
     else:
-        prev15 = None
-    if len(c30) > 1:
-        prev30 = analyze_tf(o30[:-1], h30[:-1], l30[:-1], c30[:-1], v30[:-1])
-    else:
-        prev30 = None
-    if len(c1h) > 1:
-        prev1h = analyze_tf(o1h[:-1], h1h[:-1], l1h[:-1], c1h[:-1], v1h[:-1])
-    else:
-        prev1h = None
+        return None
 
-    alerts = decide_alerts(symbol, tf1h, tf30, tf15, prev1h, prev30, prev15)
-    for tf, key, msg in alerts:
-        if can_alert(tf, symbol, key):
-            await tg(session, msg)
+    # ENTRADA/STOP/ALVO (simples, automáticos e coerentes)
+    entrada = c
+    swing_low = min(low[i-5:i]) if i>=5 else min(low[i-3:i])
+    # stop um pouco abaixo do swing/EMA50 (o que for mais próximo, com margem de 0,35%)
+    base_stop = max(swing_low, e50*0.997)
+    stop = min(entrada*0.985, base_stop)  # nunca acima da entrada
+    # alvo: topo anterior ou RR ~1.6x
+    topo_ref = max(high[i-10:i])
+    rr_target = entrada + (entrada - stop)*1.6
+    alvo = max(rr_target, topo_ref)
 
-# ----------------- Loop principal -----------------
-async def main_loop():
+    # Probabilidade (heurística leve)
+    prob = 50
+    prob += min(20, (r-55)*0.8 if r>=55 else (r-50)*0.3)
+    prob += 10 if macd_rising and mac>0 else -5
+    prob += min(20, (vs_cap-100)/5)  # VS>100% ganha pontos
+    prob += 5 if bullish_struct else 0
+    prob = int(max(25, min(92, round(prob))))
+
+    # Texto (sem USDT no nome)
+    base = symbol.replace("USDT","")
+    hdr_emoji = "📈"
+    titulo = f"*{hdr_emoji} TENDÊNCIA CURTA ({tf.upper()})*\n*{base}*"
+    linhas = [
+        f"\n*Preço:* {fmt(c)}",
+        f"*RSI:* {fmt(r,1)} | *MACD:* {fmt(mac,3)} | *VS:* {fmt(vs_cap)}%",
+        f"*Tipo:* {kind}",
+        f"🎯 *Entrada:* {fmt(entrada)}",
+        f"🧯 *Stop:* {fmt(stop)}",
+        f"🟩 *Alvo:* {fmt(alvo)}",
+        f"📊 *Probabilidade:* {prob}%\n{now_br().strftime('%d/%m %H:%M')} BR"
+    ]
+    msg = titulo + "\n" + "\n".join(linhas)
+    return {"kind":kind, "tf":tf, "msg":msg}
+
+# ---------- LOOP PRINCIPAL ----------
+async def worker():
+    await asyncio.sleep(2)
     async with aiohttp.ClientSession() as session:
-        await tg(session, f"<b>BOT V7.1D ATIVO</b>\nMonitorando 15m, 30m e 1h • {now_br()}")
+        symbols = await get_usdt_symbols(session)
+        # filtro volume 24h
+        vol24 = await get_24h(session, symbols)
+        watch = [s for s in symbols if s in vol24 and vol24[s][0] >= USDTVOL_MIN]
+        # loop
         while True:
             try:
-                data = await all_tickers24(session)
-                if not data:
-                    await asyncio.sleep(10); continue
-                syms = [
-                    d["symbol"] for d in data
-                    if d["symbol"].endswith("USDT")
-                    and "UP" not in d["symbol"] and "DOWN" not in d["symbol"]
-                    and not any(x in d["symbol"] for x in [
-                        "BUSD","FDUSD","USDC","TUSD","AEUR","XAUT",  # stables/sintéticos
-                        "EUR","GBP","TRY","AUD","BRL","RUB","CAD","CHF","JPY"  # fiat
-                    ])
-                ]
-                # top por volume
-                top = sorted(
-                    syms,
-                    key=lambda s: float(next((x["quoteVolume"] for x in data if x["symbol"]==s), "0") or 0.0),
-                    reverse=True
-                )[:80]
-                await asyncio.gather(*(scan_symbol(session, s) for s in top))
+                for tf in TF_LIST:
+                    # processa em blocos para não estourar rate limit
+                    for idx in range(0, len(watch), 40):
+                        batch = watch[idx:idx+40]
+                        tasks = [get_klines(session, s, tf) for s in batch]
+                        kl_list = await asyncio.gather(*tasks)
+                        for s, ohlc in zip(batch, kl_list):
+                            if not ohlc: 
+                                continue
+                            sig = build_signal(s, tf, ohlc)
+                            if not sig: 
+                                continue
+                            kind = sig["kind"]
+                            if can_alert(s, tf, kind):
+                                await send_tele(session, sig["msg"])
+                                mark_alert(s, tf, kind)
+                        await asyncio.sleep(0.25)
+                await asyncio.sleep(15)  # gira rápido mas leve
             except Exception as e:
-                print("Loop erro:", e)
-            await asyncio.sleep(60)
+                # falha resiliente
+                await asyncio.sleep(3)
 
-# ----------------- Start -----------------
+def run_loop():
+    loop = asyncio.get_event_loop()
+    loop.create_task(worker())
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", "10000")), debug=False)
+
 if __name__ == "__main__":
-    import threading
-    threading.Thread(target=lambda: asyncio.run(main_loop()), daemon=True).start()
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", "10000")))
+    run_loop()
