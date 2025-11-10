@@ -1,5 +1,5 @@
-# main.py — V23.0 (OURO CONFLUÊNCIA REAL)
-# 3m: ALTAS REAIS (BB abrindo + EMA9>MA20 + RSI 50–80 + MACD↑ + volume_strength>130% + real_money_flow>55%)
+# main.py — V23.2 (OURO CONFLUÊNCIA REAL — 3m Ajustado RSI 40–80)
+# 3m: ALTAS REAIS (BB abrindo + EMA9>MA20 + RSI 40–80 + MACD↑ + volume_strength>110% + real_money_flow>45%)
 # 15m/30m: confirmadores rápidos (cruzamento imediato + RSI>50 + MACD>0)
 
 import os, asyncio, aiohttp, time
@@ -10,7 +10,7 @@ import threading
 app = Flask(__name__)
 @app.route("/")
 def home():
-    return "V23.0 ATIVO (3M CONFLUÊNCIA REAL + 15/30 CONFIRMAÇÃO)", 200
+    return "V23.2 ATIVO (3M AJUSTADO RSI 40–80 + 15/30 CONFIRMAÇÃO)", 200
 
 @app.route("/health")
 def health():
@@ -21,10 +21,10 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 CHAT_ID = os.getenv("CHAT_ID", "").strip()
 
 # ---------- PARÂMETROS AJUSTÁVEIS ----------
-RSI_MIN_3M, RSI_MAX_3M = 50, 80           # força saudável (evita topo e fraqueza)
-VOL_STRENGTH_MIN = 130                    # % vs média (MA9/MA21) para volume forte
-REAL_FLOW_MIN = 55                        # % takerBuy dominance (entrada real)
-BB_OPEN_MIN_GROWTH = 1.03                 # BB abrindo: largura atual > 3% acima da anterior
+RSI_MIN_3M, RSI_MAX_3M = 40, 80
+VOL_STRENGTH_MIN = 110
+REAL_FLOW_MIN = 45
+BB_OPEN_MIN_GROWTH = 1.01
 COOLDOWN = {"3m": 180, "15m": 900, "30m": 1800}
 MIN_VOL24 = 3_000_000
 TOP_N = 100
@@ -123,7 +123,6 @@ async def scan_tf(s, sym, tf):
         close = [float(x[4]) for x in k]
         vol   = [float(x[5]) for x in k]
 
-        # EMAs projetadas na vela atual
         ema9_prev  = ema(close[:-1], 9)
         ema20_prev = ema(close[:-1], 20)
         if len(ema9_prev) < 2 or len(ema20_prev) < 2: return
@@ -133,47 +132,42 @@ async def scan_tf(s, sym, tf):
 
         current_rsi = rsi(close)
 
-        # ===== 3m — ALTAS REAIS =====
+        # ===== 3m ajustado =====
         if tf == "3m":
-            # (1) BB abrindo
             bb_ok, bb_width = bb_opening(close)
             if not bb_ok: return
 
-            # (2) Cruzamento imediato ou na vela anterior
             cruz = (
                 (ema9_prev[-1] <= ema20_prev[-1] and ema9_atual > ema20_atual*1.0002) or
                 (ema9_prev[-2] <= ema20_prev[-2] and ema9_prev[-1] > ema20_prev[-1])
             )
             if not cruz: return
 
-            # (3) RSI saudável
             if not (RSI_MIN_3M <= current_rsi <= RSI_MAX_3M): return
 
-            # (4) MACD crescente / histograma positivo
             macd_line   = ema(close,12)[-1] - ema(close,26)[-1]
             signal_line = ema(close,9)[-1]
             macd_hist   = macd_line - signal_line
             if macd_hist <= 0: return
 
-            # (5) Volume forte vs média (MA9/MA21)
             ma9  = sum(vol[-9:])/9
             ma21 = sum(vol[-21:])/21
             base = (ma9 + ma21)/2 or 1e-12
             volume_strength = (vol[-1]/base)*100
             if volume_strength < VOL_STRENGTH_MIN: return
 
-            # (6) Fluxo real comprador (takers)
             taker_buy_quote = float(t.get("takerBuyQuoteAssetVolume", 0))
             real_money_flow = (taker_buy_quote / (vol24 or 1e-12)) * 100
             if real_money_flow < REAL_FLOW_MIN: return
 
-            # Dados extras para mensagem
             extras = {
-                "bb_width": bb_width, "volume_strength": volume_strength,
-                "real_money_flow": real_money_flow, "macd_hist": macd_hist
+                "bb_width": bb_width,
+                "volume_strength": volume_strength,
+                "real_money_flow": real_money_flow,
+                "macd_hist": macd_hist
             }
 
-        # ===== 15m / 30m — CONFIRMAÇÃO =====
+        # ===== 15m / 30m confirmadores =====
         else:
             cruz = (
                 (ema9_prev[-1] <= ema20_prev[-1] and ema9_atual > ema20_atual) or
@@ -222,7 +216,7 @@ async def scan_tf(s, sym, tf):
 
 async def main_loop():
     async with aiohttp.ClientSession() as s:
-        await tg(s, "<b>V23.0 ATIVO</b>\n3M CONFLUÊNCIA REAL + 15/30 CONFIRMAÇÃO")
+        await tg(s, "<b>V23.2 ATIVO</b>\n3M AJUSTADO RSI 40–80 + 15/30 CONFIRMAÇÃO")
         while True:
             try:
                 data = await (await s.get(f"{BINANCE}/api/v3/ticker/24hr")).json()
