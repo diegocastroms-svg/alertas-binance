@@ -24,7 +24,7 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 CHAT_ID = os.getenv("CHAT_ID", "").strip()
 
 # ===== PARÂMETROS =====
-MIN_VOL24 = 10_000_000  # 10M USDT (moedas mortas/ fracas ficam fora)
+MIN_VOL24 = 3_000_000  # 3M USDT (moedas mortas/ fracas ficam fora)
 TOP_N = 100
 COOLDOWN = {"15m": 15*60, "30m": 30*60, "1h": 60*60}  # 1 alerta por candle
 RETEST_TOL = 0.003  # 0,3% de tolerância para considerar "toque" de média
@@ -331,3 +331,4 @@ threading.Thread(target=lambda: asyncio.run(main_loop()), daemon=True).start()
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+
