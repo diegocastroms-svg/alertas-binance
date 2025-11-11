@@ -1,6 +1,5 @@
-# main.py — V7.3 OURO CONFLUÊNCIA REAL — TENDÊNCIA CURTA (Cruzamento 2 Velas + Confirmação)
-# Detecta o início real da tendência com base no cruzamento recente da EMA200
-# Gatilhos: cruzamento em até 2 velas, MACD virando, RSI 40–80, volume_strength ≥100%, takerBuy ≥1.05× takerSell
+# main.py — V7.4 OURO CONFLUÊNCIA REAL — TENDÊNCIA CURTA (EMA200 Real + Cruzamento Confirmado)
+# Corrigido: uso exclusivo da EMA200 real (sem fallback para EMA100)
 
 import os, asyncio, aiohttp, time
 from datetime import datetime, timedelta, timezone
@@ -10,7 +9,7 @@ import threading
 app = Flask(__name__)
 @app.route("/")
 def home():
-    return "V7.3 OURO CONFLUÊNCIA REAL — TENDÊNCIA CURTA (Cruzamento 2 Velas + Confirmação) ATIVO", 200
+    return "V7.4 OURO CONFLUÊNCIA REAL — EMA200 REAL ATIVO", 200
 
 @app.route("/health")
 def health():
@@ -66,10 +65,7 @@ def macd_virando(close):
     macd_series = [a - b for a, b in zip(e12, e26)]
     signal_series = ema(macd_series, 9)
     hist = macd_line - signal_series[-1]
-    if len(macd_series) >= 2 and len(signal_series) >= 2:
-        hist_prev = macd_series[-2] - signal_series[-2]
-    else:
-        hist_prev = hist
+    hist_prev = macd_series[-2] - signal_series[-2] if len(macd_series) >= 2 else hist
     return hist > hist_prev, hist
 
 def vol_strength(vol):
@@ -88,7 +84,7 @@ def can_alert(sym):
     return False
 
 async def klines(s, sym, tf):
-    async with s.get(f"{BINANCE}/api/v3/klines?symbol={sym}&interval={tf}&limit=100", timeout=10) as r:
+    async with s.get(f"{BINANCE}/api/v3/klines?symbol={sym}&interval={tf}&limit=200", timeout=10) as r:
         return await r.json() if r.status == 200 else []
 
 async def ticker(s, sym):
@@ -102,28 +98,33 @@ async def scan_tf(s, sym, tf):
         vol24 = float(t.get("quoteVolume", 0) or 0)
         if vol24 < MIN_VOL24: return
         k = await klines(s, sym, tf)
-        if len(k) < 50: return
+        if len(k) < 200: return  # precisa da EMA200 real
 
         close = [float(x[4]) for x in k]
         vol = [float(x[5]) for x in k]
-        ema200 = ema(close, 200)[-1] if len(close) >= 200 else ema(close, 100)[-1]
+
+        ema200 = ema(close, 200)[-1]
         price = close[-1]
+        hist_up, hist_val = macd_virando(close)
         r = rsi(close)
-        hist_up, _ = macd_virando(close)
         vs = vol_strength(vol)
 
         taker_buy = float(t.get("takerBuyQuoteAssetVolume", 0) or 0.0)
         taker_sell = max(float(t.get("quoteVolume", 0) or 0.0) - taker_buy, 0.0)
         book_ok = (taker_buy >= taker_sell * BOOK_DOM) or (taker_buy == 0.0)
-
         nome = sym.replace("USDT", "")
 
-        # --- cruzamento recente (até 2 velas) ---
-        cross_recent = any((close[-i-1] < ema200 and close[-i] > ema200) for i in range(1, 3))
+        price_vs_ema200 = (price > ema200) and (close[-2] < ema200)
 
-        confirmacao = hist_up and (40 <= r <= 80) and (vs >= 100) and book_ok
+        reason_fail = []
+        if not price_vs_ema200: reason_fail.append("sem_cruzamento_200")
+        if not hist_up: reason_fail.append("MACD_não_virando")
+        if not (45 <= r <= 60): reason_fail.append("RSI_fora_45-60")
+        if not (vs >= 100): reason_fail.append("Vol<100%")
+        if not book_ok: reason_fail.append("Book_fraco")
+        if not can_alert(sym): reason_fail.append("Cooldown")
 
-        if cross_recent and confirmacao and can_alert(sym):
+        if price_vs_ema200 and hist_up and 45 <= r <= 60 and vs >= 100 and book_ok and can_alert(sym):
             msg = (
                 f"⚡ <b>INÍCIO DE ROMPIMENTO REAL ({tf.upper()})</b>\n\n"
                 f"{nome}\n\n"
@@ -134,16 +135,16 @@ async def scan_tf(s, sym, tf):
                 f"⏱ {now_br()} BR"
             )
             await tg(s, msg)
-            print(f"[{now_br()}] ALERTA ENVIADO {tf.upper()} {nome}")
+            print(f"[{now_br()}] ALERTA ENVIADO {tf.upper()} {nome} | OK")
         else:
-            print(f"[{now_br()}] {tf.upper()} {nome} — sem alerta (condições não atendidas)")
+            print(f"[{now_br()}] SEM ALERTA {tf.upper()} {nome} | motivos: {', '.join(reason_fail)}")
 
     except Exception as e:
         print("Erro scan_tf:", e)
 
 async def main_loop():
     async with aiohttp.ClientSession() as s:
-        await tg(s, "<b>V7.3 OURO CONFLUÊNCIA REAL — TENDÊNCIA CURTA (Cruzamento + Confirmação)</b>")
+        await tg(s, "<b>V7.4 OURO CONFLUÊNCIA REAL — EMA200 REAL</b>")
         while True:
             try:
                 data_resp = await s.get(f"{BINANCE}/api/v3/ticker/24hr", timeout=10)
@@ -157,7 +158,6 @@ async def main_loop():
                     and not any(x in d["symbol"] for x in ["UP", "DOWN", "BUSD", "FDUSD", "USDC", "TUSD"])
                 ]
                 symbols = sorted(symbols, key=lambda x: next((float(t.get("quoteVolume") or 0) for t in data if t["symbol"] == x), 0), reverse=True)[:TOP_N]
-
                 print(f"\n[{now_br()}] === Iniciando varredura ({len(symbols)} moedas) ===")
                 tasks = [scan_tf(s, sym, tf) for sym in symbols for tf in ["15m", "30m", "1h"]]
                 await asyncio.gather(*tasks)
