@@ -1,5 +1,5 @@
-# main.py — V8.1 OURO CONFLUÊNCIA ANTECIPADA + CONFIRMAÇÃO REAL
-# (EMA200 Real + Alerta Antecipado + Rompimento Confirmado)
+# main.py — V8.1R OURO CONFLUÊNCIA ANTECIPADA + CONFIRMAÇÃO REAL (Render Log)
+# Ajustado: exibe varredura em tempo real no Render mantendo Flask ativo
 
 import os, asyncio, aiohttp, time
 from datetime import datetime, timedelta, timezone
@@ -9,7 +9,7 @@ import threading
 app = Flask(__name__)
 @app.route("/")
 def home():
-    return "V8.1 OURO CONFLUÊNCIA ANTECIPADA + CONFIRMAÇÃO REAL — ATIVO", 200
+    return "V8.1R OURO CONFLUÊNCIA ANTECIPADA + CONFIRMAÇÃO REAL — ATIVO", 200
 
 @app.route("/health")
 def health():
@@ -132,14 +132,13 @@ async def scan_tf(s, sym, tf):
         book_ok = (taker_buy >= taker_sell * BOOK_DOM) or (taker_buy == 0.0)
         nome = sym.replace("USDT", "")
 
-        # ENTRADA ANTECIPADA REAL
         rsi_ok = 55 <= r <= 65
         macd_ok = hist_up
         vol_ok = vs >= 120
         price_ok = abs((price - ema200) / ema200) <= 0.01 or price > ema200
         bb_ok = bw <= 20
-        early_ok = rsi_ok and macd_ok and vol_ok and price_ok and bb_ok and book_ok and can_alert(sym, "early")
 
+        early_ok = rsi_ok and macd_ok and vol_ok and price_ok and bb_ok and book_ok and can_alert(sym, "early")
         if early_ok:
             msg = (
                 f"⚡ <b>ENTRADA ANTECIPADA DETECTADA ({tf.upper()})</b>\n\n"
@@ -154,7 +153,6 @@ async def scan_tf(s, sym, tf):
             await tg(s, msg)
             print(f"[{now_br()}] ALERTA ENTRADA ANTECIPADA {tf.upper()} {nome}")
 
-        # ROMPIMENTO CONFIRMADO (duas velas após cruzar e fechar acima da EMA200)
         confirm_ok = (
             len(close) >= 3
             and close[-3] < ema200
@@ -166,7 +164,6 @@ async def scan_tf(s, sym, tf):
             and book_ok
             and can_alert(sym, "confirm")
         )
-
         if confirm_ok:
             msg2 = (
                 f"💥 <b>ROMPIMENTO CONFIRMADO ({tf.upper()})</b>\n\n"
@@ -186,7 +183,7 @@ async def scan_tf(s, sym, tf):
 
 async def main_loop():
     async with aiohttp.ClientSession() as s:
-        await tg(s, "<b>V8.1 OURO CONFLUÊNCIA ANTECIPADA + CONFIRMAÇÃO REAL</b>")
+        await tg(s, "<b>V8.1R OURO CONFLUÊNCIA ANTECIPADA + CONFIRMAÇÃO REAL (Render Log)</b>")
         while True:
             try:
                 data_resp = await s.get(f"{BINANCE}/api/v3/ticker/24hr", timeout=10)
@@ -209,7 +206,6 @@ async def main_loop():
                 print("Erro main_loop:", e)
             await asyncio.sleep(SCAN_INTERVAL)
 
-threading.Thread(target=lambda: asyncio.run(main_loop()), daemon=True).start()
-
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+# Agora o Flask roda em thread e a varredura principal aparece no Render
+threading.Thread(target=lambda: app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000))), daemon=True).start()
+asyncio.run(main_loop())
