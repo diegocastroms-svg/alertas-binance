@@ -21,7 +21,7 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 CHAT_ID = os.getenv("CHAT_ID", "").strip()
 
 # ===== PARÂMETROS =====
-MIN_VOL24 = 3_000_000
+MIN_VOL24 = 10_000_000
 VOL_STRENGTH_MIN = 120
 COOLDOWN = {"15m": 900, "30m": 1800, "1h": 3600}
 TOP_N = 50
@@ -94,6 +94,7 @@ async def scan_tf(s, sym, tf):
         if len(k) < 50: return
 
         close = [float(x[4]) for x in k]
+        vol = [float(x[5]) for x in k]
         ema9 = ema(close, 9)
         ema20 = ema(close, 20)
         ema50 = ema(close, 50)
@@ -105,10 +106,11 @@ async def scan_tf(s, sym, tf):
         signal_line = ema(close, 9)[-1]
         macd_hist = macd_line - signal_line
 
-        ma9 = sum(close[-9:])/9
-        ma21 = sum(close[-21:])/21
+        # ✅ Correção do cálculo de volume_strength
+        ma9 = sum(vol[-9:]) / 9
+        ma21 = sum(vol[-21:]) / 21
         base = (ma9 + ma21) / 2
-        volume_strength = (float(k[-1][5]) / base) * 100
+        volume_strength = (vol[-1] / base) * 100
 
         taker_buy = float(t.get("takerBuyQuoteAssetVolume", 0))
         real_flow = (taker_buy / (vol24 or 1e-12)) * 100
@@ -119,7 +121,7 @@ async def scan_tf(s, sym, tf):
         # Condições principais
         if price > ema200[-1] * 1.03:  # evita topos
             return
-        if not (macd_hist > 0 and current_rsi > 45 and volume_strength >= VOL_STRENGTH_MIN and real_flow > 0):
+        if not (macd_hist > 0 and current_rsi > 50 and volume_strength >= VOL_STRENGTH_MIN and real_flow > 0):
             return
         if not can_alert(tf, sym): return
 
@@ -169,5 +171,3 @@ threading.Thread(target=lambda: asyncio.run(main_loop()), daemon=True).start()
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
-
-
