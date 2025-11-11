@@ -1,5 +1,5 @@
-# main.py — V8.2R-5M OURO CONFLUÊNCIA ANTECIPADA + CONFIRMAÇÃO REAL (5m)
-# Fixado em 5 minutos + logs detalhados no Render
+# main.py — V8.3R-3M OURO CONFLUÊNCIA ULTRARÁPIDA (3m)
+# Entrada antecipada + confirmação real — timeframe fixo em 3 minutos
 
 import os, asyncio, aiohttp, time
 from datetime import datetime, timedelta, timezone
@@ -9,7 +9,7 @@ import threading
 app = Flask(__name__)
 @app.route("/")
 def home():
-    return "V8.2R-5M OURO CONFLUÊNCIA — 5m ATIVO", 200
+    return "V8.3R-3M OURO CONFLUÊNCIA ULTRARÁPIDA — 3m ATIVO", 200
 
 @app.route("/health")
 def health():
@@ -19,11 +19,11 @@ BINANCE = "https://api.binance.com"
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 CHAT_ID = os.getenv("CHAT_ID", "").strip()
 
-MIN_VOL24 = 10_000_000      # volume 24h mínimo (USDT)
-TOP_N = 50                  # top pares por volume
-COOLDOWN = 900              # 15 min entre alertas do mesmo par/estágio
-BOOK_DOM = 1.05             # takerBuy >= takerSell * 1.05
-SCAN_INTERVAL = 30          # intervalo entre varreduras (s)
+MIN_VOL24 = 10_000_000
+TOP_N = 50
+COOLDOWN = 900
+BOOK_DOM = 1.05
+SCAN_INTERVAL = 30
 
 def now_br():
     return (datetime.now(timezone.utc) - timedelta(hours=3)).strftime("%H:%M:%S")
@@ -80,19 +80,13 @@ def bollinger_width(close, p=20):
     up = m + 2*std; dn = m - 2*std
     return ((up - dn) / m) * 100.0
 
-cooldown_early = {}
-cooldown_confirm = {}
+cooldown_early, cooldown_confirm = {}, {}
 
 def can_alert(sym, stage="early"):
     n = time.time()
-    if stage == "early":
-        if n - cooldown_early.get(sym, 0) >= COOLDOWN:
-            cooldown_early[sym] = n; return True
-        return False
-    if stage == "confirm":
-        if n - cooldown_confirm.get(sym, 0) >= COOLDOWN:
-            cooldown_confirm[sym] = n; return True
-        return False
+    cd = cooldown_early if stage=="early" else cooldown_confirm
+    if n - cd.get(sym, 0) >= COOLDOWN:
+        cd[sym] = n; return True
     return False
 
 async def klines(s, sym, tf):
@@ -105,7 +99,6 @@ async def ticker(s, sym):
 
 async def scan_tf(s, sym, tf):
     try:
-        # Log ao vivo no Render: mostra o par e o timeframe analisado
         print(f"[{now_br()}] Analisando {sym} ({tf})...")
 
         t = await ticker(s, sym)
@@ -118,7 +111,6 @@ async def scan_tf(s, sym, tf):
 
         close = [float(x[4]) for x in k]
         vol = [float(x[5]) for x in k]
-
         ema200 = ema(close, 200)[-1]
         price = close[-1]
         hist_up, _ = macd_virando(close)
@@ -131,17 +123,17 @@ async def scan_tf(s, sym, tf):
         book_ok = (taker_buy >= taker_sell * BOOK_DOM) or (taker_buy == 0.0)
         nome = sym.replace("USDT", "")
 
-        # Filtros (versão 5m)
-        rsi_ok  = 57 <= r <= 67
-        vol_ok  = vs >= 130
+        # Filtros reforçados para 3m
+        rsi_ok  = 60 <= r <= 70
+        vol_ok  = vs >= 140
         macd_ok = hist_up
-        bb_ok   = bw <= 20
+        bb_ok   = bw <= 18
         price_ok = (price > ema200) or (abs((price - ema200)/ema200) <= 0.01)
 
-        # === Estágio 1: Entrada Antecipada (5m) ===
+        # --- Entrada antecipada ---
         if rsi_ok and vol_ok and macd_ok and bb_ok and price_ok and book_ok and can_alert(sym, "early"):
             msg = (
-                f"⚡ <b>ENTRADA ANTECIPADA DETECTADA (5M)</b>\n\n"
+                f"⚡ <b>ENTRADA ANTECIPADA DETECTADA (3M)</b>\n\n"
                 f"{nome}\n\n"
                 f"Preço: <b>{price:.6f}</b>\n"
                 f"RSI: <b>{r:.1f}</b> | MACD: <b>virando</b>\n"
@@ -151,20 +143,20 @@ async def scan_tf(s, sym, tf):
                 f"⏱ {now_br()} BR"
             )
             await tg(s, msg)
-            print(f"[{now_br()}] ALERTA ENTRADA ANTECIPADA 5M {nome}")
+            print(f"[{now_br()}] ALERTA ENTRADA ANTECIPADA 3M {nome}")
 
-        # === Estágio 2: Rompimento Confirmado (5m) ===
+        # --- Rompimento confirmado ---
         confirm_ok = (
             len(close) >= 3
             and close[-3] < ema200
             and close[-2] > ema200
             and close[-1] > ema200
-            and hist_up and r > 60 and vs >= 130
+            and hist_up and r > 65 and vs >= 150
             and book_ok and can_alert(sym, "confirm")
         )
         if confirm_ok:
             msg2 = (
-                f"💥 <b>ROMPIMENTO CONFIRMADO (5M)</b>\n\n"
+                f"💥 <b>ROMPIMENTO CONFIRMADO (3M)</b>\n\n"
                 f"{nome}\n\n"
                 f"Preço: <b>{price:.6f}</b>\n"
                 f"RSI: <b>{r:.1f}</b>\n"
@@ -174,14 +166,14 @@ async def scan_tf(s, sym, tf):
                 f"⏱ {now_br()} BR"
             )
             await tg(s, msg2)
-            print(f"[{now_br()}] ALERTA ROMPIMENTO CONFIRMADO 5M {nome}")
+            print(f"[{now_br()}] ALERTA ROMPIMENTO CONFIRMADO 3M {nome}")
 
     except Exception as e:
         print("Erro scan_tf:", e)
 
 async def main_loop():
     async with aiohttp.ClientSession() as s:
-        await tg(s, "<b>V8.2R-5M OURO — Confluência Antecipada + Confirmação Real (5m)</b>")
+        await tg(s, "<b>V8.3R-3M OURO CONFLUÊNCIA ULTRARÁPIDA — 3m</b>")
         while True:
             try:
                 data_resp = await s.get(f"{BINANCE}/api/v3/ticker/24hr", timeout=10)
@@ -192,7 +184,7 @@ async def main_loop():
                     d["symbol"] for d in data
                     if d["symbol"].endswith("USDT")
                     and float(d.get("quoteVolume") or 0) >= MIN_VOL24
-                    and not any(x in d["symbol"] for x in ["UP", "DOWN", "BUSD", "FDUSD", "USDC", "TUSD"])
+                    and not any(x in d["symbol"] for x in ["UP","DOWN","BUSD","FDUSD","USDC","TUSD"])
                 ]
                 symbols = sorted(
                     symbols,
@@ -200,16 +192,15 @@ async def main_loop():
                     reverse=True
                 )[:TOP_N]
 
-                print(f"\n[{now_br()}] === Iniciando varredura 5m ({len(symbols)} moedas) ===")
-                tasks = [scan_tf(s, sym, "5m") for sym in symbols]
+                print(f"\n[{now_br()}] === Iniciando varredura 3m ({len(symbols)} moedas) ===")
+                tasks = [scan_tf(s, sym, "3m") for sym in symbols]
                 await asyncio.gather(*tasks)
-                print(f"[{now_br()}] === Varredura 5m finalizada ===\n")
+                print(f"[{now_br()}] === Varredura 3m finalizada ===\n")
 
             except Exception as e:
                 print("Erro main_loop:", e)
             await asyncio.sleep(SCAN_INTERVAL)
 
-# Flask em thread; loop principal no processo — logs aparecem no Render
 threading.Thread(
     target=lambda: app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000))),
     daemon=True
