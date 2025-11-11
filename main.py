@@ -119,7 +119,7 @@ async def scan_tf(s, sym, tf):
         # Condições principais
         if price > ema200[-1] * 1.03:  # evita topos
             return
-        if not (macd_hist > 0 and current_rsi > 50 and volume_strength >= VOL_STRENGTH_MIN and real_flow > 0):
+        if not (macd_hist > 0 and current_rsi > 45 and volume_strength >= VOL_STRENGTH_MIN and real_flow > 0):
             return
         if not can_alert(tf, sym): return
 
@@ -169,4 +169,5 @@ threading.Thread(target=lambda: asyncio.run(main_loop()), daemon=True).start()
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+
 
