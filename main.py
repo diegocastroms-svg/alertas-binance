@@ -21,7 +21,7 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 CHAT_ID = os.getenv("CHAT_ID", "").strip()
 
 # ===== PARÂMETROS =====
-MIN_VOL24 = 10_000_000
+MIN_VOL24 = 3_000_000
 VOL_STRENGTH_MIN = 120
 COOLDOWN = {"15m": 900, "30m": 1800, "1h": 3600}
 TOP_N = 50
@@ -169,3 +169,4 @@ threading.Thread(target=lambda: asyncio.run(main_loop()), daemon=True).start()
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+
