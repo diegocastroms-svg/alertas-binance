@@ -21,8 +21,8 @@ BINANCE = "https://api.binance.com"
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 CHAT_ID = os.getenv("CHAT_ID", "").strip()
 
-MIN_VOL24 = 10_000_000
-TOP_N = 50
+MIN_VOL24 = 3_000_000
+TOP_N = 80
 COOLDOWN = 900
 BOOK_DOM = 1.05
 SCAN_INTERVAL = 30
@@ -143,7 +143,7 @@ async def scan_tf(s, sym, tf):
             reason_fail.append("price<EMA200")
         if not hist_up:
             reason_fail.append("MACD_não_virando")
-        if not (45 <= r <= 60):
+        if not (45 <= r <= 80):
             reason_fail.append("RSI_fora_45-60")
         if not (vs >= 100):
             reason_fail.append("Vol_força<100%")
@@ -201,3 +201,4 @@ threading.Thread(target=lambda: asyncio.run(main_loop()), daemon=True).start()
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+
