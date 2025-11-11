@@ -1,7 +1,5 @@
 # main.py — V7.3 OURO CONFLUÊNCIA REAL — TENDÊNCIA CURTA (Entrada Antecipada Real + DEBUG FILE)
-# Objetivo: detectar o início REAL da tendência (rompimento inicial da média 200)
-# Gatilhos: MACD virando (histograma diminuindo vermelho), RSI 45–60, volume_strength ≥100%, takerBuy ≥1.05× takerSell
-# Mantém varredura 15m/30m/1h, debug de moedas e logs claros para diagnóstico.
+# Correções: cooldown corrigido e limit=220 para EMA200 real.
 
 import os, asyncio, aiohttp, time
 from datetime import datetime, timedelta, timezone
@@ -21,8 +19,8 @@ BINANCE = "https://api.binance.com"
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 CHAT_ID = os.getenv("CHAT_ID", "").strip()
 
-MIN_VOL24 = 3_000_000
-TOP_N = 80
+MIN_VOL24 = 10_000_000
+TOP_N = 50
 COOLDOWN = 900
 BOOK_DOM = 1.05
 SCAN_INTERVAL = 30
@@ -60,7 +58,6 @@ def rsi(prices, p=14):
     return 100 - 100 / (1 + ag / al)
 
 def macd_virando(close):
-    # Retorna (histogram_is_increasing, hist_value)
     if len(close) < 26: return False, 0.0
     e12 = ema(close, 12)
     e26 = ema(close, 26)
@@ -68,11 +65,8 @@ def macd_virando(close):
     macd_series = [a - b for a, b in zip(e12, e26)]
     signal_series = ema(macd_series, 9)
     hist = macd_line - signal_series[-1]
-    # previous histogram comparison (use previous macd_line & previous signal)
     if len(macd_series) >= 2 and len(signal_series) >= 2:
-        macd_prev = macd_series[-2]
-        signal_prev = signal_series[-2]
-        hist_prev = macd_prev - signal_prev
+        hist_prev = macd_series[-2] - signal_series[-2]
     else:
         hist_prev = hist
     return hist > hist_prev, hist
@@ -85,15 +79,14 @@ def vol_strength(vol):
     return (vol[-1] / base) * 100.0
 
 cooldown = {}
-def can_alert(sym):
-    n = time.time()
-    if n - cooldown.get(sym, 0) >= COOLDOWN:
-        cooldown[sym] = n
-        return True
-    return False
+def ready_to_alert(sym):
+    return (time.time() - cooldown.get(sym, 0) >= COOLDOWN)
+
+def mark_alert(sym):
+    cooldown[sym] = time.time()
 
 async def klines(s, sym, tf):
-    async with s.get(f"{BINANCE}/api/v3/klines?symbol={sym}&interval={tf}&limit=100", timeout=10) as r:
+    async with s.get(f"{BINANCE}/api/v3/klines?symbol={sym}&interval={tf}&limit=220", timeout=10) as r:
         return await r.json() if r.status == 200 else []
 
 async def ticker(s, sym):
@@ -126,33 +119,25 @@ async def scan_tf(s, sym, tf):
         book_ok = (taker_buy >= taker_sell * BOOK_DOM) or (taker_buy == 0.0)
 
         nome = sym.replace("USDT", "")
-
-        # Logar análise no Render (detalhado)
         print(f"[{now_br()}] {tf.upper()} {nome} | Price {price:.6f} | EMA200 {ema200:.6f} | RSI {r:.1f} | Vol {vs:.0f}% | MACD {'↑' if hist_up else '↓'} | takerBuy {taker_buy:,.0f} | takerSell {taker_sell:,.0f} | Book {'OK' if book_ok else 'FRACO'}")
 
-        # --- ALERTA DE INÍCIO DE ROMPIMENTO (MINIMAL PATCH) ---
-        # Condições pedidas: preço encostando/rompendo a EMA200, MACD virando (hist diminuindo vermelho),
-        # RSI entre 45 e 60 (cruzando 50), volume_strength >= 100%, takerBuy >= 1.05 * takerSell (ou takerBuy == 0)
-        try:
-            price_vs_ema200 = price >= ema200 * 0.995 if ema200 else False
-        except Exception:
-            price_vs_ema200 = False
-
+        price_vs_ema200 = price >= ema200 * 0.995 if ema200 else False
         reason_fail = []
         if not price_vs_ema200:
             reason_fail.append("price<EMA200")
         if not hist_up:
             reason_fail.append("MACD_não_virando")
-        if not (45 <= r <= 80):
+        if not (45 <= r <= 60):
             reason_fail.append("RSI_fora_45-60")
         if not (vs >= 100):
             reason_fail.append("Vol_força<100%")
         if not book_ok:
             reason_fail.append("Book_fraco")
-        if not can_alert(sym):
+        if not ready_to_alert(sym):
             reason_fail.append("Cooldown")
 
-        if price_vs_ema200 and hist_up and 45 <= r <= 60 and vs >= 100 and book_ok and can_alert(sym):
+        if price_vs_ema200 and hist_up and 45 <= r <= 60 and vs >= 100 and book_ok and ready_to_alert(sym):
+            mark_alert(sym)
             msg = (
                 f"⚡ <b>INÍCIO DE ROMPIMENTO ({tf.upper()})</b>\n\n"
                 f"{nome}\n\n"
@@ -165,7 +150,6 @@ async def scan_tf(s, sym, tf):
             await tg(s, msg)
             print(f"[{now_br()}] ALERTA ENVIADO {tf.upper()} {nome} | reason=OK")
         else:
-            # debug claro e curto: vê quais condições falharam
             print(f"[{now_br()}] SEM ALERTA {tf.upper()} {nome} | motivos: {', '.join(reason_fail)}")
 
     except Exception as e:
@@ -201,4 +185,3 @@ threading.Thread(target=lambda: asyncio.run(main_loop()), daemon=True).start()
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
-
