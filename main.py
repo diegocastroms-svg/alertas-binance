@@ -1,5 +1,5 @@
-# main.py — V7.4 OURO CONFLUÊNCIA REAL — TENDÊNCIA CURTA (EMA200 Real + Cruzamento Confirmado)
-# Corrigido: uso exclusivo da EMA200 real (sem fallback para EMA100)
+# main.py — V8.1 OURO CONFLUÊNCIA ANTECIPADA + CONFIRMAÇÃO REAL
+# (EMA200 Real + Alerta Antecipado + Rompimento Confirmado)
 
 import os, asyncio, aiohttp, time
 from datetime import datetime, timedelta, timezone
@@ -9,7 +9,7 @@ import threading
 app = Flask(__name__)
 @app.route("/")
 def home():
-    return "V7.4 OURO CONFLUÊNCIA REAL — EMA200 REAL ATIVO", 200
+    return "V8.1 OURO CONFLUÊNCIA ANTECIPADA + CONFIRMAÇÃO REAL — ATIVO", 200
 
 @app.route("/health")
 def health():
@@ -75,12 +75,29 @@ def vol_strength(vol):
     base = (ma9 + ma21) / 2 or 1e-12
     return (vol[-1] / base) * 100.0
 
-cooldown = {}
-def can_alert(sym):
+def bollinger_width(close, p=20):
+    if len(close) < p: return 0.0
+    m = sum(close[-p:]) / p
+    std = (sum((x - m)**2 for x in close[-p:]) / p) ** 0.5
+    up = m + 2 * std
+    dn = m - 2 * std
+    return ((up - dn) / m) * 100.0
+
+cooldown_early = {}
+cooldown_confirm = {}
+
+def can_alert(sym, stage="early"):
     n = time.time()
-    if n - cooldown.get(sym, 0) >= COOLDOWN:
-        cooldown[sym] = n
-        return True
+    if stage == "early":
+        if n - cooldown_early.get(sym, 0) >= COOLDOWN:
+            cooldown_early[sym] = n
+            return True
+        return False
+    if stage == "confirm":
+        if n - cooldown_confirm.get(sym, 0) >= COOLDOWN:
+            cooldown_confirm[sym] = n
+            return True
+        return False
     return False
 
 async def klines(s, sym, tf):
@@ -98,7 +115,7 @@ async def scan_tf(s, sym, tf):
         vol24 = float(t.get("quoteVolume", 0) or 0)
         if vol24 < MIN_VOL24: return
         k = await klines(s, sym, tf)
-        if len(k) < 200: return  # precisa da EMA200 real
+        if len(k) < 200: return
 
         close = [float(x[4]) for x in k]
         vol = [float(x[5]) for x in k]
@@ -108,43 +125,68 @@ async def scan_tf(s, sym, tf):
         hist_up, hist_val = macd_virando(close)
         r = rsi(close)
         vs = vol_strength(vol)
+        bw = bollinger_width(close)
 
         taker_buy = float(t.get("takerBuyQuoteAssetVolume", 0) or 0.0)
         taker_sell = max(float(t.get("quoteVolume", 0) or 0.0) - taker_buy, 0.0)
         book_ok = (taker_buy >= taker_sell * BOOK_DOM) or (taker_buy == 0.0)
         nome = sym.replace("USDT", "")
 
-        price_vs_ema200 = (price > ema200) and (close[-2] < ema200)
+        # ENTRADA ANTECIPADA REAL
+        rsi_ok = 55 <= r <= 65
+        macd_ok = hist_up
+        vol_ok = vs >= 120
+        price_ok = abs((price - ema200) / ema200) <= 0.01 or price > ema200
+        bb_ok = bw <= 20
+        early_ok = rsi_ok and macd_ok and vol_ok and price_ok and bb_ok and book_ok and can_alert(sym, "early")
 
-        reason_fail = []
-        if not price_vs_ema200: reason_fail.append("sem_cruzamento_200")
-        if not hist_up: reason_fail.append("MACD_não_virando")
-        if not (45 <= r <= 60): reason_fail.append("RSI_fora_45-60")
-        if not (vs >= 100): reason_fail.append("Vol<100%")
-        if not book_ok: reason_fail.append("Book_fraco")
-        if not can_alert(sym): reason_fail.append("Cooldown")
-
-        if price_vs_ema200 and hist_up and 45 <= r <= 60 and vs >= 100 and book_ok and can_alert(sym):
+        if early_ok:
             msg = (
-                f"⚡ <b>INÍCIO DE ROMPIMENTO REAL ({tf.upper()})</b>\n\n"
+                f"⚡ <b>ENTRADA ANTECIPADA DETECTADA ({tf.upper()})</b>\n\n"
                 f"{nome}\n\n"
                 f"Preço: <b>{price:.6f}</b>\n"
                 f"RSI: <b>{r:.1f}</b> | MACD: <b>virando</b>\n"
-                f"Vol força: <b>{vs:.0f}%</b>\n"
+                f"Volume força: <b>{vs:.0f}%</b>\n"
+                f"Bollinger: <b>{bw:.1f}%</b> | EMA200: <b>{ema200:.6f}</b>\n"
                 f"Fluxo: <b>{taker_buy:,.0f}</b> vs <b>{taker_sell:,.0f}</b>\n"
                 f"⏱ {now_br()} BR"
             )
             await tg(s, msg)
-            print(f"[{now_br()}] ALERTA ENVIADO {tf.upper()} {nome} | OK")
-        else:
-            print(f"[{now_br()}] SEM ALERTA {tf.upper()} {nome} | motivos: {', '.join(reason_fail)}")
+            print(f"[{now_br()}] ALERTA ENTRADA ANTECIPADA {tf.upper()} {nome}")
+
+        # ROMPIMENTO CONFIRMADO (duas velas após cruzar e fechar acima da EMA200)
+        confirm_ok = (
+            len(close) >= 3
+            and close[-3] < ema200
+            and close[-2] > ema200
+            and close[-1] > ema200
+            and hist_up
+            and r > 60
+            and vs >= 130
+            and book_ok
+            and can_alert(sym, "confirm")
+        )
+
+        if confirm_ok:
+            msg2 = (
+                f"💥 <b>ROMPIMENTO CONFIRMADO ({tf.upper()})</b>\n\n"
+                f"{nome}\n\n"
+                f"Preço: <b>{price:.6f}</b>\n"
+                f"RSI: <b>{r:.1f}</b>\n"
+                f"Vol força: <b>{vs:.0f}%</b>\n"
+                f"EMA200: <b>{ema200:.6f}</b>\n"
+                f"Fluxo: <b>{taker_buy:,.0f}</b> vs <b>{taker_sell:,.0f}</b>\n"
+                f"⏱ {now_br()} BR"
+            )
+            await tg(s, msg2)
+            print(f"[{now_br()}] ALERTA ROMPIMENTO CONFIRMADO {tf.upper()} {nome}")
 
     except Exception as e:
         print("Erro scan_tf:", e)
 
 async def main_loop():
     async with aiohttp.ClientSession() as s:
-        await tg(s, "<b>V7.4 OURO CONFLUÊNCIA REAL — EMA200 REAL</b>")
+        await tg(s, "<b>V8.1 OURO CONFLUÊNCIA ANTECIPADA + CONFIRMAÇÃO REAL</b>")
         while True:
             try:
                 data_resp = await s.get(f"{BINANCE}/api/v3/ticker/24hr", timeout=10)
