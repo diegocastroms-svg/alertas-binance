@@ -1,5 +1,6 @@
-# main.py — V8.3R-3M OURO CONFLUÊNCIA ULTRARÁPIDA (3m)
-# Entrada antecipada + confirmação real — timeframe fixo em 3 minutos
+# main.py — V8.3R-3M OURO CONFLUÊNCIA ULTRARÁPIDA — Liquidez Real
+# Detecta entrada antecipada e rompimento confirmado em 3m
+# Filtros: RSI forte, volume real, volatilidade > 2%, sem moedas mortas
 
 import os, asyncio, aiohttp, time
 from datetime import datetime, timedelta, timezone
@@ -9,7 +10,7 @@ import threading
 app = Flask(__name__)
 @app.route("/")
 def home():
-    return "V8.3R-3M OURO CONFLUÊNCIA ULTRARÁPIDA — 3m ATIVO", 200
+    return "V8.3R-3M OURO CONFLUÊNCIA ULTRARÁPIDA — Liquidez Real ATIVO", 200
 
 @app.route("/health")
 def health():
@@ -19,7 +20,8 @@ BINANCE = "https://api.binance.com"
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 CHAT_ID = os.getenv("CHAT_ID", "").strip()
 
-MIN_VOL24 = 10_000_000
+MIN_VOL24 = 10_000_000      # liquidez mínima 10M USDT
+MIN_VOLAT = 2.0             # variação mínima 2%
 TOP_N = 50
 COOLDOWN = 900
 BOOK_DOM = 1.05
@@ -123,7 +125,6 @@ async def scan_tf(s, sym, tf):
         book_ok = (taker_buy >= taker_sell * BOOK_DOM) or (taker_buy == 0.0)
         nome = sym.replace("USDT", "")
 
-        # Filtros reforçados para 3m
         rsi_ok  = 60 <= r <= 70
         vol_ok  = vs >= 140
         macd_ok = hist_up
@@ -173,7 +174,7 @@ async def scan_tf(s, sym, tf):
 
 async def main_loop():
     async with aiohttp.ClientSession() as s:
-        await tg(s, "<b>V8.3R-3M OURO CONFLUÊNCIA ULTRARÁPIDA — 3m</b>")
+        await tg(s, "<b>V8.3R-3M OURO CONFLUÊNCIA ULTRARÁPIDA — Liquidez Real</b>")
         while True:
             try:
                 data_resp = await s.get(f"{BINANCE}/api/v3/ticker/24hr", timeout=10)
@@ -184,7 +185,11 @@ async def main_loop():
                     d["symbol"] for d in data
                     if d["symbol"].endswith("USDT")
                     and float(d.get("quoteVolume") or 0) >= MIN_VOL24
-                    and not any(x in d["symbol"] for x in ["UP","DOWN","BUSD","FDUSD","USDC","TUSD"])
+                    and abs(float(d.get("priceChangePercent") or 0)) >= MIN_VOLAT
+                    and not any(x in d["symbol"] for x in [
+                        "UP","DOWN","BUSD","FDUSD","USDC","TUSD",
+                        "EUR","USDE","TRY","GBP","BRL","AUD","CAD"
+                    ])
                 ]
                 symbols = sorted(
                     symbols,
