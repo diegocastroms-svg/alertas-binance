@@ -182,8 +182,8 @@ async def scan_tf(s, sym, tf):
         try:
             daily_change = float(t.get("priceChangePercent", 0) or 0.0)
 
-            # Só considerar moedas em queda relevante (-12% a -6%)
-            queda_ok = (-12.0 <= daily_change <= -6.0)
+            # Só considerar moedas em queda relevante (queda > -6%)
+            queda_ok = (daily_change <= -6.0)
 
             if not queda_ok:
                 return
