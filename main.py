@@ -1,6 +1,6 @@
-# main.py — V8.3R-3M OURO CONFLUÊNCIA ULTRARÁPIDA — Liquidez Real
-# Detecta entrada antecipada e rompimento confirmado em 3m
-# Filtros: RSI forte, volume real, volatilidade > 2%, sem moedas mortas
+# main.py — V8.3R-3M OURO CONFLUÊNCIA ULTRARÁPIDA — Liquidez Real + FUNDO REAL
+# 3m: entrada antecipada + rompimento confirmado
+# 30m + 15m: detecção de FUNDO REAL para evitar falsos
 
 import os, asyncio, aiohttp, time
 from datetime import datetime, timedelta, timezone
@@ -10,7 +10,7 @@ import threading
 app = Flask(__name__)
 @app.route("/")
 def home():
-    return "V8.3R-3M OURO CONFLUÊNCIA ULTRARÁPIDA — Liquidez Real ATIVO", 200
+    return "V8.3R-3M OURO CONFLUÊNCIA ULTRARÁPIDA — Liquidez Real + FUNDO REAL ATIVO", 200
 
 @app.route("/health")
 def health():
@@ -20,7 +20,7 @@ BINANCE = "https://api.binance.com"
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 CHAT_ID = os.getenv("CHAT_ID", "").strip()
 
-MIN_VOL24 = 10_000_000      # liquidez mínima 10M USDT
+MIN_VOL24 = 20_000_000      # liquidez mínima 20M USDT
 MIN_VOLAT = 2.0             # variação mínima 2%
 TOP_N = 50
 COOLDOWN = 900
@@ -82,13 +82,19 @@ def bollinger_width(close, p=20):
     up = m + 2*std; dn = m - 2*std
     return ((up - dn) / m) * 100.0
 
-cooldown_early, cooldown_confirm = {}, {}
+cooldown_early, cooldown_confirm, cooldown_bottom = {}, {}, {}
 
 def can_alert(sym, stage="early"):
     n = time.time()
-    cd = cooldown_early if stage=="early" else cooldown_confirm
+    if stage == "early":
+        cd = cooldown_early
+    elif stage == "confirm":
+        cd = cooldown_confirm
+    else:
+        cd = cooldown_bottom
     if n - cd.get(sym, 0) >= COOLDOWN:
-        cd[sym] = n; return True
+        cd[sym] = n
+        return True
     return False
 
 async def klines(s, sym, tf):
@@ -108,6 +114,7 @@ async def scan_tf(s, sym, tf):
         vol24 = float(t.get("quoteVolume", 0) or 0)
         if vol24 < MIN_VOL24: return
 
+        # ---- Dados 3m (entrada antecipada / rompimento) ----
         k = await klines(s, sym, tf)
         if len(k) < 200: return
 
@@ -131,7 +138,7 @@ async def scan_tf(s, sym, tf):
         bb_ok   = bw <= 18
         price_ok = (price > ema200) or (abs((price - ema200)/ema200) <= 0.01)
 
-        # --- Entrada antecipada ---
+        # --- Entrada antecipada (3m) ---
         if rsi_ok and vol_ok and macd_ok and bb_ok and price_ok and book_ok and can_alert(sym, "early"):
             msg = (
                 f"⚡ <b>ENTRADA ANTECIPADA DETECTADA (3M)</b>\n\n"
@@ -146,7 +153,7 @@ async def scan_tf(s, sym, tf):
             await tg(s, msg)
             print(f"[{now_br()}] ALERTA ENTRADA ANTECIPADA 3M {nome}")
 
-        # --- Rompimento confirmado ---
+        # --- Rompimento confirmado (3m) ---
         confirm_ok = (
             len(close) >= 3
             and close[-3] < ema200
@@ -169,12 +176,91 @@ async def scan_tf(s, sym, tf):
             await tg(s, msg2)
             print(f"[{now_br()}] ALERTA ROMPIMENTO CONFIRMADO 3M {nome}")
 
+        # =======================================================
+        # FUNDO REAL (30m + 15m)
+        # =======================================================
+        try:
+            daily_change = float(t.get("priceChangePercent", 0) or 0.0)
+
+            # Só considerar moedas em queda relevante (-12% a -6%)
+            queda_ok = (-12.0 <= daily_change <= -6.0)
+
+            if not queda_ok:
+                return
+
+            k30 = await klines(s, sym, "30m")
+            k15 = await klines(s, sym, "15m")
+            if len(k30) < 50 or len(k15) < 30:
+                return
+
+            close30 = [float(x[4]) for x in k30]
+            vol30 = [float(x[5]) for x in k30]
+            rsi30 = rsi(close30)
+
+            # RSI 30m entre 25 e 35 (zona de fundo real)
+            rsi30_ok = 25.0 <= rsi30 <= 35.0
+
+            # Candle de 30m com pavio inferior grande
+            last30 = k30[-1]
+            o30 = float(last30[1])
+            h30 = float(last30[2])
+            l30 = float(last30[3])
+            c30 = float(last30[4])
+            range30 = max(h30 - l30, 1e-12)
+            corpo30 = abs(c30 - o30)
+            pavio_inf = min(c30, o30) - l30
+            pavio_ratio_ok = (pavio_inf / range30) >= 0.4 and corpo30 <= range30
+
+            # Volume 30m aliviando: volume atual <= máximo das últimas 3 barras (sem ser a atual)
+            if len(vol30) >= 4:
+                vol30_ok = vol30[-1] <= max(vol30[-4:-1])
+            else:
+                vol30_ok = True
+
+            # 15m: primeira vela verde forte com volume
+            last15 = k15[-1]
+            o15 = float(last15[1])
+            c15 = float(last15[4])
+            v15 = float(last15[5])
+            vol15 = [float(x[5]) for x in k15]
+            if len(vol15) >= 6:
+                vol15_media = sum(vol15[-6:-1]) / 5
+            else:
+                vol15_media = sum(vol15[:-1]) / max(len(vol15) - 1, 1)
+            vela15_verde = c15 > o15
+            vol15_forte = v15 > vol15_media
+
+            fundo_real_ok = (
+                queda_ok
+                and rsi30_ok
+                and pavio_ratio_ok
+                and vol30_ok
+                and vela15_verde
+                and vol15_forte
+            )
+
+            if fundo_real_ok and can_alert(sym, "bottom"):
+                msg3 = (
+                    f"🛑 <b>FUNDO REAL DETECTADO (30M + 15M)</b>\n\n"
+                    f"{nome}\n\n"
+                    f"Queda 24h: <b>{daily_change:.2f}%</b>\n"
+                    f"RSI 30m: <b>{rsi30:.1f}</b>\n"
+                    f"Candle 30m: pavio inferior forte\n"
+                    f"Volume 30m: aliviando\n"
+                    f"15m: 1ª vela verde com volume acima da média\n"
+                    f"⏱ {now_br()} BR"
+                )
+                await tg(s, msg3)
+                print(f"[{now_br()}] ALERTA FUNDO REAL 30M+15M {nome}")
+        except Exception as e:
+            print("Erro fundo_real:", e)
+
     except Exception as e:
         print("Erro scan_tf:", e)
 
 async def main_loop():
     async with aiohttp.ClientSession() as s:
-        await tg(s, "<b>V8.3R-3M OURO CONFLUÊNCIA ULTRARÁPIDA — Liquidez Real</b>")
+        await tg(s, "<b>V8.3R-3M OURO CONFLUÊNCIA ULTRARÁPIDA — Liquidez Real + FUNDO REAL</b>")
         while True:
             try:
                 data_resp = await s.get(f"{BINANCE}/api/v3/ticker/24hr", timeout=10)
