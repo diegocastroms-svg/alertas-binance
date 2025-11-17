@@ -20,7 +20,7 @@ BINANCE = "https://api.binance.com"
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 CHAT_ID = os.getenv("CHAT_ID", "").strip()
 
-MIN_VOL24 = 20_000_000      # liquidez mínima 20M USDT
+MIN_VOL24 = 5_000_000      # liquidez mínima 5M USDT
 MIN_VOLAT = 2.0             # variação mínima 2%
 TOP_N = 50
 COOLDOWN = 900
@@ -297,3 +297,4 @@ threading.Thread(
     daemon=True
 ).start()
 asyncio.run(main_loop())
+
