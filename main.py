@@ -181,7 +181,7 @@ async def scan_tf(s, sym):
         print("Erro scan_tf (3m):", e)
 
 # =====================================================
-# FUNDO REAL DINÂMICO — 30M + 15M (SEM NÚMERO FIXO)
+# FUNDO REAL DINÂMICO — 30M + 15M (COMPORTAMENTO, NÃO NÚMEROS FIXOS)
 # =====================================================
 async def scan_bottom(s, sym):
     try:
@@ -193,36 +193,94 @@ async def scan_bottom(s, sym):
 
         k30 = await klines(s, sym, "30m")
         k15 = await klines(s, sym, "15m")
-        if len(k30) < 50 or len(k15) < 30:
+        if len(k30) < 60 or len(k15) < 40:
             return
 
         close30 = [float(x[4]) for x in k30]
         vol30   = [float(x[5]) for x in k30]
 
-        # ----- 30m: queda perdeu força -----
+        # ------------------------------------------------
+        # 30m → queda perdendo força (comparação dinâmica)
+        # ------------------------------------------------
+        # último bloco de 3 candles vs bloco anterior de 3
+        prev_block = close30[-6:-3]
+        last_block = close30[-3:]
+
+        prev_slope = prev_block[-1] - prev_block[0]   # queda anterior
+        last_slope = last_block[-1] - last_block[0]   # movimento recente
+
+        # precisa ter tido queda antes
+        teve_queda = prev_slope < 0
+        # e agora a queda tem que estar menos forte ou já virando
+        queda_perdendo_forca = last_slope >= prev_slope * 0.5
+
+        # ------------------------------------------------
+        # 30m → candle com defesa (pavio relativo ao histórico)
+        # ------------------------------------------------
         last30 = k30[-1]
         o30 = float(last30[1])
         h30 = float(last30[2])
         l30 = float(last30[3])
         c30 = float(last30[4])
         range30 = max(h30 - l30, 1e-12)
+        corpo30 = abs(c30 - o30)
+        pavio_inf30 = min(c30, o30) - l30
 
-        pavio30_forte   = (min(c30, o30) - l30) >= range30 * 0.30
-        candle30_fraco  = abs(c30 - o30) <= range30 * 0.40
-        vol30_estavel   = vol30[-1] <= max(vol30[-4:-1])
+        # médias dos últimos 5 candles, sem o atual
+        corpos_hist = []
+        pavios_hist = []
+        for c in k30[-6:-1]:
+            oc = float(c[1])
+            hc = float(c[2])
+            lc = float(c[3])
+            cc = float(c[4])
+            rc = max(hc - lc, 1e-12)
+            corpos_hist.append(abs(cc - oc))
+            pavios_hist.append(min(cc, oc) - lc)
 
+        corpo_med = sum(corpos_hist) / len(corpos_hist)
+        pavio_med = sum(pavios_hist) / len(pavios_hist)
+
+        corpo_controlado = corpo30 <= corpo_med * 1.3          # não é candle de pancada fora da curva
+        pavio_defendido  = pavio_inf30 >= max(pavio_med, range30 * 0.2)
+
+        # ------------------------------------------------
+        # 30m → volume estabilizando (nem morrendo, nem explodindo)
+        # ------------------------------------------------
+        vol_ref = vol30[-6:-1]
+        vol_med = sum(vol_ref) / len(vol_ref)
+        vol30_ok = (vol30[-1] >= vol_med * 0.6) and (vol30[-1] <= vol_med * 1.6)
+
+        # ------------------------------------------------
+        # 30m → Bollinger apertando em relação ao passado
+        # ------------------------------------------------
+        bw_now  = bollinger_width(close30)
+        bw_prev = bollinger_width(close30[:-3]) if len(close30) > 23 else bw_now
+        # queremos bw_now menor ou parecido com o passado, não abrindo explosão
+        bollinger_afunilando = bw_now <= bw_prev * 1.05
+
+        # ------------------------------------------------
+        # 30m → fluxo vendedor enfraquecendo (comparação simples)
+        # ------------------------------------------------
         taker_buy  = float(t.get("takerBuyQuoteAssetVolume", 0) or 0)
         taker_sell = max(float(t.get("quoteVolume", 0) or 0) - taker_buy, 0)
-        fluxo30_ok = taker_buy >= taker_sell * 0.85  # vendedor enfraquecendo
+        soma_fluxo = taker_buy + taker_sell or 1e-12
+        # fração compradora não pode ser minúscula (sem massacre vendedor)
+        frac_buy = taker_buy / soma_fluxo
+        fluxo30_ok = frac_buy >= 0.4
 
-        bw30 = bollinger_width(close30)  # volatilidade apertando
-
-        base30_ok = pavio30_forte and candle30_fraco and vol30_estavel and fluxo30_ok and bw30 <= 25
+        base30_ok = (
+            teve_queda and queda_perdendo_forca and
+            corpo_controlado and pavio_defendido and
+            vol30_ok and bollinger_afunilando and fluxo30_ok
+        )
 
         if not base30_ok:
             return
 
-        # ----- 15m: micro pivô + fluxo virando -----
+        # ------------------------------------------------
+        # 15m → micro pivô, fluxo reagindo, MACD virando
+        # ------------------------------------------------
         close15 = [float(x[4]) for x in k15]
         vol15   = [float(x[5]) for x in k15]
 
@@ -235,35 +293,46 @@ async def scan_bottom(s, sym):
 
         nome = sym.replace("USDT", "")
 
-        vela_verde = c15 > o15
-        rompendo_max = c15 > max(float(k15[-2][4]), float(k15[-3][4]))
+        # micro pivô: rompe máxima recente (últimas 2 velas)
+        max_recent = max(float(k15[-2][4]), float(k15[-3][4]))
+        vela_verde      = c15 > o15
+        rompe_maxima    = c15 > max_recent
 
+        # EMA9 inclinando pra cima e começando a se aproximar da 21
         ema9_15  = ema(close15, 9)
         ema21_15 = ema(close15, 21)
-        ema_virando = ema9_15[-1] > ema21_15[-1]
+        ema9_subindo  = ema9_15[-1] > ema9_15[-2]
+        # não exigimos cruzamento, só aproximação/comportamento
+        ema9_perto_21 = ema9_15[-1] >= ema21_15[-1] * 0.97
 
+        # volume reagindo em relação aos últimos candles
         if len(vol15) >= 6:
-            vol15_media = sum(vol15[-6:-1]) / 5
+            vol15_ref = vol15[-6:-1]
         else:
-            vol15_media = sum(vol15[:-1]) / max(len(vol15) - 1, 1)
+            vol15_ref = vol15[:-1] or [v15]
+        vol15_med = sum(vol15_ref) / len(vol15_ref)
+        vol15_ok  = v15 >= vol15_med
 
-        vol15_ok = v15 >= vol15_media
-
+        # MACD virando (histograma subindo)
         hist15_up, _ = macd_virando(close15)
 
-        fundo_ok = vela_verde and rompendo_max and ema_virando and vol15_ok and hist15_up
+        fundo_ok = (
+            vela_verde and rompe_maxima and
+            ema9_subindo and ema9_perto_21 and
+            vol15_ok and hist15_up
+        )
 
         if fundo_ok and can_alert(sym, "bottom"):
             msgF = (
                 f"🟢 <b>FUNDO REAL DINÂMICO (30M + 15M)</b>\n\n"
                 f"{nome}\n"
-                f"30m: pavio forte + candle fraco\n"
-                f"30m: volume estabilizando, volatilidade reduzindo\n"
+                f"30m: queda perdeu força\n"
+                f"30m: candle defendido (pavio forte, corpo controlado)\n"
+                f"30m: volume estabilizando, Bollinger afunilando\n"
                 f"30m: fluxo vendedor enfraquecendo\n"
-                f"15m: candle verde rompendo máximas\n"
-                f"15m: EMA9 cruzando EMA21 pra cima\n"
-                f"15m: volume reagindo\n"
-                f"15m: MACD começando a virar\n"
+                f"15m: micro pivô rompendo máxima recente\n"
+                f"15m: EMA9 inclinando pra cima, aproximando da 21\n"
+                f"15m: volume reagindo + MACD virando\n"
                 f"⏱ {now_br()} BR"
             )
             await tg(s, msgF)
@@ -308,7 +377,7 @@ async def main_loop():
                 tasks = []
                 for sym in symbols:
                     tasks.append(scan_tf(s, sym))       # 3m ORIGINAL
-                    tasks.append(scan_bottom(s, sym))   # FUNDO REAL 30M+15M
+                    tasks.append(scan_bottom(s, sym))   # FUNDO REAL 30M+15M DINÂMICO
 
                 await asyncio.gather(*tasks)
 
