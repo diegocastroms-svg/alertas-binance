@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 from flask import Flask
 import threading
 
-app = Flask(name)
+app = Flask(__name__)
 @app.route("/")
 def home():
 return "V8.3R-3M OURO CONFLUÊNCIA ULTRARÁPIDA — Liquidez Real + FUNDO REAL ATIVO", 200
@@ -287,3 +287,4 @@ daemon=True
 ).start()
 
 asyncio.run(main_loop())
+
