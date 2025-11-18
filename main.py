@@ -20,8 +20,8 @@ BINANCE = "https://api.binance.com"
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 CHAT_ID = os.getenv("CHAT_ID", "").strip()
 
-MIN_VOL24 = 5_000_000      # liquidez mínima 5M USDT
-MIN_VOLAT = 2.0             # variação mínima 2%
+MIN_VOL24 = 5_000_000
+MIN_VOLAT = 2.0
 TOP_N = 50
 COOLDOWN = 900
 BOOK_DOM = 1.05
@@ -86,12 +86,7 @@ cooldown_early, cooldown_confirm, cooldown_bottom = {}, {}, {}
 
 def can_alert(sym, stage="early"):
     n = time.time()
-    if stage == "early":
-        cd = cooldown_early
-    elif stage == "confirm":
-        cd = cooldown_confirm
-    else:
-        cd = cooldown_bottom
+    cd = cooldown_early if stage=="early" else cooldown_confirm if stage=="confirm" else cooldown_bottom
     if n - cd.get(sym, 0) >= COOLDOWN:
         cd[sym] = n
         return True
@@ -114,7 +109,6 @@ async def scan_tf(s, sym, tf):
         vol24 = float(t.get("quoteVolume", 0) or 0)
         if vol24 < MIN_VOL24: return
 
-        # ---- Dados 3m (entrada antecipada / rompimento) ----
         k = await klines(s, sym, tf)
         if len(k) < 200: return
 
@@ -151,7 +145,6 @@ async def scan_tf(s, sym, tf):
                 f"⏱ {now_br()} BR"
             )
             await tg(s, msg)
-            print(f"[{now_br()}] ALERTA ENTRADA ANTECIPADA 3M {nome}")
 
         # --- Rompimento confirmado (3m) ---
         confirm_ok = (
@@ -174,17 +167,13 @@ async def scan_tf(s, sym, tf):
                 f"⏱ {now_br()} BR"
             )
             await tg(s, msg2)
-            print(f"[{now_br()}] ALERTA ROMPIMENTO CONFIRMADO 3M {nome}")
 
         # =======================================================
-        # FUNDO REAL (30m + 15m)
+        # FUNDO REAL (30m + 15m) — CORRIGIDO AQUI
         # =======================================================
         try:
             daily_change = float(t.get("priceChangePercent", 0) or 0.0)
-
-            # Só considerar moedas em queda relevante (queda > -6%)
             queda_ok = (daily_change <= -6.0)
-
             if not queda_ok:
                 return
 
@@ -197,10 +186,10 @@ async def scan_tf(s, sym, tf):
             vol30 = [float(x[5]) for x in k30]
             rsi30 = rsi(close30)
 
-            # RSI 30m entre 25 e 35 (zona de fundo real)
-            rsi30_ok = 25.0 <= rsi30 <= 35.0
+            # NOVO RSI DO FUNDO REAL (30–42)
+            rsi30_ok = 30.0 <= rsi30 <= 42.0
 
-            # Candle de 30m com pavio inferior grande
+            # Candle 30m com pavio inferior forte
             last30 = k30[-1]
             o30 = float(last30[1])
             h30 = float(last30[2])
@@ -211,24 +200,39 @@ async def scan_tf(s, sym, tf):
             pavio_inf = min(c30, o30) - l30
             pavio_ratio_ok = (pavio_inf / range30) >= 0.4 and corpo30 <= range30
 
-            # Volume 30m aliviando: volume atual <= máximo das últimas 3 barras (sem ser a atual)
+            # Volume 30m aliviando
             if len(vol30) >= 4:
                 vol30_ok = vol30[-1] <= max(vol30[-4:-1])
             else:
                 vol30_ok = True
 
-            # 15m: primeira vela verde forte com volume
+            # 15m — vela verde com volume
+            close15 = [float(x[4]) for x in k15]
             last15 = k15[-1]
             o15 = float(last15[1])
             c15 = float(last15[4])
             v15 = float(last15[5])
             vol15 = [float(x[5]) for x in k15]
+
             if len(vol15) >= 6:
                 vol15_media = sum(vol15[-6:-1]) / 5
             else:
                 vol15_media = sum(vol15[:-1]) / max(len(vol15) - 1, 1)
+
             vela15_verde = c15 > o15
             vol15_forte = v15 > vol15_media
+
+            # NOVO — fluxo real (takerBuy > takerSell)
+            fluxo_ok = taker_buy > taker_sell
+
+            # NOVO — EMA9 virando no 15m
+            ema9_15 = ema(close15, 9)
+            ema9_15_prev = ema9_15[-2]
+            ema9_15_now  = ema9_15[-1]
+            ema9_virando = ema9_15_now > ema9_15_prev
+
+            # NOVO — preço defendendo o fundo
+            preco_defendido = c30 > (l30 + (range30 * 0.35))
 
             fundo_real_ok = (
                 queda_ok
@@ -237,6 +241,9 @@ async def scan_tf(s, sym, tf):
                 and vol30_ok
                 and vela15_verde
                 and vol15_forte
+                and fluxo_ok
+                and ema9_virando
+                and preco_defendido
             )
 
             if fundo_real_ok and can_alert(sym, "bottom"):
@@ -245,13 +252,14 @@ async def scan_tf(s, sym, tf):
                     f"{nome}\n\n"
                     f"Queda 24h: <b>{daily_change:.2f}%</b>\n"
                     f"RSI 30m: <b>{rsi30:.1f}</b>\n"
-                    f"Candle 30m: pavio inferior forte\n"
-                    f"Volume 30m: aliviando\n"
-                    f"15m: 1ª vela verde com volume acima da média\n"
+                    f"Pavio 30m: <b>forte</b> | Volume: <b>aliviando</b>\n"
+                    f"15m: <b>verde com volume acima da média</b>\n"
+                    f"EMA9 15m: <b>virando pra cima</b>\n"
+                    f"Fluxo: <b>{taker_buy:,.0f}</b> ↑ vs <b>{taker_sell:,.0f}</b>\n"
                     f"⏱ {now_br()} BR"
                 )
                 await tg(s, msg3)
-                print(f"[{now_br()}] ALERTA FUNDO REAL 30M+15M {nome}")
+
         except Exception as e:
             print("Erro fundo_real:", e)
 
@@ -267,6 +275,7 @@ async def main_loop():
                 if data_resp.status != 200:
                     await asyncio.sleep(SCAN_INTERVAL); continue
                 data = await data_resp.json()
+
                 symbols = [
                     d["symbol"] for d in data
                     if d["symbol"].endswith("USDT")
@@ -277,6 +286,7 @@ async def main_loop():
                         "EUR","USDE","TRY","GBP","BRL","AUD","CAD"
                     ])
                 ]
+
                 symbols = sorted(
                     symbols,
                     key=lambda x: next((float(t.get("quoteVolume") or 0) for t in data if t["symbol"] == x), 0),
@@ -290,11 +300,12 @@ async def main_loop():
 
             except Exception as e:
                 print("Erro main_loop:", e)
+
             await asyncio.sleep(SCAN_INTERVAL)
 
 threading.Thread(
-    target=lambda: app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000))),
+    target=lambda: app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)) ),
     daemon=True
 ).start()
-asyncio.run(main_loop())
 
+asyncio.run(main_loop())
