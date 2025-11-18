@@ -1,4 +1,4 @@
-# main.py — V8.3R-3M OURO CONFLUÊNCIA ULTRARÁPIDA — + FUNDO REAL 30M/15M (NOVO CORRIGIDO)
+# main.py — V8.3R-3M OURO CONFLUÊNCIA ULTRARÁPIDA — + FUNDO REAL 30M/15M (CORRIGIDO FINAL)
 
 import os, asyncio, aiohttp, time
 from datetime import datetime, timedelta, timezone
@@ -79,9 +79,12 @@ def bollinger_width(close,p=20):
     up=m+2*std; dn=m-2*std
     return ((up-dn)/m)*100.0
 
-cooldown_early={},{}
-cooldown_confirm={}
-cooldown_bottom={}
+# ===============================
+# CORREÇÃO CRÍTICA DO COOLDOWN
+# ===============================
+cooldown_early   = {}
+cooldown_confirm = {}
+cooldown_bottom  = {}
 
 def can_alert(sym,stage="early"):
     n=time.time()
@@ -126,9 +129,9 @@ async def scan_tf(s,sym,tf):
 
         nome=sym.replace("USDT","")
 
-        # ------------------------------------------------
-        # 3M ORIGINAL — NÃO ALTERADO (pedido do Diego)
-        # ------------------------------------------------
+        # ================================
+        # ALERTA 3M (ORIGINAL)
+        # ================================
         rsi_ok=60<=r<=70
         vol_ok=vs>=140
         bb_ok=bw<=18
@@ -159,9 +162,10 @@ async def scan_tf(s,sym,tf):
                 )
                 await tg(s,msg)
 
-        # ------------------------------------------------
-        # FUNDO REAL — 30M + 15M (DINÂMICO CORRIGIDO)
-        # ------------------------------------------------
+
+        # ================================
+        # FUNDO REAL 30M + 15M
+        # ================================
         if tf=="30m":
             try:
                 last30=k[-1]
@@ -184,7 +188,6 @@ async def scan_tf(s,sym,tf):
                 if not base30_ok:
                     return
 
-                # 15M CONFIRMAÇÃO
                 k15 = await klines(s,sym,"15m")
                 if len(k15)<20: return
 
@@ -194,7 +197,6 @@ async def scan_tf(s,sym,tf):
                 last15=k15[-1]
                 o15=float(last15[1])
                 c15=float(last15[4])
-                h15=float(last15[2])
 
                 vela_verde = c15>o15
                 rompendo = c15 > max(float(k15[-2][4]), float(k15[-3][4]))
