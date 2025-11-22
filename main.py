@@ -1,5 +1,3 @@
-# main.py — V8.3R-3M OURO CONFLUÊNCIA ULTRARÁPIDA — 3M + FUNDO REAL DINÂMICO 30M/15M
-
 import os, asyncio, aiohttp, time
 from datetime import datetime, timedelta, timezone
 from flask import Flask
@@ -79,7 +77,6 @@ def bollinger_width(close, p=20):
     up = m + 2*std; dn = m - 2*std
     return ((up - dn) / m) * 100.0
 
-# cooldowns: 3m (early, confirm) + fundo (bottom)
 cooldown_early, cooldown_confirm, cooldown_bottom = {}, {}, {}
 
 def can_alert(sym, stage="early"):
@@ -104,7 +101,7 @@ async def ticker(s, sym):
         return await r.json() if r.status == 200 else None
 
 # =====================================================
-# 3M ORIGINAL — NÃO MEXI EM NADA
+# 3M — APENAS ROMPIMENTO + NOVA MÉDIA 100
 # =====================================================
 async def scan_tf(s, sym):
     try:
@@ -121,6 +118,7 @@ async def scan_tf(s, sym):
         vol   = [float(x[5]) for x in k]
 
         ema200 = ema(close, 200)[-1]
+        ema100 = ema(close, 100)[-1]
         price  = close[-1]
         r      = rsi(close)
         vs     = vol_strength(vol)
@@ -133,29 +131,22 @@ async def scan_tf(s, sym):
 
         nome = sym.replace("USDT", "")
 
-        # ------------------------------
-        # Entrada antecipada 100% ORIGINAL
-        # ------------------------------
-        rsi_ok  = 60 <= r <= 70
-        vol_ok  = vs >= 140
-        bb_ok   = bw <= 18
-        price_ok = (price > ema200) or (abs(price - ema200)/ema200 <= 0.01)
-
-        if rsi_ok and vol_ok and hist_up and bb_ok and price_ok and book_ok and can_alert(sym, "early"):
-            msg = (
-                f"⚡ <b>ENTRADA ANTECIPADA (3M)</b>\n\n"
+        # --------------------------------------------------------
+        # ALERTA DA MÉDIA DE 100 — EXATAMENTE COMO PEDIDO
+        # --------------------------------------------------------
+        if price < ema200 and close[-2] < ema100 and price > ema100 and 40 <= r <= 70 and can_alert(sym, "early"):
+            msgN = (
+                f"⚠️ <b>ALERTA — ROMPIMENTO M100 (3M)</b>\n\n"
                 f"{nome}\nPreço: {price:.6f}\n"
-                f"RSI: {r:.1f} | MACD virando\n"
-                f"Vol força: {vs:.0f}%\n"
-                f"Bollinger: {bw:.1f}% | EMA200: {ema200:.6f}\n"
-                f"Fluxo: {taker_buy:,.0f} vs {taker_sell:,.0f}\n"
+                f"RSI: {r:.1f}\n"
+                f"M100 rompida pra cima\n"
                 f"⏱ {now_br()} BR"
             )
-            await tg(s, msg)
+            await tg(s, msgN)
 
-        # ------------------------------
-        # Rompimento confirmado ORIGINAL
-        # ------------------------------
+        # --------------------------------------------------------
+        # ROMPIMENTO CONFIRMADO (ÚNICO ALERTA ORIGINAL MANTIDO)
+        # --------------------------------------------------------
         confirm_ok = (
             len(close) >= 3
             and close[-3] < ema200
@@ -181,7 +172,7 @@ async def scan_tf(s, sym):
         print("Erro scan_tf (3m):", e)
 
 # =====================================================
-# FUNDO REAL DINÂMICO — 30M + 15M (SEM RSI / QUEDA FIXA)
+# FUNDO REAL (30M + 15M) — SEM ALERTA (APENAS LÓGICA)
 # =====================================================
 async def scan_bottom(s, sym):
     try:
@@ -199,7 +190,6 @@ async def scan_bottom(s, sym):
         close30 = [float(x[4]) for x in k30]
         vol30   = [float(x[5]) for x in k30]
 
-        # ----- 30m: queda perdeu força (comportamento, não número) -----
         last30 = k30[-1]
         o30 = float(last30[1])
         h30 = float(last30[2])
@@ -209,14 +199,11 @@ async def scan_bottom(s, sym):
         corpo30 = abs(c30 - o30)
         pavio_inf = min(c30, o30) - l30
 
-        # mínimas recentes: fundo deixando de fazer nova mínima
         lows30 = [float(c[3]) for c in k30[-4:]]
         higher_low = lows30[-1] >= min(lows30[:-1])
 
-        # pavio mandando mais que o corpo → defesa forte do preço
         pavio_bom = pavio_inf > corpo30
 
-        # volume estável: nem morto, nem explosão louca
         if len(vol30) >= 5:
             v_slice = vol30[-5:]
             v_min = min(v_slice)
@@ -225,22 +212,19 @@ async def scan_bottom(s, sym):
         else:
             vol30_ok = True
 
-        # fluxo: comprador pelo menos segurando o preço
         taker_buy  = float(t.get("takerBuyQuoteAssetVolume", 0) or 0)
         taker_sell = max(float(t.get("quoteVolume", 0) or 0) - taker_buy, 0)
-        fluxo30_ok = taker_buy >= taker_sell  # sem fator fixo, só não pode ter vendedor dominando
+        fluxo30_ok = taker_buy >= taker_sell
 
-        # volatilidade: bollinger atual menor ou igual à anterior (afunilando)
         bw30_now  = bollinger_width(close30)
         bw30_prev = bollinger_width(close30[:-1]) if len(close30) > 20 else bw30_now
-        bw30_ok   = bw30_now <= bw30_prev * 1.05  # basicamente igual ou menor
+        bw30_ok   = bw30_now <= bw30_prev * 1.05
 
         base30_ok = higher_low and pavio_bom and vol30_ok and fluxo30_ok and bw30_ok
 
         if not base30_ok:
             return
 
-        # ----- 15m: micro pivô + fluxo virando -----
         close15 = [float(x[4]) for x in k15]
         vol15   = [float(x[5]) for x in k15]
 
@@ -255,15 +239,14 @@ async def scan_bottom(s, sym):
 
         vela_verde = c15 > o15
 
-        # rompendo MÁXIMA dos 2 candles anteriores (micro pivô)
         prev_highs = [float(k15[-2][2]), float(k15[-3][2])]
         rompendo_max = h15 > max(prev_highs) and c15 > max(prev_highs)
 
         ema9_15  = ema(close15, 9)
         ema21_15 = ema(close15, 21)
         ema_virando = (
-            ema9_15[-1] > ema21_15[-1] and  # já acima
-            ema9_15[-1] > ema9_15[-2]       # inclinando pra cima
+            ema9_15[-1] > ema21_15[-1]
+            and ema9_15[-1] > ema9_15[-2]
         )
 
         if len(vol15) >= 6:
@@ -276,20 +259,8 @@ async def scan_bottom(s, sym):
 
         fundo_ok = vela_verde and rompendo_max and ema_virando and vol15_ok and hist15_up
 
-        if fundo_ok and can_alert(sym, "bottom"):
-            msgF = (
-                f"🟢 <b>FUNDO REAL DINÂMICO (30M + 15M)</b>\n\n"
-                f"{nome}\n"
-                f"30m: mínima deixando de cair (higher low)\n"
-                f"30m: pavio inferior forte > corpo\n"
-                f"30m: volume estável, volatilidade afunilando\n"
-                f"30m: fluxo vendedor perdeu força\n"
-                f"15m: candle verde rompendo máximas\n"
-                f"15m: EMA9 acima da EMA21 e inclinando pra cima\n"
-                f"15m: volume reagindo + MACD virando\n"
-                f"⏱ {now_br()} BR"
-            )
-            await tg(s, msgF)
+        # *** ALERTA REMOVIDO ***
+        return
 
     except Exception as e:
         print("Erro scan_bottom (30m/15m):", e)
@@ -330,8 +301,8 @@ async def main_loop():
 
                 tasks = []
                 for sym in symbols:
-                    tasks.append(scan_tf(s, sym))       # 3m ORIGINAL
-                    tasks.append(scan_bottom(s, sym))   # FUNDO REAL 30M+15M
+                    tasks.append(scan_tf(s, sym))
+                    tasks.append(scan_bottom(s, sym))
 
                 await asyncio.gather(*tasks)
 
