@@ -101,7 +101,7 @@ async def ticker(s, sym):
         return await r.json() if r.status == 200 else None
 
 # =====================================================
-# 3M — APENAS ROMPIMENTO + NOVA MÉDIA 100
+# 3M — APENAS ROMPIMENTO + MÉDIA 50 (ALTERAÇÃO ÚNICA)
 # =====================================================
 async def scan_tf(s, sym):
     try:
@@ -118,7 +118,7 @@ async def scan_tf(s, sym):
         vol   = [float(x[5]) for x in k]
 
         ema200 = ema(close, 200)[-1]
-        ema100 = ema(close, 100)[-1]
+        ema50  = ema(close, 50)[-1]    # *** ALTERADO: ERA MA100 → AGORA MA50 ***
         price  = close[-1]
         r      = rsi(close)
         vs     = vol_strength(vol)
@@ -132,20 +132,20 @@ async def scan_tf(s, sym):
         nome = sym.replace("USDT", "")
 
         # --------------------------------------------------------
-        # ALERTA DA MÉDIA DE 100 — EXATAMENTE COMO PEDIDO
+        # ALERTA DA MÉDIA DE 50 — ÚNICA ALTERAÇÃO
         # --------------------------------------------------------
-        if price < ema200 and close[-2] < ema100 and price > ema100 and 40 <= r <= 70 and can_alert(sym, "early"):
+        if price < ema200 and close[-2] < ema50 and price > ema50 and 40 <= r <= 70 and can_alert(sym, "early"):
             msgN = (
-                f"⚠️ <b>ALERTA — ROMPIMENTO M100 (3M)</b>\n\n"
+                f"⚠️ <b>ALERTA — ROMPIMENTO M50 (3M)</b>\n\n"
                 f"{nome}\nPreço: {price:.6f}\n"
                 f"RSI: {r:.1f}\n"
-                f"M100 rompida pra cima\n"
+                f"M50 rompida pra cima\n"
                 f"⏱ {now_br()} BR"
             )
             await tg(s, msgN)
 
         # --------------------------------------------------------
-        # ROMPIMENTO CONFIRMADO (ÚNICO ALERTA ORIGINAL MANTIDO)
+        # ROMPIMENTO CONFIRMADO (ÚNICO ALERTA ORIGINAL)
         # --------------------------------------------------------
         confirm_ok = (
             len(close) >= 3
@@ -172,7 +172,7 @@ async def scan_tf(s, sym):
         print("Erro scan_tf (3m):", e)
 
 # =====================================================
-# FUNDO REAL (30M + 15M) — SEM ALERTA (APENAS LÓGICA)
+# FUNDO REAL (30M + 15M) — ALERTAS REMOVIDOS
 # =====================================================
 async def scan_bottom(s, sym):
     try:
@@ -259,7 +259,6 @@ async def scan_bottom(s, sym):
 
         fundo_ok = vela_verde and rompendo_max and ema_virando and vol15_ok and hist15_up
 
-        # *** ALERTA REMOVIDO ***
         return
 
     except Exception as e:
