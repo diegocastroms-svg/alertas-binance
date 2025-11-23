@@ -101,7 +101,7 @@ async def ticker(s, sym):
         return await r.json() if r.status == 200 else None
 
 # =====================================================
-# 3M — APENAS ROMPIMENTO + MÉDIA 50 (ALTERAÇÃO ÚNICA)
+# 3M — APENAS ROMPIMENTO + MÉDIA 50 (CORRIGIDO PRA CIMA)
 # =====================================================
 async def scan_tf(s, sym):
     try:
@@ -118,7 +118,7 @@ async def scan_tf(s, sym):
         vol   = [float(x[5]) for x in k]
 
         ema200 = ema(close, 200)[-1]
-        ema50  = ema(close, 50)[-1]    # *** ALTERADO: ERA MA100 → AGORA MA50 ***
+        ema50  = ema(close, 50)[-1]
         price  = close[-1]
         r      = rsi(close)
         vs     = vol_strength(vol)
@@ -132,9 +132,16 @@ async def scan_tf(s, sym):
         nome = sym.replace("USDT", "")
 
         # --------------------------------------------------------
-        # ALERTA DA MÉDIA DE 50 — ÚNICA ALTERAÇÃO
+        # ALERTA — ROMPIMENTO M50 (3M) SOMENTE PRA CIMA (CORRIGIDO)
         # --------------------------------------------------------
-        if price < ema200 and close[-2] < ema50 and price > ema50 and 40 <= r <= 70 and can_alert(sym, "early"):
+        if (
+            price < ema200
+            and close[-2] < ema50
+            and price > ema50
+            and close[-1] > close[-2]      # <<< CORREÇÃO EXIGIDA
+            and 40 <= r <= 70
+            and can_alert(sym, "early")
+        ):
             msgN = (
                 f"⚠️ <b>ALERTA — ROMPIMENTO M50 (3M)</b>\n\n"
                 f"{nome}\nPreço: {price:.6f}\n"
@@ -145,7 +152,7 @@ async def scan_tf(s, sym):
             await tg(s, msgN)
 
         # --------------------------------------------------------
-        # ROMPIMENTO CONFIRMADO (ÚNICO ALERTA ORIGINAL)
+        # ROMPIMENTO CONFIRMADO (3M) — INALTERADO
         # --------------------------------------------------------
         confirm_ok = (
             len(close) >= 3
