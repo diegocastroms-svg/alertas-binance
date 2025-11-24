@@ -111,7 +111,7 @@ async def scan_tf(s, sym):
         vol24 = float(t.get("quoteVolume", 0) or 0)
         if vol24 < MIN_VOL24: return
 
-        k = await klines(s, sym, "3m")
+        k = await klines(s, sym, "5m")
         if len(k) < 200: return
 
         close = [float(x[4]) for x in k]
@@ -323,4 +323,5 @@ threading.Thread(
 ).start()
 
 asyncio.run(main_loop())
+
 
