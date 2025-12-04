@@ -6,7 +6,7 @@ import threading
 app = Flask(__name__)
 @app.route("/")
 def home():
-    return "V8.3R-3M — SOMENTE ROMPIMENTO CONFIRMADO (3M)", 200
+    return "V8.3R-15M — SOMENTE CRUZAMENTO EMA200 (15M)", 200
 
 @app.route("/health")
 def health():
@@ -20,7 +20,6 @@ MIN_VOL24 = 2_000_000
 MIN_VOLAT = 2.0
 TOP_N = 50
 COOLDOWN = 900
-BOOK_DOM = 1.05
 SCAN_INTERVAL = 30
 
 def now_br():
@@ -46,36 +45,12 @@ def ema(data, p):
         out.append(e)
     return out
 
-def rsi(prices, p=14):
-    if len(prices) < p + 1: return 50
-    d = [prices[i] - prices[i-1] for i in range(1, len(prices))]
-    gains = [max(x, 0) for x in d[-p:]]
-    losses = [abs(min(x, 0)) for x in d[-p:]]
-    ag, al = sum(gains)/p, (sum(losses)/p or 1e-12)
-    return 100 - 100 / (1 + ag / al)
-
-def macd_virando(close):
-    if len(close) < 26: return False, 0.0
-    e12 = ema(close, 12); e26 = ema(close, 26)
-    macd_series = [a - b for a, b in zip(e12, e26)]
-    signal_series = ema(macd_series, 9)
-    hist = macd_series[-1] - signal_series[-1]
-    hist_prev = macd_series[-2] - signal_series[-2] if len(macd_series) >= 2 else hist
-    return hist > hist_prev, hist
-
-def vol_strength(vol):
-    if len(vol) < 21: return 100.0
-    ma9 = sum(vol[-9:]) / 9
-    ma21 = sum(vol[-21:]) / 21
-    base = (ma9 + ma21) / 2 or 1e-12
-    return (vol[-1] / base) * 100.0
-
-cooldown_confirm = {}
+cooldown_cross = {}
 
 def can_alert(sym):
     n = time.time()
-    if n - cooldown_confirm.get(sym, 0) >= COOLDOWN:
-        cooldown_confirm[sym] = n
+    if n - cooldown_cross.get(sym, 0) >= COOLDOWN:
+        cooldown_cross[sym] = n
         return True
     return False
 
@@ -88,7 +63,9 @@ async def ticker(s, sym):
         return await r.json() if r.status == 200 else None
 
 # =====================================================
-# SOMENTE ALERTA — ROMPIMENTO CONFIRMADO (3M)
+# NOVO ALERTA ÚNICO — CRUZAMENTO DA EMA200 (15M)
+# SEM MACD, SEM RSI, SEM FLUXO, SEM VOLUME
+# SEM PRECISAR FECHAR A VELA
 # =====================================================
 async def scan_tf(s, sym):
     try:
@@ -98,54 +75,41 @@ async def scan_tf(s, sym):
         vol24 = float(t.get("quoteVolume", 0) or 0)
         if vol24 < MIN_VOL24: return
 
-        k = await klines(s, sym, "5m")
+        # === TIMEFRAME 15 MINUTOS ===
+        k = await klines(s, sym, "15m")
         if len(k) < 200: return
 
         close = [float(x[4]) for x in k]
-        vol   = [float(x[5]) for x in k]
-
         ema200 = ema(close, 200)[-1]
         price  = close[-1]
-        r      = rsi(close)
-        vs     = vol_strength(vol)
-        hist_up, _ = macd_virando(close)
-
-        taker_buy  = float(t.get("takerBuyQuoteAssetVolume", 0) or 0)
-        taker_sell = max(float(t.get("quoteVolume", 0) or 0) - taker_buy, 0)
-        book_ok = (taker_buy >= taker_sell * BOOK_DOM) or taker_buy == 0
 
         nome = sym.replace("USDT", "")
 
-        confirm_ok = (
-            len(close) >= 3
-            and close[-3] < ema200
-            and close[-2] > ema200
-            and close[-1] > ema200
-            and hist_up and r > 65 and vs >= 150
-            and book_ok and can_alert(sym)
+        # CRUZAMENTO (close[-2] < ema200 e close[-1] > ema200)
+        cruzamento = (
+            close[-2] < ema200 and
+            close[-1] > ema200 and
+            can_alert(sym)
         )
 
-        if confirm_ok:
-            msg2 = (
-                f"💥 <b>ROMPIMENTO CONFIRMADO (3M)</b>\n\n"
+        if cruzamento:
+            msg = (
+                f"💥 <b>CRUZAMENTO EMA200 (15M)</b>\n\n"
                 f"{nome}\nPreço: {price:.6f}\n"
-                f"RSI: {r:.1f}\n"
-                f"Vol força: {vs:.0f}%\n"
                 f"EMA200: {ema200:.6f}\n"
-                f"Fluxo: {taker_buy:,.0f} vs {taker_sell:,.0f}\n"
                 f"⏱ {now_br()} BR"
             )
-            await tg(s, msg2)
+            await tg(s, msg)
 
     except Exception as e:
-        print("Erro scan_tf (3m):", e)
+        print("Erro scan_tf (15m):", e)
 
 # =====================================================
-# LOOP PRINCIPAL (SEM FUNDO, SEM EARLY)
+# LOOP PRINCIPAL (SÓ O ALERTA DE CRUZAMENTO)
 # =====================================================
 async def main_loop():
     async with aiohttp.ClientSession() as s:
-        await tg(s, "<b>V8.3R — SOMENTE ROMPIMENTO CONFIRMADO (3M)</b>")
+        await tg(s, "<b>V8.3R — SOMENTE CRUZAMENTO EMA200 (15M)</b>")
         while True:
             try:
                 data_resp = await s.get(f"{BINANCE}/api/v3/ticker/24hr", timeout=10)
@@ -174,10 +138,7 @@ async def main_loop():
                     reverse=True
                 )[:TOP_N]
 
-                tasks = []
-                for sym in symbols:
-                    tasks.append(scan_tf(s, sym))
-
+                tasks = [scan_tf(s, sym) for sym in symbols]
                 await asyncio.gather(*tasks)
 
             except Exception as e:
