@@ -6,7 +6,7 @@ import threading
 app = Flask(__name__)
 @app.route("/")
 def home():
-    return "V8.3R-15M — SOMENTE CRUZAMENTO EMA200 (15M)", 200
+    return "V8.3R-15M — CRUZAMENTO MA200 (15M)", 200
 
 @app.route("/health")
 def health():
@@ -16,9 +16,11 @@ BINANCE = "https://api.binance.com"
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 CHAT_ID = os.getenv("CHAT_ID", "").strip()
 
-MIN_VOL24 = 2_000_000
+# ===== ALTERADO PARA 1 MILHÃO =====
+MIN_VOL24 = 1_000_000
+
 MIN_VOLAT = 2.0
-TOP_N = 50
+TOP_N = 80
 COOLDOWN = 900
 SCAN_INTERVAL = 30
 
@@ -37,14 +39,6 @@ async def tg(s, msg):
     except Exception as e:
         print("Erro Telegram:", e)
 
-def ema(data, p):
-    if not data: return []
-    a = 2 / (p + 1); e = data[0]; out = [e]
-    for x in data[1:]:
-        e = a * x + (1 - a) * e
-        out.append(e)
-    return out
-
 cooldown_cross = {}
 
 def can_alert(sym):
@@ -55,7 +49,7 @@ def can_alert(sym):
     return False
 
 async def klines(s, sym, tf):
-    async with s.get(f"{BINANCE}/api/v3/klines?symbol={sym}&interval={tf}&limit=200", timeout=10) as r:
+    async with s.get(f"{BINANCE}/api/v3/klines?symbol={sym}&interval=15m&limit=200", timeout=10) as r:
         return await r.json() if r.status == 200 else []
 
 async def ticker(s, sym):
@@ -63,9 +57,7 @@ async def ticker(s, sym):
         return await r.json() if r.status == 200 else None
 
 # =====================================================
-# NOVO ALERTA ÚNICO — CRUZAMENTO DA EMA200 (15M)
-# SEM MACD, SEM RSI, SEM FLUXO, SEM VOLUME
-# SEM PRECISAR FECHAR A VELA
+# ALERTA ÚNICO: CRUZAMENTO MA200 (15M)
 # =====================================================
 async def scan_tf(s, sym):
     try:
@@ -75,28 +67,28 @@ async def scan_tf(s, sym):
         vol24 = float(t.get("quoteVolume", 0) or 0)
         if vol24 < MIN_VOL24: return
 
-        # === TIMEFRAME 15 MINUTOS ===
         k = await klines(s, sym, "15m")
         if len(k) < 200: return
 
         close = [float(x[4]) for x in k]
-        ema200 = ema(close, 200)[-1]
-        price  = close[-1]
+
+        # ===== TROCA DE EMA PARA MA =====
+        ma200 = sum(close[-200:]) / 200
+        price = close[-1]
 
         nome = sym.replace("USDT", "")
 
-        # CRUZAMENTO (close[-2] < ema200 e close[-1] > ema200)
         cruzamento = (
-            close[-2] < ema200 and
-            close[-1] > ema200 and
+            close[-2] < ma200 and
+            close[-1] > ma200 and
             can_alert(sym)
         )
 
         if cruzamento:
             msg = (
-                f"💥 <b>CRUZAMENTO EMA200 (15M)</b>\n\n"
+                f"💥 <b>CRUZAMENTO MA200 (15M)</b>\n\n"
                 f"{nome}\nPreço: {price:.6f}\n"
-                f"EMA200: {ema200:.6f}\n"
+                f"MA200: {ma200:.6f}\n"
                 f"⏱ {now_br()} BR"
             )
             await tg(s, msg)
@@ -105,11 +97,11 @@ async def scan_tf(s, sym):
         print("Erro scan_tf (15m):", e)
 
 # =====================================================
-# LOOP PRINCIPAL (SÓ O ALERTA DE CRUZAMENTO)
+# LOOP PRINCIPAL
 # =====================================================
 async def main_loop():
     async with aiohttp.ClientSession() as s:
-        await tg(s, "<b>V8.3R — SOMENTE CRUZAMENTO EMA200 (15M)</b>")
+        await tg(s, "<b>V8.3R — CRUZAMENTO MA200 (15M)</b>")
         while True:
             try:
                 data_resp = await s.get(f"{BINANCE}/api/v3/ticker/24hr", timeout=10)
