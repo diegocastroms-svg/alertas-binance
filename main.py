@@ -16,9 +16,9 @@ BINANCE = "https://api.binance.com"
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 CHAT_ID = os.getenv("CHAT_ID", "").strip()
 
-MIN_VOL24 = 1_000_000
+MIN_VOL24 = 500_000
 MIN_VOLAT = 2.0
-TOP_N = 50
+TOP_N = 80
 COOLDOWN = 900
 SCAN_INTERVAL = 30
 
@@ -156,3 +156,4 @@ threading.Thread(
 ).start()
 
 asyncio.run(main_loop())
+
