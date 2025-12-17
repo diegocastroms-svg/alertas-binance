@@ -4,9 +4,10 @@ from flask import Flask
 import threading
 
 app = Flask(__name__)
+
 @app.route("/")
 def home():
-    return "V8.3R — MA200 (1H ON / 15M OFF)", 200
+    return "V8.3R — MA200 ATIVO (1H) / 15M DESLIGADO", 200
 
 @app.route("/health")
 def health():
@@ -16,7 +17,7 @@ BINANCE = "https://api.binance.com"
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 CHAT_ID = os.getenv("CHAT_ID", "").strip()
 
-# ===== ALTERADO PARA 500 MIL =====
+# ===== VOLUME AJUSTADO =====
 MIN_VOL24 = 500_000
 
 MIN_VOLAT = 2.0
@@ -24,20 +25,21 @@ TOP_N = 50
 COOLDOWN = 900
 SCAN_INTERVAL = 30
 
-# ===== FLAGS (15M DESLIGADO, 1H LIGADO) =====
-ENABLE_15M = False
-ENABLE_1H  = True
-
 def now_br():
     return (datetime.now(timezone.utc) - timedelta(hours=3)).strftime("%H:%M:%S")
 
 async def tg(s, msg):
     if not TELEGRAM_TOKEN:
-        print(msg); return
+        print(msg)
+        return
     try:
         await s.post(
             f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-            data={"chat_id": CHAT_ID, "text": msg, "parse_mode": "HTML"},
+            data={
+                "chat_id": CHAT_ID,
+                "text": msg,
+                "parse_mode": "HTML"
+            },
             timeout=10
         )
     except Exception as e:
@@ -45,111 +47,91 @@ async def tg(s, msg):
 
 cooldown_cross = {}
 
-def can_alert(sym, tf):
+def can_alert(sym):
     n = time.time()
-    key = f"{sym}_{tf}"
-    if n - cooldown_cross.get(key, 0) >= COOLDOWN:
-        cooldown_cross[key] = n
+    if n - cooldown_cross.get(sym, 0) >= COOLDOWN:
+        cooldown_cross[sym] = n
         return True
     return False
 
 async def klines(s, sym, tf):
-    async with s.get(f"{BINANCE}/api/v3/klines?symbol={sym}&interval={tf}&limit=200", timeout=10) as r:
+    async with s.get(
+        f"{BINANCE}/api/v3/klines?symbol={sym}&interval={tf}&limit=200",
+        timeout=10
+    ) as r:
         return await r.json() if r.status == 200 else []
 
 async def ticker(s, sym):
-    async with s.get(f"{BINANCE}/api/v3/ticker/24hr?symbol={sym}", timeout=10) as r:
+    async with s.get(
+        f"{BINANCE}/api/v3/ticker/24hr?symbol={sym}",
+        timeout=10
+    ) as r:
         return await r.json() if r.status == 200 else None
 
 # =====================================================
-# ALERTA 15M: CRUZAMENTO MA200 (15M)  [DESLIGADO, NÃO EXCLUÍDO]
+# ALERTA ATIVO: CRUZAMENTO MA200 (1H)
+# ALERTA 15M EXISTE MAS ESTÁ DESLIGADO
 # =====================================================
-async def scan_tf_15m(s, sym):
+async def scan_tf(s, sym):
     try:
         t = await ticker(s, sym)
-        if not t: return
+        if not t:
+            return
 
         vol24 = float(t.get("quoteVolume", 0) or 0)
-        if vol24 < MIN_VOL24: return
+        if vol24 < MIN_VOL24:
+            return
 
-        k = await klines(s, sym, "15m")
-        if len(k) < 200: return
-
-        close = [float(x[4]) for x in k]
-
-        ma200 = sum(close[-200:]) / 200
-        price = close[-1]
-
-        nome = sym.replace("USDT", "")
-
-        cruzamento = (
-            close[-2] < ma200 and
-            close[-1] > ma200 and
-            can_alert(sym, "15m")
-        )
-
-        if cruzamento:
-            msg = (
-                f"💥 <b>CRUZAMENTO MA200 (15M)</b>\n\n"
-                f"{nome}\nPreço: {price:.6f}\n"
-                f"MA200: {ma200:.6f}\n"
-                f"⏱ {now_br()} BR"
-            )
-            await tg(s, msg)
-
-    except Exception as e:
-        print("Erro scan_tf (15m):", e)
-
-# =====================================================
-# ALERTA 1H: CRUZAMENTO MA200 (1H)  [LIGADO]
-# =====================================================
-async def scan_tf_1h(s, sym):
-    try:
-        t = await ticker(s, sym)
-        if not t: return
-
-        vol24 = float(t.get("quoteVolume", 0) or 0)
-        if vol24 < MIN_VOL24: return
-
+        # ===== TIMEFRAME 1H =====
         k = await klines(s, sym, "1h")
-        if len(k) < 200: return
+        if len(k) < 200:
+            return
 
         close = [float(x[4]) for x in k]
 
+        # ===== MA200 =====
         ma200 = sum(close[-200:]) / 200
         price = close[-1]
 
         nome = sym.replace("USDT", "")
 
-        cruzamento = (
+        cruzamento_1h = (
             close[-2] < ma200 and
             close[-1] > ma200 and
-            can_alert(sym, "1h")
+            can_alert(sym)
         )
 
-        if cruzamento:
+        if cruzamento_1h:
             msg = (
-                f"💥 <b>CRUZAMENTO MA200 (1H)</b>\n\n"
-                f"{nome}\nPreço: {price:.6f}\n"
+                "<b>CRUZAMENTO MA200 (1H)</b>\n\n"
+                f"{nome}\n"
+                f"Preco: {price:.6f}\n"
                 f"MA200: {ma200:.6f}\n"
-                f"⏱ {now_br()} BR"
+                f"Hora: {now_br()} BR"
             )
             await tg(s, msg)
 
+        # ===== 15M EXISTE MAS ESTÁ DESLIGADO =====
+        # Nenhuma lógica executa aqui
+
     except Exception as e:
-        print("Erro scan_tf (1h):", e)
+        print("Erro scan_tf:", e)
 
 # =====================================================
 # LOOP PRINCIPAL
 # =====================================================
 async def main_loop():
     async with aiohttp.ClientSession() as s:
-        await tg(s, "<b>V8.3R — MA200 (1H ON / 15M OFF)</b>")
+        await tg(s, "<b>BOT INICIADO — MA200 1H ATIVO</b>")
         while True:
             try:
-                data_resp = await s.get(f"{BINANCE}/api/v3/ticker/24hr", timeout=10)
+                data_resp = await s.get(
+                    f"{BINANCE}/api/v3/ticker/24hr",
+                    timeout=10
+                )
                 if data_resp.status != 200:
-                    await asyncio.sleep(SCAN_INTERVAL); continue
+                    await asyncio.sleep(SCAN_INTERVAL)
+                    continue
 
                 data = await data_resp.json()
 
@@ -167,19 +149,14 @@ async def main_loop():
                 symbols = sorted(
                     symbols,
                     key=lambda x: next(
-                        (float(t.get("quoteVolume", 0) or 0) for t in data if t["symbol"] == x),
+                        (float(t.get("quoteVolume", 0) or 0)
+                         for t in data if t["symbol"] == x),
                         0
                     ),
                     reverse=True
                 )[:TOP_N]
 
-                tasks = []
-                for sym in symbols:
-                    if ENABLE_15M:
-                        tasks.append(scan_tf_15m(s, sym))
-                    if ENABLE_1H:
-                        tasks.append(scan_tf_1h(s, sym))
-
+                tasks = [scan_tf(s, sym) for sym in symbols]
                 await asyncio.gather(*tasks)
 
             except Exception as e:
@@ -188,9 +165,11 @@ async def main_loop():
             await asyncio.sleep(SCAN_INTERVAL)
 
 threading.Thread(
-    target=lambda: app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000))),
+    target=lambda: app.run(
+        host="0.0.0.0",
+        port=int(os.environ.get("PORT", 10000))
+    ),
     daemon=True
 ).start()
 
 asyncio.run(main_loop())
-```0
