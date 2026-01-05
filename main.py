@@ -6,7 +6,7 @@ import threading
 app = Flask(__name__)
 @app.route("/")
 def home():
-    return "V8.3R — MA200 (1H + 4H + 1D) | 15M DESLIGADO", 200
+    return "V8.3R — MA200 (15M + 1H + 4H + 1D) TODOS ATIVOS", 200
 
 @app.route("/health")
 def health():
@@ -22,8 +22,8 @@ TOP_N = 50
 COOLDOWN = 900
 SCAN_INTERVAL = 30
 
-# ===== FLAGS =====
-ENABLE_ALERT_15M = False
+# ===== FLAGS (TODOS ATIVOS) =====
+ENABLE_ALERT_15M = True
 ENABLE_ALERT_1H  = True
 ENABLE_ALERT_4H  = True
 ENABLE_ALERT_1D  = True
@@ -33,7 +33,8 @@ def now_br():
 
 async def tg(s, msg):
     if not TELEGRAM_TOKEN:
-        print(msg); return
+        print(msg)
+        return
     try:
         await s.post(
             f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
@@ -76,11 +77,40 @@ async def ticker(s, sym):
         return await r.json() if r.status == 200 else None
 
 # =====================================================
-# ALERTA 15M — EXISTE, MAS DESLIGADO
+# ALERTA 15M
 # =====================================================
 async def scan_tf_15m(s, sym):
-    if not ENABLE_ALERT_15M:
-        return
+    try:
+        if not ENABLE_ALERT_15M:
+            return
+
+        t = await ticker(s, sym)
+        if not t:
+            return
+
+        if float(t.get("quoteVolume", 0) or 0) < MIN_VOL24:
+            return
+
+        k = await klines(s, sym, "15m")
+        if len(k) < 200:
+            return
+
+        close = [float(x[4]) for x in k]
+        ma200 = sum(close[-200:]) / 200
+        price = close[-1]
+
+        if close[-2] < ma200 and close[-1] > ma200 and can_alert(sym, "15m"):
+            await tg(
+                s,
+                f"<b>CRUZAMENTO MA200 (15M)</b>\n\n"
+                f"{sym.replace('USDT','')}\n"
+                f"Preço: {price:.6f}\n"
+                f"MA200: {ma200:.6f}\n"
+                f"⏱ {now_br()} BR"
+            )
+
+    except Exception as e:
+        print("Erro scan_tf_15m:", e)
 
 # =====================================================
 # ALERTA 1H
@@ -91,13 +121,15 @@ async def scan_tf_1h(s, sym):
             return
 
         t = await ticker(s, sym)
-        if not t: return
+        if not t:
+            return
 
         if float(t.get("quoteVolume", 0) or 0) < MIN_VOL24:
             return
 
         k = await klines(s, sym, "1h")
-        if len(k) < 200: return
+        if len(k) < 200:
+            return
 
         close = [float(x[4]) for x in k]
         ma200 = sum(close[-200:]) / 200
@@ -117,7 +149,7 @@ async def scan_tf_1h(s, sym):
         print("Erro scan_tf_1h:", e)
 
 # =====================================================
-# ALERTA 4H — IGUAL AO 1H
+# ALERTA 4H
 # =====================================================
 async def scan_tf_4h(s, sym):
     try:
@@ -125,13 +157,15 @@ async def scan_tf_4h(s, sym):
             return
 
         t = await ticker(s, sym)
-        if not t: return
+        if not t:
+            return
 
         if float(t.get("quoteVolume", 0) or 0) < MIN_VOL24:
             return
 
         k = await klines(s, sym, "4h")
-        if len(k) < 200: return
+        if len(k) < 200:
+            return
 
         close = [float(x[4]) for x in k]
         ma200 = sum(close[-200:]) / 200
@@ -151,7 +185,7 @@ async def scan_tf_4h(s, sym):
         print("Erro scan_tf_4h:", e)
 
 # =====================================================
-# ALERTA 1D — IGUAL AO 1H
+# ALERTA 1D
 # =====================================================
 async def scan_tf_1d(s, sym):
     try:
@@ -159,13 +193,15 @@ async def scan_tf_1d(s, sym):
             return
 
         t = await ticker(s, sym)
-        if not t: return
+        if not t:
+            return
 
         if float(t.get("quoteVolume", 0) or 0) < MIN_VOL24:
             return
 
         k = await klines(s, sym, "1d")
-        if len(k) < 200: return
+        if len(k) < 200:
+            return
 
         close = [float(x[4]) for x in k]
         ma200 = sum(close[-200:]) / 200
@@ -189,7 +225,7 @@ async def scan_tf_1d(s, sym):
 # =====================================================
 async def main_loop():
     async with aiohttp.ClientSession() as s:
-        await tg(s, "<b>V8.3R — MA200 (1H + 4H + 1D) | 15M OFF</b>")
+        await tg(s, "<b>V8.3R — MA200 (15M + 1H + 4H + 1D) TODOS ATIVOS</b>")
         while True:
             try:
                 r = await s.get(f"{BINANCE}/api/v3/ticker/24hr", timeout=10)
@@ -212,10 +248,10 @@ async def main_loop():
 
                 tasks = []
                 for sym in symbols:
+                    tasks.append(scan_tf_15m(s, sym))
                     tasks.append(scan_tf_1h(s, sym))
                     tasks.append(scan_tf_4h(s, sym))
                     tasks.append(scan_tf_1d(s, sym))
-                    tasks.append(scan_tf_15m(s, sym))  # permanece desligado
 
                 await asyncio.gather(*tasks)
 
