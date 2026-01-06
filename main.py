@@ -6,7 +6,7 @@ import threading
 app = Flask(__name__)
 @app.route("/")
 def home():
-    return "V8.3R — CRUZAMENTO MA200 (15M + 1H + 4H + 1D)", 200
+    return "V8.3R - CRUZAMENTO MA200 (15M + 1H + 4H + 1D)", 200
 
 @app.route("/health")
 def health():
@@ -16,15 +16,12 @@ BINANCE = "https://api.binance.com"
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 CHAT_ID = os.getenv("CHAT_ID", "").strip()
 
-# ===== ALTERADO PARA 500 MIL =====
 MIN_VOL24 = 500_000
-
 MIN_VOLAT = 2.0
 TOP_N = 100
 COOLDOWN = 900
 SCAN_INTERVAL = 30
 
-# ===== ALERTAS ATIVOS =====
 ENABLE_ALERT_15M = True
 ENABLE_ALERT_1H  = True
 ENABLE_ALERT_4H  = True
@@ -66,16 +63,19 @@ def can_alert(sym, tf="15m"):
     return False
 
 async def klines(s, sym, tf):
-    async with s.get(f"{BINANCE}/api/v3/klines?symbol={sym}&interval={tf}&limit=200", timeout=10) as r:
+    async with s.get(
+        f"{BINANCE}/api/v3/klines?symbol={sym}&interval={tf}&limit=200",
+        timeout=10
+    ) as r:
         return await r.json() if r.status == 200 else []
 
 async def ticker(s, sym):
-    async with s.get(f"{BINANCE}/api/v3/ticker/24hr?symbol={sym}", timeout=10) as r:
+    async with s.get(
+        f"{BINANCE}/api/v3/ticker/24hr?symbol={sym}",
+        timeout=10
+    ) as r:
         return await r.json() if r.status == 200 else None
 
-# =====================================================
-# ALERTA (15M)
-# =====================================================
 async def scan_tf_15m(s, sym):
     try:
         if not ENABLE_ALERT_15M:
@@ -91,10 +91,8 @@ async def scan_tf_15m(s, sym):
         if len(k) < 200: return
 
         close = [float(x[4]) for x in k]
-
         ma200 = sum(close[-200:]) / 200
         price = close[-1]
-
         nome = sym.replace("USDT", "")
 
         cruzamento = (
@@ -105,19 +103,16 @@ async def scan_tf_15m(s, sym):
 
         if cruzamento:
             msg = (
-                f"💥 <b>CRUZAMENTO MA200 (15M)</b>\n\n"
-                f"{nome}\nPreço: {price:.6f}\n"
+                f"<b>CRUZAMENTO MA200 (15M)</b>\n\n"
+                f"{nome}\nPreco: {price:.6f}\n"
                 f"MA200: {ma200:.6f}\n"
-                f"⏱ {now_br()} BR"
+                f"Hora: {now_br()} BR"
             )
             await tg(s, msg)
 
     except Exception as e:
         print("Erro scan_tf_15m:", e)
 
-# =====================================================
-# ALERTA (1H) — IGUAL AO 15M, MAS EM 1H
-# =====================================================
 async def scan_tf_1h(s, sym):
     try:
         if not ENABLE_ALERT_1H:
@@ -133,10 +128,8 @@ async def scan_tf_1h(s, sym):
         if len(k) < 200: return
 
         close = [float(x[4]) for x in k]
-
         ma200 = sum(close[-200:]) / 200
         price = close[-1]
-
         nome = sym.replace("USDT", "")
 
         cruzamento = (
@@ -147,19 +140,16 @@ async def scan_tf_1h(s, sym):
 
         if cruzamento:
             msg = (
-                f"💥 <b>CRUZAMENTO MA200 (1H)</b>\n\n"
-                f"{nome}\nPreço: {price:.6f}\n"
+                f"<b>CRUZAMENTO MA200 (1H)</b>\n\n"
+                f"{nome}\nPreco: {price:.6f}\n"
                 f"MA200: {ma200:.6f}\n"
-                f"⏱ {now_br()} BR"
+                f"Hora: {now_br()} BR"
             )
             await tg(s, msg)
 
     except Exception as e:
         print("Erro scan_tf_1h:", e)
 
-# =====================================================
-# ALERTA (4H) — IGUAL AO 15M, MAS EM 4H
-# =====================================================
 async def scan_tf_4h(s, sym):
     try:
         if not ENABLE_ALERT_4H:
@@ -175,10 +165,8 @@ async def scan_tf_4h(s, sym):
         if len(k) < 200: return
 
         close = [float(x[4]) for x in k]
-
         ma200 = sum(close[-200:]) / 200
         price = close[-1]
-
         nome = sym.replace("USDT", "")
 
         cruzamento = (
@@ -189,19 +177,16 @@ async def scan_tf_4h(s, sym):
 
         if cruzamento:
             msg = (
-                f"💥 <b>CRUZAMENTO MA200 (4H)</b>\n\n"
-                f"{nome}\nPreço: {price:.6f}\n"
+                f"<b>CRUZAMENTO MA200 (4H)</b>\n\n"
+                f"{nome}\nPreco: {price:.6f}\n"
                 f"MA200: {ma200:.6f}\n"
-                f"⏱ {now_br()} BR"
+                f"Hora: {now_br()} BR"
             )
             await tg(s, msg)
 
     except Exception as e:
         print("Erro scan_tf_4h:", e)
 
-# =====================================================
-# ALERTA (1D) — IGUAL AO 15M, MAS EM 1D
-# =====================================================
 async def scan_tf_1d(s, sym):
     try:
         if not ENABLE_ALERT_1D:
@@ -217,10 +202,8 @@ async def scan_tf_1d(s, sym):
         if len(k) < 200: return
 
         close = [float(x[4]) for x in k]
-
         ma200 = sum(close[-200:]) / 200
         price = close[-1]
-
         nome = sym.replace("USDT", "")
 
         cruzamento = (
@@ -231,22 +214,19 @@ async def scan_tf_1d(s, sym):
 
         if cruzamento:
             msg = (
-                f"💥 <b>CRUZAMENTO MA200 (1D)</b>\n\n"
-                f"{nome}\nPreço: {price:.6f}\n"
+                f"<b>CRUZAMENTO MA200 (1D)</b>\n\n"
+                f"{nome}\nPreco: {price:.6f}\n"
                 f"MA200: {ma200:.6f}\n"
-                f"⏱ {now_br()} BR"
+                f"Hora: {now_br()} BR"
             )
             await tg(s, msg)
 
     except Exception as e:
         print("Erro scan_tf_1d:", e)
 
-# =====================================================
-# LOOP PRINCIPAL
-# =====================================================
 async def main_loop():
     async with aiohttp.ClientSession() as s:
-        await tg(s, "<b>V8.3R — CRUZAMENTO MA200 (15M + 1H + 4H + 1D)</b>")
+        await tg(s, "<b>V8.3R - CRUZAMENTO MA200 (15M + 1H + 4H + 1D)</b>")
         while True:
             try:
                 data_resp = await s.get(f"{BINANCE}/api/v3/ticker/24hr", timeout=10)
@@ -295,4 +275,3 @@ threading.Thread(
 ).start()
 
 asyncio.run(main_loop())
-```0
