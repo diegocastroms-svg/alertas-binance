@@ -6,7 +6,7 @@ import threading
 app = Flask(__name__)
 @app.route("/")
 def home():
-    return "V8.3R — MA200 (15M + 1H + 4H + 1D) TODOS ATIVOS", 200
+    return "V8.3R — MA200 (15M + 1H + 4H + 1D) | SPOT ONLY", 200
 
 @app.route("/health")
 def health():
@@ -18,15 +18,17 @@ CHAT_ID = os.getenv("CHAT_ID", "").strip()
 
 MIN_VOL24 = 500_000
 MIN_VOLAT = 2.0
-TOP_N = 50
+TOP_N = 100
 COOLDOWN = 900
 SCAN_INTERVAL = 30
 
-# ===== FLAGS (TODOS ATIVOS) =====
 ENABLE_ALERT_15M = True
 ENABLE_ALERT_1H  = True
 ENABLE_ALERT_4H  = True
 ENABLE_ALERT_1D  = True
+
+# ===== REFRESH SPOT (1X POR DIA) =====
+SPOT_REFRESH_SECONDS = 86400
 
 def now_br():
     return (datetime.now(timezone.utc) - timedelta(hours=3)).strftime("%H:%M:%S")
@@ -44,10 +46,7 @@ async def tg(s, msg):
     except Exception as e:
         print("Erro Telegram:", e)
 
-cooldown_15m = {}
-cooldown_1h  = {}
-cooldown_4h  = {}
-cooldown_1d  = {}
+cooldown_15m, cooldown_1h, cooldown_4h, cooldown_1d = {}, {}, {}, {}
 
 def can_alert(sym, tf):
     n = time.time()
@@ -77,13 +76,26 @@ async def ticker(s, sym):
         return await r.json() if r.status == 200 else None
 
 # =====================================================
-# ALERTA 15M
+# CARREGA MERCADOS SPOT ATIVOS
 # =====================================================
-async def scan_tf_15m(s, sym):
-    try:
-        if not ENABLE_ALERT_15M:
-            return
+async def load_spot_symbols(session):
+    async with session.get(f"{BINANCE}/api/v3/exchangeInfo", timeout=15) as r:
+        data = await r.json()
 
+    allowed = set()
+    for s in data.get("symbols", []):
+        if (
+            s.get("status") == "TRADING"
+            and "SPOT" in s.get("permissions", [])
+        ):
+            allowed.add(s["symbol"])
+    return allowed
+
+# =====================================================
+# ALERTAS (MA200)
+# =====================================================
+async def scan_tf(s, sym, tf):
+    try:
         t = await ticker(s, sym)
         if not t:
             return
@@ -91,7 +103,7 @@ async def scan_tf_15m(s, sym):
         if float(t.get("quoteVolume", 0) or 0) < MIN_VOL24:
             return
 
-        k = await klines(s, sym, "15m")
+        k = await klines(s, sym, tf)
         if len(k) < 200:
             return
 
@@ -99,10 +111,10 @@ async def scan_tf_15m(s, sym):
         ma200 = sum(close[-200:]) / 200
         price = close[-1]
 
-        if close[-2] < ma200 and close[-1] > ma200 and can_alert(sym, "15m"):
+        if close[-2] < ma200 and close[-1] > ma200 and can_alert(sym, tf):
             await tg(
                 s,
-                f"<b>CRUZAMENTO MA200 (15M)</b>\n\n"
+                f"<b>CRUZAMENTO MA200 ({tf.upper()})</b>\n\n"
                 f"{sym.replace('USDT','')}\n"
                 f"Preço: {price:.6f}\n"
                 f"MA200: {ma200:.6f}\n"
@@ -110,124 +122,29 @@ async def scan_tf_15m(s, sym):
             )
 
     except Exception as e:
-        print("Erro scan_tf_15m:", e)
-
-# =====================================================
-# ALERTA 1H
-# =====================================================
-async def scan_tf_1h(s, sym):
-    try:
-        if not ENABLE_ALERT_1H:
-            return
-
-        t = await ticker(s, sym)
-        if not t:
-            return
-
-        if float(t.get("quoteVolume", 0) or 0) < MIN_VOL24:
-            return
-
-        k = await klines(s, sym, "1h")
-        if len(k) < 200:
-            return
-
-        close = [float(x[4]) for x in k]
-        ma200 = sum(close[-200:]) / 200
-        price = close[-1]
-
-        if close[-2] < ma200 and close[-1] > ma200 and can_alert(sym, "1h"):
-            await tg(
-                s,
-                f"<b>CRUZAMENTO MA200 (1H)</b>\n\n"
-                f"{sym.replace('USDT','')}\n"
-                f"Preço: {price:.6f}\n"
-                f"MA200: {ma200:.6f}\n"
-                f"⏱ {now_br()} BR"
-            )
-
-    except Exception as e:
-        print("Erro scan_tf_1h:", e)
-
-# =====================================================
-# ALERTA 4H
-# =====================================================
-async def scan_tf_4h(s, sym):
-    try:
-        if not ENABLE_ALERT_4H:
-            return
-
-        t = await ticker(s, sym)
-        if not t:
-            return
-
-        if float(t.get("quoteVolume", 0) or 0) < MIN_VOL24:
-            return
-
-        k = await klines(s, sym, "4h")
-        if len(k) < 200:
-            return
-
-        close = [float(x[4]) for x in k]
-        ma200 = sum(close[-200:]) / 200
-        price = close[-1]
-
-        if close[-2] < ma200 and close[-1] > ma200 and can_alert(sym, "4h"):
-            await tg(
-                s,
-                f"<b>CRUZAMENTO MA200 (4H)</b>\n\n"
-                f"{sym.replace('USDT','')}\n"
-                f"Preço: {price:.6f}\n"
-                f"MA200: {ma200:.6f}\n"
-                f"⏱ {now_br()} BR"
-            )
-
-    except Exception as e:
-        print("Erro scan_tf_4h:", e)
-
-# =====================================================
-# ALERTA 1D
-# =====================================================
-async def scan_tf_1d(s, sym):
-    try:
-        if not ENABLE_ALERT_1D:
-            return
-
-        t = await ticker(s, sym)
-        if not t:
-            return
-
-        if float(t.get("quoteVolume", 0) or 0) < MIN_VOL24:
-            return
-
-        k = await klines(s, sym, "1d")
-        if len(k) < 200:
-            return
-
-        close = [float(x[4]) for x in k]
-        ma200 = sum(close[-200:]) / 200
-        price = close[-1]
-
-        if close[-2] < ma200 and close[-1] > ma200 and can_alert(sym, "1d"):
-            await tg(
-                s,
-                f"<b>CRUZAMENTO MA200 (1D)</b>\n\n"
-                f"{sym.replace('USDT','')}\n"
-                f"Preço: {price:.6f}\n"
-                f"MA200: {ma200:.6f}\n"
-                f"⏱ {now_br()} BR"
-            )
-
-    except Exception as e:
-        print("Erro scan_tf_1d:", e)
+        print(f"Erro scan_tf {tf}:", e)
 
 # =====================================================
 # LOOP PRINCIPAL
 # =====================================================
 async def main_loop():
     async with aiohttp.ClientSession() as s:
-        await tg(s, "<b>V8.3R — MA200 (15M + 1H + 4H + 1D) TODOS ATIVOS</b>")
+        ALLOWED_SPOT = await load_spot_symbols(s)
+        last_spot_refresh = time.time()
+
+        await tg(s, "<b>V8.3R — MA200 | SPOT ONLY</b>")
+
         while True:
             try:
+                # ===== REFRESH 1X POR DIA =====
+                if time.time() - last_spot_refresh >= SPOT_REFRESH_SECONDS:
+                    try:
+                        ALLOWED_SPOT = await load_spot_symbols(s)
+                        last_spot_refresh = time.time()
+                        await tg(s, f"<b>SPOT REFRESH OK</b>\n⏱ {now_br()} BR")
+                    except Exception as e:
+                        print("Erro refresh spot:", e)
+
                 r = await s.get(f"{BINANCE}/api/v3/ticker/24hr", timeout=10)
                 if r.status != 200:
                     await asyncio.sleep(SCAN_INTERVAL)
@@ -237,21 +154,32 @@ async def main_loop():
 
                 symbols = [
                     d["symbol"] for d in data
-                    if d["symbol"].endswith("USDT")
+                    if d["symbol"] in ALLOWED_SPOT
+                    and d["symbol"].endswith("USDT")
                     and float(d.get("quoteVolume", 0) or 0) >= MIN_VOL24
                     and abs(float(d.get("priceChangePercent", 0))) >= MIN_VOLAT
                     and not any(x in d["symbol"] for x in [
                         "UP","DOWN","BUSD","FDUSD","USDC","TUSD",
                         "EUR","USDE","TRY","GBP","BRL","AUD","CAD"
                     ])
-                ][:TOP_N]
+                ]
+
+                symbols = sorted(
+                    symbols,
+                    key=lambda x: next(
+                        (float(t.get("quoteVolume", 0) or 0)
+                         for t in data if t["symbol"] == x),
+                        0
+                    ),
+                    reverse=True
+                )[:TOP_N]
 
                 tasks = []
                 for sym in symbols:
-                    tasks.append(scan_tf_15m(s, sym))
-                    tasks.append(scan_tf_1h(s, sym))
-                    tasks.append(scan_tf_4h(s, sym))
-                    tasks.append(scan_tf_1d(s, sym))
+                    if ENABLE_ALERT_15M: tasks.append(scan_tf(s, sym, "15m"))
+                    if ENABLE_ALERT_1H:  tasks.append(scan_tf(s, sym, "1h"))
+                    if ENABLE_ALERT_4H:  tasks.append(scan_tf(s, sym, "4h"))
+                    if ENABLE_ALERT_1D:  tasks.append(scan_tf(s, sym, "1d"))
 
                 await asyncio.gather(*tasks)
 
@@ -269,3 +197,4 @@ threading.Thread(
 ).start()
 
 asyncio.run(main_loop())
+```0
