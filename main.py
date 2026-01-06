@@ -6,7 +6,7 @@ import threading
 app = Flask(__name__)
 @app.route("/")
 def home():
-    return "V8.3R — MA200 (15M + 1H + 4H + 1D) | SPOT ONLY", 200
+    return "V8.3R - MA200 (15M + 1H + 4H + 1D) | SPOT ONLY", 200
 
 @app.route("/health")
 def health():
@@ -27,7 +27,6 @@ ENABLE_ALERT_1H  = True
 ENABLE_ALERT_4H  = True
 ENABLE_ALERT_1D  = True
 
-# ===== REFRESH SPOT (1X POR DIA) =====
 SPOT_REFRESH_SECONDS = 86400
 
 def now_br():
@@ -75,9 +74,6 @@ async def ticker(s, sym):
     ) as r:
         return await r.json() if r.status == 200 else None
 
-# =====================================================
-# CARREGA MERCADOS SPOT ATIVOS
-# =====================================================
 async def load_spot_symbols(session):
     async with session.get(f"{BINANCE}/api/v3/exchangeInfo", timeout=15) as r:
         data = await r.json()
@@ -86,14 +82,11 @@ async def load_spot_symbols(session):
     for s in data.get("symbols", []):
         if (
             s.get("status") == "TRADING"
-            and "SPOT" in s.get("permissions", [])
+            and "SPOT" in (s.get("permissions") or [])
         ):
             allowed.add(s["symbol"])
     return allowed
 
-# =====================================================
-# ALERTAS (MA200)
-# =====================================================
 async def scan_tf(s, sym, tf):
     try:
         t = await ticker(s, sym)
@@ -116,32 +109,28 @@ async def scan_tf(s, sym, tf):
                 s,
                 f"<b>CRUZAMENTO MA200 ({tf.upper()})</b>\n\n"
                 f"{sym.replace('USDT','')}\n"
-                f"Preço: {price:.6f}\n"
+                f"Preco: {price:.6f}\n"
                 f"MA200: {ma200:.6f}\n"
-                f"⏱ {now_br()} BR"
+                f"Hora: {now_br()} BR"
             )
 
     except Exception as e:
         print(f"Erro scan_tf {tf}:", e)
 
-# =====================================================
-# LOOP PRINCIPAL
-# =====================================================
 async def main_loop():
     async with aiohttp.ClientSession() as s:
         ALLOWED_SPOT = await load_spot_symbols(s)
         last_spot_refresh = time.time()
 
-        await tg(s, "<b>V8.3R — MA200 | SPOT ONLY</b>")
+        await tg(s, "<b>V8.3R - MA200 | SPOT ONLY</b>")
 
         while True:
             try:
-                # ===== REFRESH 1X POR DIA =====
                 if time.time() - last_spot_refresh >= SPOT_REFRESH_SECONDS:
                     try:
                         ALLOWED_SPOT = await load_spot_symbols(s)
                         last_spot_refresh = time.time()
-                        await tg(s, f"<b>SPOT REFRESH OK</b>\n⏱ {now_br()} BR")
+                        await tg(s, f"<b>SPOT REFRESH OK</b>\nHora: {now_br()} BR")
                     except Exception as e:
                         print("Erro refresh spot:", e)
 
@@ -167,8 +156,7 @@ async def main_loop():
                 symbols = sorted(
                     symbols,
                     key=lambda x: next(
-                        (float(t.get("quoteVolume", 0) or 0)
-                         for t in data if t["symbol"] == x),
+                        (float(t.get("quoteVolume", 0) or 0) for t in data if t["symbol"] == x),
                         0
                     ),
                     reverse=True
@@ -197,4 +185,3 @@ threading.Thread(
 ).start()
 
 asyncio.run(main_loop())
-```0
