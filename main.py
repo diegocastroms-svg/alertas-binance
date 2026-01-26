@@ -22,6 +22,7 @@ TOP_N = 100
 COOLDOWN = 900
 SCAN_INTERVAL = 30
 
+# >>>>>>> ALTERACAO UNICA AQUI <<<<<<<
 ENABLE_ALERT_15M = False
 ENABLE_ALERT_1H  = True
 ENABLE_ALERT_4H  = True
@@ -275,4 +276,3 @@ threading.Thread(
 ).start()
 
 asyncio.run(main_loop())
-```0
