@@ -52,13 +52,17 @@ def can_alert(sym, tf="15m"):
     n = time.time()
     if tf == "15m":
         cd = cooldown_15m
+        limit = 900
     elif tf == "1h":
         cd = cooldown_1h
+        limit = 1800
     elif tf == "4h":
         cd = cooldown_4h
+        limit = 7200
     else:
         cd = cooldown_1d
-    if n - cd.get(sym, 0) >= COOLDOWN:
+        limit = 43200
+    if n - cd.get(sym, 0) >= limit:
         cd[sym] = n
         return True
     return False
@@ -276,3 +280,4 @@ threading.Thread(
 ).start()
 
 asyncio.run(main_loop())
+```0
