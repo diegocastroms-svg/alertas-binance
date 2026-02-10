@@ -280,4 +280,3 @@ threading.Thread(
 ).start()
 
 asyncio.run(main_loop())
-```0
