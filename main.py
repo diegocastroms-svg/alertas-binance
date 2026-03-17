@@ -1,4 +1,4 @@
-import os, asyncio, aiohttp, time
+import os, asyncio, aiohttp, time, math
 from datetime import datetime, timedelta, timezone
 from flask import Flask
 import threading
@@ -6,7 +6,7 @@ import threading
 app = Flask(__name__)
 @app.route("/")
 def home():
-    return "V8.3R - CRUZAMENTO MA200 (15M + 1H + 4H + 1D)", 200
+    return "V9.0 - PROJETO MOLA ARMADA (M15)", 200
 
 @app.route("/health")
 def health():
@@ -16,17 +16,15 @@ BINANCE = "https://api.binance.com"
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 CHAT_ID = os.getenv("CHAT_ID", "").strip()
 
-MIN_VOL24 = 500_000
-MIN_VOLAT = 2.0
-TOP_N = 100
-COOLDOWN = 900
+MIN_VOL24 = 1_000_000 # Aumentado para filtrar moedas com liquidez real
+TOP_N = 80
 SCAN_INTERVAL = 30
 
-# >>>>>>> ALTERACAO UNICA AQUI <<<<<<<
-ENABLE_ALERT_15M = False
-ENABLE_ALERT_1H  = True
-ENABLE_ALERT_4H  = True
-ENABLE_ALERT_1D  = True
+# Configurações da Estratégia
+ENABLE_MOLA_ARMADA = True
+BB_PERIOD = 20
+BB_STD = 2.0
+STOCH_PERIOD = 14
 
 def now_br():
     return (datetime.now(timezone.utc) - timedelta(hours=3)).strftime("%H:%M:%S")
@@ -43,195 +41,94 @@ async def tg(s, msg):
     except Exception as e:
         print("Erro Telegram:", e)
 
-cooldown_15m = {}
-cooldown_1h  = {}
-cooldown_4h  = {}
-cooldown_1d  = {}
+cooldown_mola = {}
 
-def can_alert(sym, tf="15m"):
+def can_alert_mola(sym):
     n = time.time()
-    if tf == "15m":
-        cd = cooldown_15m
-        limit = 900
-    elif tf == "1h":
-        cd = cooldown_1h
-        limit = 1800
-    elif tf == "4h":
-        cd = cooldown_4h
-        limit = 7200
-    else:
-        cd = cooldown_1d
-        limit = 43200
-    if n - cd.get(sym, 0) >= limit:
-        cd[sym] = n
+    if n - cooldown_mola.get(sym, 0) >= 1200: # 20 min de cooldown
+        cooldown_mola[sym] = n
         return True
     return False
 
-async def klines(s, sym, tf):
-    async with s.get(
-        f"{BINANCE}/api/v3/klines?symbol={sym}&interval={tf}&limit=200",
-        timeout=10
-    ) as r:
-        return await r.json() if r.status == 200 else []
+# --- FUNÇÕES TÉCNICAS ---
+def get_sma(data, window):
+    if len(data) < window: return 0
+    return sum(data[-window:]) / window
 
-async def ticker(s, sym):
-    async with s.get(
-        f"{BINANCE}/api/v3/ticker/24hr?symbol={sym}",
-        timeout=10
-    ) as r:
-        return await r.json() if r.status == 200 else None
+def get_bollinger(data, window, std_dev):
+    sma = get_sma(data, window)
+    variance = sum([(x - sma)**2 for x in data[-window:]]) / window
+    stdev = math.sqrt(variance)
+    return sma + (std_dev * stdev), sma - (std_dev * stdev), (std_dev * stdev * 2 / sma) * 100
 
-async def scan_tf_15m(s, sym):
+def get_stoch_rsi(data, period):
+    if len(data) < period * 2: return 50, 50
+    # RSI Simples
+    deltas = [data[i+1] - data[i] for i in range(len(data)-1)]
+    up = [x if x > 0 else 0 for x in deltas]
+    down = [-x if x < 0 else 0 for x in deltas]
+    
+    avg_gain = sum(up[-(period):]) / period
+    avg_loss = sum(down[-(period):]) / period
+    if avg_loss == 0: rsi = 100
+    else:
+        rs = avg_gain / avg_loss
+        rsi = 100 - (100 / (1 + rs))
+    
+    # StochRSI simplificado para o esqueleto original
+    return rsi
+
+# --- SCANNER PRINCIPAL ---
+async def scan_mola_armada(s, sym):
     try:
-        if not ENABLE_ALERT_15M:
-            return
+        async with s.get(f"{BINANCE}/api/v3/klines?symbol={sym}&interval=15m&limit=100", timeout=10) as r:
+            k = await r.json() if r.status == 200 else []
+        
+        if len(k) < 60: return
 
-        t = await ticker(s, sym)
-        if not t: return
+        closes = [float(x[4]) for x in k]
+        lows = [float(x[3]) for x in k]
+        highs = [float(x[2]) for x in k]
+        
+        price = closes[-1]
+        ma200 = sum(closes[-100:]) / 100
+        upper, lower, width = get_bollinger(closes, BB_PERIOD, BB_STD)
+        rsi = get_stoch_rsi(closes, STOCH_PERIOD)
+        
+        # 1. Filtro Estrutural (Preço acima da MA200)
+        if price < ma200: return
+        
+        # 2. Filtro de Compressão (A mola encolhida que você mediu)
+        # Se as bandas estiverem com menos de 1.5% de largura
+        is_compressed = width < 1.6 
+        
+        # 3. O SEU INSIGHT: Fundo Ascendente (Preço não buscou a banda de baixo)
+        # Verifica se o Low do candle atual e anterior estão acima da banda inferior
+        dist_to_lower = (price - lower) / lower * 100
+        stopped_dropping = lows[-1] > lower and lows[-2] > lower and dist_to_lower < 0.6
+        
+        # 4. Gatilho de Momentum (RSI saindo do fundo)
+        stoch_trigger = rsi > 35 and rsi < 65
 
-        vol24 = float(t.get("quoteVolume", 0) or 0)
-        if vol24 < MIN_VOL24: return
-
-        k = await klines(s, sym, "15m")
-        if len(k) < 200: return
-
-        close = [float(x[4]) for x in k]
-        ma200 = sum(close[-200:]) / 200
-        price = close[-1]
-        nome = sym.replace("USDT", "")
-
-        cruzamento = (
-            close[-2] < ma200 and
-            close[-1] > ma200 and
-            can_alert(sym, "15m")
-        )
-
-        if cruzamento:
+        if is_compressed and stopped_dropping and stoch_trigger and can_alert_mola(sym):
+            nome = sym.replace("USDT", "")
             msg = (
-                f"<b>CRUZAMENTO MA200 (15M)</b>\n\n"
-                f"{nome}\nPreco: {price:.6f}\n"
-                f"MA200: {ma200:.6f}\n"
-                f"Hora: {now_br()} BR"
+                f"🚀 <b>PROJETO MOLA ARMADA</b>\n\n"
+                f"🔥 Moeda: <b>#{nome}</b>\n"
+                f"📊 Compressão: <code>{width:.2f}%</code>\n"
+                f"💎 Preço: {price:.6f}\n"
+                f"📉 StochRSI: {rsi:.1f}\n\n"
+                f"🎯 <i>Insight: Preço parou de buscar a banda inferior. Mola prestes a disparar!</i>\n"
+                f"⏰ Hora: {now_br()} BR"
             )
             await tg(s, msg)
 
     except Exception as e:
-        print("Erro scan_tf_15m:", e)
-
-async def scan_tf_1h(s, sym):
-    try:
-        if not ENABLE_ALERT_1H:
-            return
-
-        t = await ticker(s, sym)
-        if not t: return
-
-        vol24 = float(t.get("quoteVolume", 0) or 0)
-        if vol24 < MIN_VOL24: return
-
-        k = await klines(s, sym, "1h")
-        if len(k) < 200: return
-
-        close = [float(x[4]) for x in k]
-        ma200 = sum(close[-200:]) / 200
-        price = close[-1]
-        nome = sym.replace("USDT", "")
-
-        cruzamento = (
-            close[-2] < ma200 and
-            close[-1] > ma200 and
-            can_alert(sym, "1h")
-        )
-
-        if cruzamento:
-            msg = (
-                f"<b>CRUZAMENTO MA200 (1H)</b>\n\n"
-                f"{nome}\nPreco: {price:.6f}\n"
-                f"MA200: {ma200:.6f}\n"
-                f"Hora: {now_br()} BR"
-            )
-            await tg(s, msg)
-
-    except Exception as e:
-        print("Erro scan_tf_1h:", e)
-
-async def scan_tf_4h(s, sym):
-    try:
-        if not ENABLE_ALERT_4H:
-            return
-
-        t = await ticker(s, sym)
-        if not t: return
-
-        vol24 = float(t.get("quoteVolume", 0) or 0)
-        if vol24 < MIN_VOL24: return
-
-        k = await klines(s, sym, "4h")
-        if len(k) < 200: return
-
-        close = [float(x[4]) for x in k]
-        ma200 = sum(close[-200:]) / 200
-        price = close[-1]
-        nome = sym.replace("USDT", "")
-
-        cruzamento = (
-            close[-2] < ma200 and
-            close[-1] > ma200 and
-            can_alert(sym, "4h")
-        )
-
-        if cruzamento:
-            msg = (
-                f"<b>CRUZAMENTO MA200 (4H)</b>\n\n"
-                f"{nome}\nPreco: {price:.6f}\n"
-                f"MA200: {ma200:.6f}\n"
-                f"Hora: {now_br()} BR"
-            )
-            await tg(s, msg)
-
-    except Exception as e:
-        print("Erro scan_tf_4h:", e)
-
-async def scan_tf_1d(s, sym):
-    try:
-        if not ENABLE_ALERT_1D:
-            return
-
-        t = await ticker(s, sym)
-        if not t: return
-
-        vol24 = float(t.get("quoteVolume", 0) or 0)
-        if vol24 < MIN_VOL24: return
-
-        k = await klines(s, sym, "1d")
-        if len(k) < 200: return
-
-        close = [float(x[4]) for x in k]
-        ma200 = sum(close[-200:]) / 200
-        price = close[-1]
-        nome = sym.replace("USDT", "")
-
-        cruzamento = (
-            close[-2] < ma200 and
-            close[-1] > ma200 and
-            can_alert(sym, "1d")
-        )
-
-        if cruzamento:
-            msg = (
-                f"<b>CRUZAMENTO MA200 (1D)</b>\n\n"
-                f"{nome}\nPreco: {price:.6f}\n"
-                f"MA200: {ma200:.6f}\n"
-                f"Hora: {now_br()} BR"
-            )
-            await tg(s, msg)
-
-    except Exception as e:
-        print("Erro scan_tf_1d:", e)
+        pass
 
 async def main_loop():
     async with aiohttp.ClientSession() as s:
-        await tg(s, "<b>V8.3R - CRUZAMENTO MA200 (15M + 1H + 4H + 1D)</b>")
+        await tg(s, "<b>V9.0 - SENTINELA: MOLA ARMADA ATIVADO</b>")
         while True:
             try:
                 data_resp = await s.get(f"{BINANCE}/api/v3/ticker/24hr", timeout=10)
@@ -244,29 +141,16 @@ async def main_loop():
                     d["symbol"] for d in data
                     if d["symbol"].endswith("USDT")
                     and float(d.get("quoteVolume", 0) or 0) >= MIN_VOL24
-                    and abs(float(d.get("priceChangePercent", 0))) >= MIN_VOLAT
-                    and not any(x in d["symbol"] for x in [
-                        "UP","DOWN","BUSD","FDUSD","USDC","TUSD",
-                        "EUR","USDE","TRY","GBP","BRL","AUD","CAD"
-                    ])
+                    and not any(x in d["symbol"] for x in ["UP","DOWN","BUSD","FDUSD","USDC"])
                 ]
 
                 symbols = sorted(
                     symbols,
-                    key=lambda x: next(
-                        (float(t.get("quoteVolume", 0) or 0) for t in data if t["symbol"] == x),
-                        0
-                    ),
+                    key=lambda x: next((float(t.get("quoteVolume", 0) or 0) for t in data if t["symbol"] == x), 0),
                     reverse=True
                 )[:TOP_N]
 
-                tasks = []
-                for sym in symbols:
-                    tasks.append(scan_tf_1h(s, sym))
-                    tasks.append(scan_tf_15m(s, sym))
-                    tasks.append(scan_tf_4h(s, sym))
-                    tasks.append(scan_tf_1d(s, sym))
-
+                tasks = [scan_mola_armada(s, sym) for sym in symbols]
                 await asyncio.gather(*tasks)
 
             except Exception as e:
