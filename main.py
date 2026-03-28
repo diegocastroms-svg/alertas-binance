@@ -6,24 +6,24 @@ import threading
 app = Flask(__name__)
 @app.route("/")
 def home():
-    return "V9.1 - MOLA ARMADA (Filtro Blacklist Atualizado)", 200
+    return "V10 - ANTECIPACAO REAL (OI + CVD)", 200
 
 @app.route("/health")
 def health():
     return "OK", 200
 
-BINANCE = "https://api.binance.com"
+BINANCE = "https://fapi.binance.com"
+
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 CHAT_ID = os.getenv("CHAT_ID", "").strip()
 
-MIN_VOL24 = 1_000_000 
-TOP_N = 80
+MIN_VOL24 = 5_000_000
+TOP_N = 50
 SCAN_INTERVAL = 30
 
-# Configurações da Estratégia
-BB_PERIOD = 20
-BB_STD = 2.0
 STOCH_PERIOD = 14
+
+cooldown = {}
 
 def now_br():
     return (datetime.now(timezone.utc) - timedelta(hours=3)).strftime("%H:%M:%S")
@@ -40,87 +40,145 @@ async def tg(s, msg):
     except Exception as e:
         print("Erro Telegram:", e)
 
-cooldown_mola = {}
+def can_alert(sym, ma9, ma20, direction):
+    estado = cooldown.get(sym, {"liberado": True})
 
-def can_alert_mola(sym):
-    n = time.time()
-    if n - cooldown_mola.get(sym, 0) >= 1200: 
-        cooldown_mola[sym] = n
+    if not estado["liberado"]:
+        if direction == "long" and ma9 < ma20:
+            estado["liberado"] = True
+        elif direction == "short" and ma9 > ma20:
+            estado["liberado"] = True
+
+    if estado["liberado"]:
+        estado["liberado"] = False
+        cooldown[sym] = estado
         return True
+
+    cooldown[sym] = estado
     return False
 
-def get_sma(data, window):
-    if len(data) < window: return 0
-    return sum(data[-window:]) / window
+def sma(data, n):
+    if len(data) < n: return 0
+    return sum(data[-n:]) / n
 
-def get_bollinger(data, window, std_dev):
-    sma = get_sma(data, window)
-    variance = sum([(x - sma)**2 for x in data[-window:]]) / window
-    stdev = math.sqrt(variance)
-    return sma + (std_dev * stdev), sma - (std_dev * stdev), (std_dev * stdev * 2 / sma) * 100
-
-def get_stoch_rsi(data, period):
+def rsi_calc(data, period):
     if len(data) < period * 2: return 50
-    deltas = [data[i+1] - data[i] for i in range(len(data)-1)]
-    up = [x if x > 0 else 0 for x in deltas]
-    down = [-x if x < 0 else 0 for x in deltas]
-    avg_gain = sum(up[-(period):]) / period
-    avg_loss = sum(down[-(period):]) / period
+    gains, losses = [], []
+    for i in range(len(data)-1):
+        d = data[i+1] - data[i]
+        gains.append(max(d, 0))
+        losses.append(max(-d, 0))
+    avg_gain = sum(gains[-period:]) / period
+    avg_loss = sum(losses[-period:]) / period
     if avg_loss == 0: return 100
     rs = avg_gain / avg_loss
     return 100 - (100 / (1 + rs))
 
-async def scan_mola_armada(s, sym):
+async def get_oi(session, symbol):
     try:
-        async with s.get(f"{BINANCE}/api/v3/klines?symbol={sym}&interval=15m&limit=100", timeout=10) as r:
-            k = await r.json() if r.status == 200 else []
-        if len(k) < 60: return
-        closes = [float(x[4]) for x in k]
-        lows = [float(x[3]) for x in k]
-        price, ma200 = closes[-1], sum(closes[-100:]) / 100
-        upper, lower, width = get_bollinger(closes, BB_PERIOD, BB_STD)
-        rsi = get_stoch_rsi(closes, STOCH_PERIOD)
-        
-        # Lógica Mola Armada: Acima da MA200 + Compressão < 1.6% + Fundo Ascendente
-        is_compressed = width < 1.6 
-        stopped_dropping = lows[-1] > lower and lows[-2] > lower and (price - lower) / lower * 100 < 0.6
-        
-        if price > ma200 and is_compressed and stopped_dropping and 35 < rsi < 65 and can_alert_mola(sym):
-            nome = sym.replace("USDT", "")
-            msg = (
-                f"🚀 <b>PROJETO MOLA ARMADA</b>\n\n"
-                f"🔥 Moeda: <b>#{nome}</b>\n"
-                f"📊 Compressão: <code>{width:.2f}%</code>\n"
-                f"💎 Preço: {price:.6f}\n"
-                f"📉 StochRSI: {rsi:.1f}\n\n"
-                f"🎯 <i>Insight: Preço parou de buscar a banda inferior. Mola pronta!</i>\n"
-                f"⏰ Hora: {now_br()} BR"
-            )
-            await tg(s, msg)
-    except: pass
+        async with session.get(f"{BINANCE}/fapi/v1/openInterest?symbol={symbol}") as r:
+            data = await r.json()
+            return float(data["openInterest"])
+    except:
+        return 0
 
-async def main_loop():
-    async with aiohttp.ClientSession() as s:
-        await tg(s, "<b>V9.1 - SENTINELA: MOLA ARMADA (Filtros Estendidos)</b>")
+async def scan(session, sym):
+    try:
+        async with session.get(f"{BINANCE}/fapi/v1/klines?symbol={sym}&interval=15m&limit=100") as r:
+            k = await r.json()
+
+        if len(k) < 60: return
+
+        closes = [float(x[4]) for x in k]
+        volumes = [float(x[5]) for x in k]
+        taker_buy = [float(x[10]) for x in k]
+
+        price = closes[-1]
+
+        ma9 = sma(closes, 9)
+        ma20 = sma(closes, 20)
+        ma50 = sma(closes, 50)
+        ma200 = sma(closes, 100)
+
+        rsi = rsi_calc(closes, STOCH_PERIOD)
+
+        if ma20 == 0: return
+        diff = abs((ma9 - ma20) / ma20) * 100
+
+        vol_avg = sum(volumes[-10:]) / 10
+        vol_now = volumes[-1]
+
+        # CVD aproximado
+        cvd_up = sum(taker_buy[-3:]) > sum(volumes[-3:]) * 0.55
+
+        # OI
+        oi_now = await get_oi(session, sym)
+
+        # Pré-sinal (antecipação)
+        pre_signal = 0.1 <= diff <= 0.4 and vol_now < vol_avg
+
+        # Estrutura
+        long_ok = ma9 > ma20 > ma50 and price > ma200
+        short_ok = ma9 < ma20 < ma50 and price < ma200
+
+        # Fluxo
+        fluxo_ok = cvd_up
+
+        # Gatilho
+        gatilho_long = rsi > 50
+        gatilho_short = rsi < 50
+
+        if pre_signal and fluxo_ok and long_ok and gatilho_long and can_alert(sym, ma9, ma20, "long"):
+            nome = sym.replace("USDT","")
+            msg = (
+                f"🚀 <b>ANTECIPAÇÃO LONG</b>\n\n"
+                f"#{nome}\n"
+                f"Preço: {price}\n"
+                f"Diff: {diff:.2f}%\n"
+                f"RSI: {rsi:.1f}\n"
+                f"OI: {oi_now}\n"
+                f"⏰ {now_br()} BR"
+            )
+            await tg(session, msg)
+
+        if pre_signal and fluxo_ok and short_ok and gatilho_short and can_alert(sym, ma9, ma20, "short"):
+            nome = sym.replace("USDT","")
+            msg = (
+                f"🔻 <b>ANTECIPAÇÃO SHORT</b>\n\n"
+                f"#{nome}\n"
+                f"Preço: {price}\n"
+                f"Diff: {diff:.2f}%\n"
+                f"RSI: {rsi:.1f}\n"
+                f"OI: {oi_now}\n"
+                f"⏰ {now_br()} BR"
+            )
+            await tg(session, msg)
+
+    except Exception as e:
+        print("Erro:", e)
+
+async def main():
+    async with aiohttp.ClientSession() as session:
+        await tg(session, "<b>V10 - ANTECIPACAO REAL ATIVA</b>")
         while True:
             try:
-                data_resp = await s.get(f"{BINANCE}/api/v3/ticker/24hr", timeout=10)
-                if data_resp.status != 200:
-                    await asyncio.sleep(SCAN_INTERVAL); continue
-                data = await data_resp.json()
+                async with session.get(f"{BINANCE}/fapi/v1/ticker/24hr") as r:
+                    data = await r.json()
+
                 symbols = [
                     d["symbol"] for d in data
                     if d["symbol"].endswith("USDT")
-                    and float(d.get("quoteVolume", 0) or 0) >= MIN_VOL24
-                    and not any(x in d["symbol"] for x in [
-                        "UP","DOWN","BUSD","FDUSD","USDC","TUSD",
-                        "EUR","USDE","USD1","XUSD","TRY","GBP","BRL"
-                    ])
+                    and float(d.get("quoteVolume",0)) >= MIN_VOL24
                 ]
-                symbols = sorted(symbols, key=lambda x: next((float(t.get("quoteVolume", 0) or 0) for t in data if t["symbol"] == x), 0), reverse=True)[:TOP_N]
-                await asyncio.gather(*[scan_mola_armada(s, sym) for sym in symbols])
-            except Exception as e: print("Erro:", e)
+
+                symbols = symbols[:TOP_N]
+
+                await asyncio.gather(*[scan(session, s) for s in symbols])
+
+            except Exception as e:
+                print(e)
+
             await asyncio.sleep(SCAN_INTERVAL)
 
-threading.Thread(target=lambda: app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000))), daemon=True).start()
-asyncio.run(main_loop())
+threading.Thread(target=lambda: app.run(host="0.0.0.0", port=int(os.environ.get("PORT",10000))), daemon=True).start()
+asyncio.run(main())
