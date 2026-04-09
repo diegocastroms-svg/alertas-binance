@@ -17,7 +17,7 @@ BINANCE = "https://fapi.binance.com"
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 CHAT_ID = os.getenv("CHAT_ID", "").strip()
 
-MIN_VOL24 = 2_000_000
+MIN_VOL24 = 5_000_000
 TOP_N = 100
 SCAN_INTERVAL = 30
 
@@ -175,7 +175,7 @@ async def scan(session, sym):
             nome = sym.replace("USDT","")
             msg = (
                 f"🚀 <b>CONFLUÊNCIA MACD LONG</b>\n\n"
-                f"#{nome}\n"
+                f"{nome}\n"
                 f"Preço: {price}\n"
                 f"RSI: {rsi:.1f}\n"
                 f"OI: {oi_now}\n"
