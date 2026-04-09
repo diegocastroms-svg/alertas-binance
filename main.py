@@ -152,6 +152,7 @@ async def scan(session, sym):
 
         estado = alert_state.get(sym, {"long": False, "short": False})
 
+        # ===== LONG =====
         if long_15m and long_1h and long_4h and not estado["long"]:
             estado["long"] = True
             estado["short"] = False
@@ -168,6 +169,7 @@ async def scan(session, sym):
             )
             await tg(session, msg)
 
+        # ===== SHORT =====
         if short_15m and short_1h and short_4h and not estado["short"]:
             estado["short"] = True
             estado["long"] = False
@@ -184,10 +186,11 @@ async def scan(session, sym):
             )
             await tg(session, msg)
 
-        if not long_15m:
+        # ===== RESET CORRETO (CONFLUÊNCIA TOTAL) =====
+        if not (long_15m and long_1h and long_4h):
             estado["long"] = False
 
-        if not short_15m:
+        if not (short_15m and short_1h and short_4h):
             estado["short"] = False
 
         alert_state[sym] = estado
