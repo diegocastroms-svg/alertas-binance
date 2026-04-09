@@ -17,7 +17,7 @@ BINANCE = "https://fapi.binance.com"
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 CHAT_ID = os.getenv("CHAT_ID", "").strip()
 
-MIN_VOL24 = 10_000_000
+MIN_VOL24 = 5_000_000
 TOP_N = 100
 SCAN_INTERVAL = 30
 
@@ -26,8 +26,13 @@ STOCH_PERIOD = 14
 cooldown = {}
 alert_state = {}
 
+COOLDOWN_SECONDS = 14400  # 4 horas
+
 def now_br():
     return (datetime.now(timezone.utc) - timedelta(hours=3)).strftime("%H:%M:%S")
+
+def now_ts():
+    return int(time.time())
 
 async def tg(s, msg):
     if not TELEGRAM_TOKEN:
@@ -41,8 +46,12 @@ async def tg(s, msg):
     except Exception as e:
         print("Erro Telegram:", e)
 
-def can_alert(sym, ma9, ma20, direction):
-    return True
+def can_alert(sym):
+    t = cooldown.get(sym, 0)
+    if now_ts() - t >= COOLDOWN_SECONDS:
+        cooldown[sym] = now_ts()
+        return True
+    return False
 
 def sma(data, n):
     if len(data) < n: return 0
@@ -116,7 +125,6 @@ async def scan(session, sym):
         rsi = rsi_calc(closes, STOCH_PERIOD)
 
         if ma20 == 0: return
-        diff = abs((ma9 - ma20) / ma20) * 100
 
         vol_avg = sum(volumes[-10:]) / 10
         vol_now = volumes[-1]
@@ -150,14 +158,7 @@ async def scan(session, sym):
         short_1h = macd1h < sig1h and hist1h < 0 and hist1h < hist1h_prev
         short_4h = macd4h < sig4h and hist4h < hist4h_prev
 
-        estado = alert_state.get(sym, {"long": False, "short": False})
-
-        # ===== LONG =====
-        if long_15m and long_1h and long_4h and not estado["long"]:
-            estado["long"] = True
-            estado["short"] = False
-            alert_state[sym] = estado
-
+        if long_15m and long_1h and long_4h and can_alert(sym):
             nome = sym.replace("USDT","")
             msg = (
                 f"🚀 <b>CONFLUÊNCIA MACD LONG</b>\n\n"
@@ -169,12 +170,7 @@ async def scan(session, sym):
             )
             await tg(session, msg)
 
-        # ===== SHORT =====
-        if short_15m and short_1h and short_4h and not estado["short"]:
-            estado["short"] = True
-            estado["long"] = False
-            alert_state[sym] = estado
-
+        if short_15m and short_1h and short_4h and can_alert(sym):
             nome = sym.replace("USDT","")
             msg = (
                 f"🔻 <b>CONFLUÊNCIA MACD SHORT</b>\n\n"
@@ -185,15 +181,6 @@ async def scan(session, sym):
                 f"⏰ {now_br()} BR"
             )
             await tg(session, msg)
-
-        # ===== RESET CORRETO (CONFLUÊNCIA TOTAL) =====
-        if not (long_15m and long_1h and long_4h):
-            estado["long"] = False
-
-        if not (short_15m and short_1h and short_4h):
-            estado["short"] = False
-
-        alert_state[sym] = estado
 
     except Exception as e:
         print("Erro:", e)
