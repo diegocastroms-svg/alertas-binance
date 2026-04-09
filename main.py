@@ -17,8 +17,8 @@ BINANCE = "https://fapi.binance.com"
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 CHAT_ID = os.getenv("CHAT_ID", "").strip()
 
-MIN_VOL24 = 5_000_000
-TOP_N = 100
+MIN_VOL24 = 10_000_000
+TOP_N = 80
 SCAN_INTERVAL = 30
 
 STOCH_PERIOD = 14
@@ -150,13 +150,14 @@ async def scan(session, sym):
         if None in [macd15, sig15, hist15, hist15_prev, macd1h, sig1h, hist1h, hist1h_prev, macd4h, sig4h, hist4h, hist4h_prev]:
             return
 
-        long_15m = macd15 > sig15 and hist15 > 0 and hist15 > hist15_prev
-        long_1h = macd1h > sig1h and hist1h > 0 and hist1h > hist1h_prev
-        long_4h = macd4h > sig4h and hist4h > hist4h_prev
+        # ===== CORREÇÃO AQUI (INÍCIO REAL) =====
+        long_15m = macd15 > sig15 and hist15 > 0 and hist15 > hist15_prev and hist15_prev > 0
+        long_1h = macd1h > sig1h and hist1h > 0 and hist1h > hist1h_prev and hist1h < (hist1h_prev * 1.5)
+        long_4h = macd4h > sig4h and hist4h > hist4h_prev and hist4h_prev <= (hist4h * 0.7)
 
-        short_15m = macd15 < sig15 and hist15 < 0 and hist15 < hist15_prev
-        short_1h = macd1h < sig1h and hist1h < 0 and hist1h < hist1h_prev
-        short_4h = macd4h < sig4h and hist4h < hist4h_prev
+        short_15m = macd15 < sig15 and hist15 < 0 and hist15 < hist15_prev and hist15_prev < 0
+        short_1h = macd1h < sig1h and hist1h < 0 and hist1h < hist1h_prev and abs(hist1h) < (abs(hist1h_prev) * 1.5)
+        short_4h = macd4h < sig4h and hist4h < hist4h_prev and abs(hist4h_prev) <= (abs(hist4h) * 0.7)
 
         if long_15m and long_1h and long_4h and can_alert(sym):
             nome = sym.replace("USDT","")
