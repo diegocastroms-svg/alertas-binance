@@ -24,6 +24,7 @@ SCAN_INTERVAL = 30
 STOCH_PERIOD = 14
 
 cooldown = {}
+alert_state = {}
 
 def now_br():
     return (datetime.now(timezone.utc) - timedelta(hours=3)).strftime("%H:%M:%S")
@@ -149,7 +150,13 @@ async def scan(session, sym):
         short_1h = macd1h < sig1h and hist1h < 0 and hist1h < hist1h_prev
         short_4h = macd4h < sig4h and hist4h < hist4h_prev
 
-        if long_15m and long_1h and long_4h:
+        estado = alert_state.get(sym, {"long": False, "short": False})
+
+        if long_15m and long_1h and long_4h and not estado["long"]:
+            estado["long"] = True
+            estado["short"] = False
+            alert_state[sym] = estado
+
             nome = sym.replace("USDT","")
             msg = (
                 f"🚀 <b>CONFLUÊNCIA MACD LONG</b>\n\n"
@@ -161,7 +168,11 @@ async def scan(session, sym):
             )
             await tg(session, msg)
 
-        if short_15m and short_1h and short_4h:
+        if short_15m and short_1h and short_4h and not estado["short"]:
+            estado["short"] = True
+            estado["long"] = False
+            alert_state[sym] = estado
+
             nome = sym.replace("USDT","")
             msg = (
                 f"🔻 <b>CONFLUÊNCIA MACD SHORT</b>\n\n"
@@ -172,6 +183,14 @@ async def scan(session, sym):
                 f"⏰ {now_br()} BR"
             )
             await tg(session, msg)
+
+        if not long_15m:
+            estado["long"] = False
+
+        if not short_15m:
+            estado["short"] = False
+
+        alert_state[sym] = estado
 
     except Exception as e:
         print("Erro:", e)
