@@ -187,7 +187,7 @@ async def scan(session, sym):
             nome = sym.replace("USDT","")
             msg = (
                 f"🔻 <b>CONFLUÊNCIA MACD SHORT</b>\n\n"
-                f"#{nome}\n"
+                f"{nome}\n"
                 f"Preço: {price}\n"
                 f"RSI: {rsi:.1f}\n"
                 f"OI: {oi_now}\n"
