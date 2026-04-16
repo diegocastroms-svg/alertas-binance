@@ -2,8 +2,6 @@ import os, asyncio, aiohttp, time, math
 from datetime import datetime, timedelta, timezone
 from flask import Flask
 import threading
-import pandas as pd
-import numpy as np
 
 app = Flask(__name__)
 @app.route("/")
@@ -26,7 +24,6 @@ SCAN_INTERVAL = 30
 COOLDOWN_SECONDS = 14400  # 4 horas
 
 cooldown = {}
-alert_state = {}
 
 def now_br():
     return (datetime.now(timezone.utc) - timedelta(hours=3)).strftime("%H:%M:%S")
@@ -36,7 +33,8 @@ def now_ts():
 
 async def tg(s, msg):
     if not TELEGRAM_TOKEN:
-        print(msg); return
+        print(msg)
+        return
     try:
         await s.post(
             f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
@@ -61,18 +59,40 @@ async def get_oi(session, symbol):
     except:
         return 0
 
-# Função auxiliar para calcular EMA
-def ema_series(series, period):
-    return series.ewm(span=period, adjust=False).mean()
+# ====================== FUNÇÕES AUXILIARES ======================
+def ema(data, period):
+    if len(data) < period:
+        return [sum(data)/len(data)] * len(data) if data else []
+    k = 2 / (period + 1)
+    ema_vals = [sum(data[:period]) / period]
+    for price in data[period:]:
+        ema_vals.append(price * k + ema_vals[-1] * (1 - k))
+    return ema_vals
 
-# Função auxiliar para Bandas de Bollinger
-def bollinger_bands(series, period=20, std=2):
-    sma = series.rolling(window=period).mean()
-    std_dev = series.rolling(window=period).std()
-    upper = sma + std_dev * std
-    lower = sma - std_dev * std
-    return upper, lower
+def bollinger_bands(closes, period=20, std=2):
+    if len(closes) < period:
+        return [], []
+    sma = []
+    for i in range(len(closes)):
+        if i < period - 1:
+            sma.append(sum(closes[:i+1]) / (i+1))
+        else:
+            sma.append(sum(closes[i-period+1:i+1]) / period)
+    
+    bb_up = []
+    bb_down = []
+    for i in range(len(sma)):
+        if i < period - 1:
+            bb_up.append(0)
+            bb_down.append(0)
+            continue
+        window = closes[i-period+1:i+1]
+        std_dev = (sum((x - sma[i]) ** 2 for x in window) / period) ** 0.5
+        bb_up.append(sma[i] + std_dev * std)
+        bb_down.append(sma[i] - std_dev * std)
+    return bb_up, bb_down
 
+# ====================== SCAN ======================
 async def scan(session, sym):
     try:
         async with session.get(f"{BINANCE}/fapi/v1/klines?symbol={sym}&interval=15m&limit=150") as r:
@@ -81,47 +101,44 @@ async def scan(session, sym):
         if len(k) < 100:
             return
 
-        df = pd.DataFrame(k, columns=['open_time', 'open', 'high', 'low', 'close', 'volume',
-                                      'close_time', 'quote_volume', 'trades', 'taker_buy_base',
-                                      'taker_buy_quote', 'ignore'])
-        
-        df['close'] = df['close'].astype(float)
-        df['high']  = df['high'].astype(float)
-        df['low']   = df['low'].astype(float)
+        closes = [float(x[4]) for x in k]
 
-        # Cálculo das médias e indicadores
-        df['ema9']  = ema_series(df['close'], 9)
-        df['ema20'] = ema_series(df['close'], 20)
-        df['ema50'] = ema_series(df['close'], 50)
-        df['ema200'] = ema_series(df['close'], 200)
+        price = closes[-1]
 
-        df['bollinger_up'], df['bollinger_down'] = bollinger_bands(df['close'])
+        # Cálculo das EMAs
+        ema9  = ema(closes, 9)
+        ema20 = ema(closes, 20)
+        ema50 = ema(closes, 50)
+        ema200 = ema(closes, 200)
 
-        price = df['close'].iloc[-1]
+        # Bandas de Bollinger
+        bb_up, bb_down = bollinger_bands(closes)
+
         oi_now = await get_oi(session, sym)
 
-        # === CONFIGURAÇÃO DE ZONA DE PRESSÃO ===
+        # ====================== ZONA DE PRESSÃO ======================
         margem = 0.015  # 1.5%
 
-        distancia_percentual = abs(df['close'] - df['ema200']) / df['ema200']
+        if len(ema200) == 0 or ema200[-1] == 0:
+            return
+
+        distancia_percentual = abs(price - ema200[-1]) / ema200[-1]
         na_zona_200 = distancia_percentual <= margem
 
-        # 1. Estado de Tendência (Leque de médias)
-        long_alinhado  = (df['ema9'] > df['ema20']) & (df['ema20'] > df['ema50'])
-        short_alinhado = (df['ema9'] < df['ema20']) & (df['ema20'] < df['ema50'])
+        # Leque de médias (alinhamento)
+        long_alinhado = (ema9[-1] > ema20[-1]) and (ema20[-1] > ema50[-1])
+        short_alinhado = (ema9[-1] < ema20[-1]) and (ema20[-1] < ema50[-1])
 
-        # 2. Volatilidade (Bandas abrindo)
-        bb_expandindo = (df['bollinger_up'] > df['bollinger_up'].shift(1)) & \
-                        (df['bollinger_down'] < df['bollinger_down'].shift(1))
+        # Bandas abrindo (expansão de volatilidade)
+        bb_expandindo = (len(bb_up) > 1 and len(bb_down) > 1 and
+                        bb_up[-1] > bb_up[-2] and bb_down[-1] < bb_down[-2])
 
-        # === GATILHOS ===
-        setup_long  = long_alinhado & na_zona_200 & bb_expandindo
-        setup_short = short_alinhado & na_zona_200 & bb_expandindo
+        # ====================== GATILHOS ======================
+        if (long_alinhado and na_zona_200 and bb_expandindo and 
+            can_alert(sym + "_LONG")):   # cooldown separado por direção se quiser
 
-        # LONG
-        if setup_long.iloc[-1] and not setup_long.iloc[-2] and can_alert(sym):
-            tipo = "ROMPIMENTO" if df['close'].iloc[-1] > df['ema200'].iloc[-1] else "PULLBACK"
-            dist = distancia_percentual.iloc[-1] * 100
+            tipo = "ROMPIMENTO" if price > ema200[-1] else "PULLBACK"
+            dist = distancia_percentual * 100
             nome = sym.replace("USDT", "")
 
             msg = (
@@ -135,10 +152,11 @@ async def scan(session, sym):
             )
             await tg(session, msg)
 
-        # SHORT
-        if setup_short.iloc[-1] and not setup_short.iloc[-2] and can_alert(sym):
-            tipo = "ROMPIMENTO" if df['close'].iloc[-1] < df['ema200'].iloc[-1] else "PULLBACK"
-            dist = distancia_percentual.iloc[-1] * 100
+        if (short_alinhado and na_zona_200 and bb_expandindo and 
+            can_alert(sym + "_SHORT")):
+
+            tipo = "ROMPIMENTO" if price < ema200[-1] else "PULLBACK"
+            dist = distancia_percentual * 100
             nome = sym.replace("USDT", "")
 
             msg = (
@@ -155,6 +173,7 @@ async def scan(session, sym):
     except Exception as e:
         print(f"Erro em {sym}:", e)
 
+# ====================== MAIN ======================
 async def main():
     async with aiohttp.ClientSession() as session:
         await tg(session, "<b>V10 - ZONA DE PRESSÃO ATIVA</b>\nEMA200 + Leque de Médias + BB Abrindo")
@@ -167,9 +186,7 @@ async def main():
                     d["symbol"] for d in data
                     if d["symbol"].endswith("USDT")
                     and float(d.get("quoteVolume", 0)) >= MIN_VOL24
-                ]
-
-                symbols = symbols[:TOP_N]
+                ][:TOP_N]
 
                 await asyncio.gather(*[scan(session, s) for s in symbols])
 
