@@ -6,7 +6,7 @@ import threading
 app = Flask(__name__)
 @app.route("/")
 def home():
-    return "V10 - ZONA DE PRESSÃO (EMA200 + Leque + BB)", 200
+    return "V11 - ZONA DE PRESSÃO (EMA200 + Leque + BB + SAR + MACD 8-17-9)", 200
 
 @app.route("/health")
 def health():
@@ -20,7 +20,6 @@ CHAT_ID = os.getenv("CHAT_ID", "").strip()
 MIN_VOL24 = 5_000_000
 TOP_N = 180
 SCAN_INTERVAL = 30
-
 COOLDOWN_SECONDS = 14400  # 4 horas
 
 cooldown = {}
@@ -59,7 +58,7 @@ async def get_oi(session, symbol):
     except:
         return 0
 
-# ====================== FUNÇÕES AUXILIARES ======================
+# ====================== INDICADORES ======================
 def ema(data, period):
     if len(data) < period:
         return [sum(data) / len(data)] * len(data) if data else []
@@ -78,9 +77,7 @@ def bollinger_bands(closes, period=20, std=2):
             sma.append(sum(closes[:i+1]) / (i + 1))
         else:
             sma.append(sum(closes[i - period + 1:i + 1]) / period)
-
-    bb_up = []
-    bb_down = []
+    bb_up, bb_down = [], []
     for i in range(len(sma)):
         if i < period - 1:
             bb_up.append(0)
@@ -92,70 +89,113 @@ def bollinger_bands(closes, period=20, std=2):
         bb_down.append(sma[i] - std_dev * std)
     return bb_up, bb_down
 
+def parabolic_sar(highs, lows, af=0.03, max_af=0.3):
+    n = len(highs)
+    if n < 2:
+        return [0] * n
+    sar = [0.0] * n
+    trend = 1
+    af_current = af
+    ep = highs[0]
+    sar[0] = lows[0]
+    for i in range(1, n):
+        prev_sar = sar[i-1]
+        if trend == 1:
+            sar[i] = prev_sar + af_current * (ep - prev_sar)
+            if sar[i] > lows[i]:
+                trend = -1
+                sar[i] = ep
+                ep = lows[i]
+                af_current = af
+        else:
+            sar[i] = prev_sar - af_current * (prev_sar - ep)
+            if sar[i] < highs[i]:
+                trend = 1
+                sar[i] = ep
+                ep = highs[i]
+                af_current = af
+        if trend == 1:
+            if highs[i] > ep:
+                ep = highs[i]
+                af_current = min(af_current + af, max_af)
+            sar[i] = min(sar[i], lows[i-1], lows[i])
+        else:
+            if lows[i] < ep:
+                ep = lows[i]
+                af_current = min(af_current + af, max_af)
+            sar[i] = max(sar[i], highs[i-1], highs[i])
+    return sar
+
+def calculate_macd(closes, fast=8, slow=17, signal=9):  # ← ALTERADO CONFORME SEU PEDIDO
+    ema_fast = ema(closes, fast)
+    ema_slow = ema(closes, slow)
+    macd_line = [f - s for f, s in zip(ema_fast, ema_slow)]
+    signal_line = ema(macd_line, signal)
+    histogram = [m - s for m, s in zip(macd_line, signal_line)]
+    return histogram
+
 # ====================== SCAN ======================
 async def scan(session, sym):
     try:
-        async with session.get(f"{BINANCE}/fapi/v1/klines?symbol={sym}&interval=15m&limit=150") as r:
+        async with session.get(f"{BINANCE}/fapi/v1/klines?symbol={sym}&interval=15m&limit=1000") as r:
             k = await r.json()
 
-        if len(k) < 100:
+        if len(k) < 200:
             return
 
+        highs = [float(x[2]) for x in k]
+        lows  = [float(x[3]) for x in k]
         closes = [float(x[4]) for x in k]
         price = closes[-1]
 
-        # Cálculo das EMAs
+        # Indicadores
         ema9  = ema(closes, 9)
         ema20 = ema(closes, 20)
         ema50 = ema(closes, 50)
         ema200 = ema(closes, 200)
-
-        # Bandas de Bollinger
         bb_up, bb_down = bollinger_bands(closes)
+        sar = parabolic_sar(highs, lows)
+        macd_hist = calculate_macd(closes)   # agora 8-17-9
 
         oi_now = await get_oi(session, sym)
 
-        # ====================== CONFIGURAÇÃO DE ZONA DE PRESSÃO ======================
-        margem = 0.015  # 1.5%
+        # ====================== CONDIÇÕES ======================
+        margem = 0.015
+        na_zona_200 = abs(price - ema200[-1]) / ema200[-1] <= margem
 
-        if len(ema200) < 2 or ema200[-1] == 0:
-            return
+        # Leque + direção (todas subindo ou caindo)
+        long_alinhado = (ema9[-1] > ema20[-1] > ema50[-1] > ema200[-1] and
+                         ema9[-1] > ema9[-2] and ema20[-1] > ema20[-2] and ema50[-1] > ema50[-2])
+        short_alinhado = (ema9[-1] < ema20[-1] < ema50[-1] < ema200[-1] and
+                          ema9[-1] < ema9[-2] and ema20[-1] < ema20[-2] and ema50[-1] < ema50[-2])
 
-        # Cálculo da distância (igual ao exemplo que você mandou)
-        distancia_percentual = abs(price - ema200[-1]) / ema200[-1]
-        na_zona_200 = distancia_percentual <= margem
+        # BB abrindo (boca de jacaré)
+        bb_expandindo = (len(bb_up) > 1 and bb_up[-1] > bb_up[-2] and bb_down[-1] < bb_down[-2])
 
-        # 1. ESTADO DE TENDÊNCIA (Leque de médias)
-        long_alinhado  = (ema9[-1] > ema20[-1]) and (ema20[-1] > ema50[-1])
-        short_alinhado = (ema9[-1] < ema20[-1]) and (ema20[-1] < ema50[-1])
+        # SAR
+        sar_long = sar[-1] < price
+        sar_short = sar[-1] > price
 
-        # 2. VOLATILIDADE (Bandas abrindo)
-        bb_expandindo = (len(bb_up) > 1 and len(bb_down) > 1 and
-                        bb_up[-1] > bb_up[-2] and bb_down[-1] < bb_down[-2])
+        # MACD 8-17-9
+        macd_long = macd_hist[-1] > 0
+        macd_short = macd_hist[-1] < 0
 
-        # ====================== GATILHOS (EXATAMENTE COMO VOCÊ PEDIU) ======================
-        # Calcula os setups completos na vela atual
-        setup_long  = long_alinhado and na_zona_200 and bb_expandindo
-        setup_short = short_alinhado and na_zona_200 and bb_expandindo
+        # Preço acima da EMA9 (LONG) / abaixo (SHORT)
+        momentum_long = price > ema9[-1]
+        momentum_short = price < ema9[-1]
 
-        # Calcula os setups da vela anterior (para detectar transição)
-        long_alinhado_prev  = (ema9[-2] > ema20[-2]) and (ema20[-2] > ema50[-2]) if len(ema9) > 1 else False
-        short_alinhado_prev = (ema9[-2] < ema20[-2]) and (ema20[-2] < ema50[-2]) if len(ema9) > 1 else False
-        na_zona_200_prev    = (abs(closes[-2] - ema200[-2]) / ema200[-2] <= margem) if len(ema200) > 1 else False
-        bb_expandindo_prev  = (len(bb_up) > 2 and len(bb_down) > 2 and
-                              bb_up[-2] > bb_up[-3] and bb_down[-2] < bb_down[-3]) if len(bb_up) > 2 else False
+        # SETUP COMPLETO (gatilho flexível - não precisa de tudo na mesma vela)
+        setup_long  = long_alinhado and na_zona_200 and bb_expandindo and sar_long and macd_long and momentum_long
+        setup_short = short_alinhado and na_zona_200 and bb_expandindo and sar_short and macd_short and momentum_short
 
-        setup_long_prev  = long_alinhado_prev and na_zona_200_prev and bb_expandindo_prev
-        setup_short_prev = short_alinhado_prev and na_zona_200_prev and bb_expandindo_prev
-
-        # LONG - Dispara só na transição (False → True)
-        if setup_long and not setup_long_prev and can_alert(sym):
+        # ====================== GATILHO ======================
+        if setup_long and can_alert(sym):
             tipo = "ROMPIMENTO" if price > ema200[-1] else "PULLBACK"
-            dist = distancia_percentual * 100
+            dist = (abs(price - ema200[-1]) / ema200[-1]) * 100
             nome = sym.replace("USDT", "")
 
             msg = (
-                f"🚀 <b>ALERTAS BINANCE LONG</b>\n\n"
+                f"🚀 <b>ALERTA BINANCE LONG</b>\n\n"
                 f"{nome}\n"
                 f"Preço: {price:.5f}\n"
                 f"Distância EMA200: {dist:.2f}%\n"
@@ -165,14 +205,13 @@ async def scan(session, sym):
             )
             await tg(session, msg)
 
-        # SHORT - Dispara só na transição (False → True)
-        if setup_short and not setup_short_prev and can_alert(sym):
+        if setup_short and can_alert(sym):
             tipo = "ROMPIMENTO" if price < ema200[-1] else "PULLBACK"
-            dist = distancia_percentual * 100
+            dist = (abs(price - ema200[-1]) / ema200[-1]) * 100
             nome = sym.replace("USDT", "")
 
             msg = (
-                f"📉 <b>ALERTAS BINANCE SHORT</b>\n\n"
+                f"📉 <b>ALERTA BINANCE SHORT</b>\n\n"
                 f"{nome}\n"
                 f"Preço: {price:.5f}\n"
                 f"Distância EMA200: {dist:.2f}%\n"
@@ -188,7 +227,7 @@ async def scan(session, sym):
 # ====================== MAIN ======================
 async def main():
     async with aiohttp.ClientSession() as session:
-        await tg(session, "<b>V10 - ZONA DE PRESSÃO ATIVA</b>\nEMA200 + Leque de Médias + BB Abrindo")
+        await tg(session, "<b>V11 ATIVA - MACD 8-17-9</b>\nEMA200 + Leque + BB + SAR + MACD")
         while True:
             try:
                 async with session.get(f"{BINANCE}/fapi/v1/ticker/24hr") as r:
