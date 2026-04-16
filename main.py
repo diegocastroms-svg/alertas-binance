@@ -159,34 +159,53 @@ async def scan(session, sym):
 
         oi_now = await get_oi(session, sym)
 
-        # ====================== CONDIÇÕES ======================
-        margem = 0.015
-        na_zona_200 = abs(price - ema200[-1]) / ema200[-1] <= margem
+        # ====================== GATILHO V11 - AJUSTADO (SEM MODA) ======================
 
-        # Leque + direção (todas subindo ou caindo)
-        long_alinhado = (ema9[-1] > ema20[-1] > ema50[-1] > ema200[-1] and
-                         ema9[-1] > ema9[-2] and ema20[-1] > ema20[-2] and ema50[-1] > ema50[-2])
-        short_alinhado = (ema9[-1] < ema20[-1] < ema50[-1] < ema200[-1] and
-                          ema9[-1] < ema9[-2] and ema20[-1] < ema20[-2] and ema50[-1] < ema50[-2])
+        # 1. RADAR DE PROXIMIDADE (EMA 200)
+        # Não filtra se está acima ou abaixo, apenas se está perto (até 1,5%)
+        distancia_200 = abs(price - ema200[-1]) / ema200[-1]
+        na_zona_200 = distancia_200 <= 0.015 
 
-        # BB abrindo (boca de jacaré)
-        bb_expandindo = (len(bb_up) > 1 and bb_up[-1] > bb_up[-2] and bb_down[-1] < bb_down[-2])
+        # 2. FILTRO DE TENDÊNCIA (EMA 50)
+        # A 50 manda na direção. As médias curtas (9 e 20) acompanham.
+        tendencia_long = (ema9[-1] > ema50[-1] and ema20[-1] > ema50[-1])
+        tendencia_short = (ema9[-1] < ema50[-1] and ema20[-1] < ema50[-1])
 
-        # SAR
-        sar_long = sar[-1] < price
-        sar_short = sar[-1] > price
+        # 3. O MOMENTO DO PREÇO (EMA 9)
+        # O preço tem que estar do lado certo da média mais rápida
+        preco_ta_acima_9 = price > ema9[-1]
+        preco_ta_abaixo_9 = price < ema9[-1]
 
-        # MACD 8-17-9
-        macd_long = macd_hist[-1] > 0
-        macd_short = macd_hist[-1] < 0
+        # 4. A EXPLOSÃO (Bandas de Bollinger abrindo)
+        bb_expandindo = (bb_up[-1] > bb_up[-2] and bb_down[-1] < bb_down[-2])
 
-        # Preço acima da EMA9 (LONG) / abaixo (SHORT)
-        momentum_long = price > ema9[-1]
-        momentum_short = price < ema9[-1]
+        # 5. FILTROS DIRECIONAIS (MACD e SAR)
+        macd_ok_long  = macd_hist[-1] >= -0.000001
+        sar_ok_long   = sar[-1] <= price * 1.001
 
-        # SETUP COMPLETO (gatilho flexível - não precisa de tudo na mesma vela)
-        setup_long  = long_alinhado and na_zona_200 and bb_expandindo and sar_long and macd_long and momentum_long
-        setup_short = short_alinhado and na_zona_200 and bb_expandindo and sar_short and macd_short and momentum_short
+        macd_ok_short = macd_hist[-1] <= 0.000001
+        sar_ok_short  = sar[-1] >= price * 0.999
+
+        # ====================== MONTAGEM DO SETUP FINAL ======================
+
+        # Só dispara se TUDO estiver de acordo:
+        setup_long = (
+            na_zona_200 and 
+            tendencia_long and 
+            preco_ta_acima_9 and 
+            bb_expandindo and 
+            macd_ok_long and 
+            sar_ok_long
+        )
+
+        setup_short = (
+            na_zona_200 and 
+            tendencia_short and 
+            preco_ta_abaixo_9 and 
+            bb_expandindo and 
+            macd_ok_short and 
+            sar_ok_short
+        )
 
         # ====================== GATILHO ======================
         if setup_long and can_alert(sym):
