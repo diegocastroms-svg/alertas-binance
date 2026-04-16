@@ -20,7 +20,7 @@ CHAT_ID = os.getenv("CHAT_ID", "").strip()
 MIN_VOL24 = 5_000_000
 TOP_N = 180
 SCAN_INTERVAL = 30
-COOLDOWN_SECONDS = 14400  # 4 horas
+COOLDOWN_SECONDS = 3600  # 1 horas
 
 cooldown = {}
 
