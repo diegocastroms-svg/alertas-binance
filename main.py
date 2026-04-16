@@ -2,11 +2,13 @@ import os, asyncio, aiohttp, time, math
 from datetime import datetime, timedelta, timezone
 from flask import Flask
 import threading
+import pandas as pd
+import numpy as np
 
 app = Flask(__name__)
 @app.route("/")
 def home():
-    return "V10 - ANTECIPACAO REAL (OI + CVD)", 200
+    return "V10 - ZONA DE PRESSÃO (EMA200 + Leque + BB)", 200
 
 @app.route("/health")
 def health():
@@ -21,12 +23,10 @@ MIN_VOL24 = 10_000_000
 TOP_N = 180
 SCAN_INTERVAL = 30
 
-STOCH_PERIOD = 14
+COOLDOWN_SECONDS = 14400  # 4 horas
 
 cooldown = {}
 alert_state = {}
-
-COOLDOWN_SECONDS = 14400  # 4 horas
 
 def now_br():
     return (datetime.now(timezone.utc) - timedelta(hours=3)).strftime("%H:%M:%S")
@@ -53,49 +53,6 @@ def can_alert(sym):
         return True
     return False
 
-def sma(data, n):
-    if len(data) < n: return 0
-    return sum(data[-n:]) / n
-
-def rsi_calc(data, period):
-    if len(data) < period * 2: return 50
-    gains, losses = [], []
-    for i in range(len(data)-1):
-        d = data[i+1] - data[i]
-        gains.append(max(d, 0))
-        losses.append(max(-d, 0))
-    avg_gain = sum(gains[-period:]) / period
-    avg_loss = sum(losses[-period:]) / period
-    if avg_loss == 0: return 100
-    rs = avg_gain / avg_loss
-    return 100 - (100 / (1 + rs))
-
-def ema(data, period):
-    if len(data) < period: return []
-    k = 2 / (period + 1)
-    ema_vals = [sum(data[:period]) / period]
-    for price in data[period:]:
-        ema_vals.append(price * k + ema_vals[-1] * (1 - k))
-    return ema_vals
-
-def macd_calc(closes):
-    ema12 = ema(closes, 12)
-    ema26 = ema(closes, 26)
-
-    if len(ema12) < 2 or len(ema26) < 2:
-        return None, None, None, None
-
-    macd_line = [a - b for a, b in zip(ema12[-len(ema26):], ema26)]
-    signal = ema(macd_line, 9)
-
-    if len(signal) < 2:
-        return None, None, None, None
-
-    hist = macd_line[-1] - signal[-1]
-    hist_prev = macd_line[-2] - signal[-2]
-
-    return macd_line[-1], signal[-1], hist, hist_prev
-
 async def get_oi(session, symbol):
     try:
         async with session.get(f"{BINANCE}/fapi/v1/openInterest?symbol={symbol}") as r:
@@ -104,103 +61,103 @@ async def get_oi(session, symbol):
     except:
         return 0
 
+# Função auxiliar para calcular EMA
+def ema_series(series, period):
+    return series.ewm(span=period, adjust=False).mean()
+
+# Função auxiliar para Bandas de Bollinger
+def bollinger_bands(series, period=20, std=2):
+    sma = series.rolling(window=period).mean()
+    std_dev = series.rolling(window=period).std()
+    upper = sma + std_dev * std
+    lower = sma - std_dev * std
+    return upper, lower
+
 async def scan(session, sym):
     try:
-        async with session.get(f"{BINANCE}/fapi/v1/klines?symbol={sym}&interval=15m&limit=100") as r:
+        async with session.get(f"{BINANCE}/fapi/v1/klines?symbol={sym}&interval=15m&limit=150") as r:
             k = await r.json()
 
-        if len(k) < 60: return
-
-        closes = [float(x[4]) for x in k]
-        volumes = [float(x[5]) for x in k]
-        taker_buy = [float(x[10]) for x in k]
-
-        price = closes[-1]
-
-        ma9 = sma(closes, 9)
-        ma20 = sma(closes, 20)
-        ma50 = sma(closes, 50)
-        ma200 = sma(closes, 100)
-
-        rsi = rsi_calc(closes, STOCH_PERIOD)
-
-        if ma20 == 0: return
-
-        vol_avg = sum(volumes[-10:]) / 10
-        vol_now = volumes[-1]
-
-        cvd_up = sum(taker_buy[-3:]) > sum(volumes[-3:]) * 0.55
-
-        oi_now = await get_oi(session, sym)
-
-        async with session.get(f"{BINANCE}/fapi/v1/klines?symbol={sym}&interval=1h&limit=100") as r:
-            k1h = await r.json()
-
-        async with session.get(f"{BINANCE}/fapi/v1/klines?symbol={sym}&interval=4h&limit=100") as r:
-            k4h = await r.json()
-
-        closes_15 = closes
-        closes_1h = [float(x[4]) for x in k1h]
-        closes_4h = [float(x[4]) for x in k4h]
-
-        macd15, sig15, hist15, hist15_prev = macd_calc(closes_15)
-        macd1h, sig1h, hist1h, hist1h_prev = macd_calc(closes_1h)
-        macd4h, sig4h, hist4h, hist4h_prev = macd_calc(closes_4h)
-
-        if None in [macd15, sig15, hist15, hist15_prev, macd1h, sig1h, hist1h, hist1h_prev, macd4h, sig4h, hist4h, hist4h_prev]:
+        if len(k) < 100:
             return
 
-        # ===== INÍCIO REAL =====
-        long_15m = macd15 > sig15 and hist15 > 0 and hist15 > hist15_prev and hist15_prev > 0
+        df = pd.DataFrame(k, columns=['open_time', 'open', 'high', 'low', 'close', 'volume',
+                                      'close_time', 'quote_volume', 'trades', 'taker_buy_base',
+                                      'taker_buy_quote', 'ignore'])
+        
+        df['close'] = df['close'].astype(float)
+        df['high']  = df['high'].astype(float)
+        df['low']   = df['low'].astype(float)
 
-        long_1h = (
-            macd1h > sig1h
-            and hist1h > 0
-            and hist1h_prev < 0
-        )
+        # Cálculo das médias e indicadores
+        df['ema9']  = ema_series(df['close'], 9)
+        df['ema20'] = ema_series(df['close'], 20)
+        df['ema50'] = ema_series(df['close'], 50)
+        df['ema200'] = ema_series(df['close'], 200)
 
-        long_4h = macd4h > sig4h and hist4h > hist4h_prev
+        df['bollinger_up'], df['bollinger_down'] = bollinger_bands(df['close'])
 
-        short_15m = macd15 < sig15 and hist15 < 0 and hist15 < hist15_prev and hist15_prev < 0
+        price = df['close'].iloc[-1]
+        oi_now = await get_oi(session, sym)
 
-        short_1h = (
-            macd1h < sig1h
-            and hist1h < 0
-            and hist1h_prev > 0
-        )
+        # === CONFIGURAÇÃO DE ZONA DE PRESSÃO ===
+        margem = 0.015  # 1.5%
 
-        short_4h = macd4h < sig4h and hist4h < hist4h_prev
+        distancia_percentual = abs(df['close'] - df['ema200']) / df['ema200']
+        na_zona_200 = distancia_percentual <= margem
 
-        if long_15m and long_1h and long_4h and can_alert(sym):
-            nome = sym.replace("USDT","")
+        # 1. Estado de Tendência (Leque de médias)
+        long_alinhado  = (df['ema9'] > df['ema20']) & (df['ema20'] > df['ema50'])
+        short_alinhado = (df['ema9'] < df['ema20']) & (df['ema20'] < df['ema50'])
+
+        # 2. Volatilidade (Bandas abrindo)
+        bb_expandindo = (df['bollinger_up'] > df['bollinger_up'].shift(1)) & \
+                        (df['bollinger_down'] < df['bollinger_down'].shift(1))
+
+        # === GATILHOS ===
+        setup_long  = long_alinhado & na_zona_200 & bb_expandindo
+        setup_short = short_alinhado & na_zona_200 & bb_expandindo
+
+        # LONG
+        if setup_long.iloc[-1] and not setup_long.iloc[-2] and can_alert(sym):
+            tipo = "ROMPIMENTO" if df['close'].iloc[-1] > df['ema200'].iloc[-1] else "PULLBACK"
+            dist = distancia_percentual.iloc[-1] * 100
+            nome = sym.replace("USDT", "")
+
             msg = (
-                f"🚀 <b>CONFLUÊNCIA MACD LONG</b>\n\n"
+                f"🚀 <b>ALERTAS BINANCE LONG</b>\n\n"
                 f"{nome}\n"
-                f"Preço: {price}\n"
-                f"RSI: {rsi:.1f}\n"
-                f"OI: {oi_now}\n"
+                f"Preço: {price:.4f}\n"
+                f"Distância EMA200: {dist:.2f}%\n"
+                f"OI: {oi_now:,.0f}\n"
+                f"Tipo: {tipo}\n"
                 f"⏰ {now_br()} BR"
             )
             await tg(session, msg)
 
-        if short_15m and short_1h and short_4h and can_alert(sym):
-            nome = sym.replace("USDT","")
+        # SHORT
+        if setup_short.iloc[-1] and not setup_short.iloc[-2] and can_alert(sym):
+            tipo = "ROMPIMENTO" if df['close'].iloc[-1] < df['ema200'].iloc[-1] else "PULLBACK"
+            dist = distancia_percentual.iloc[-1] * 100
+            nome = sym.replace("USDT", "")
+
             msg = (
-                f"🔻 <b>CONFLUÊNCIA MACD SHORT</b>\n\n"
+                f"📉 <b>ALERTAS BINANCE SHORT</b>\n\n"
                 f"{nome}\n"
-                f"Preço: {price}\n"
-                f"RSI: {rsi:.1f}\n"
-                f"OI: {oi_now}\n"
+                f"Preço: {price:.4f}\n"
+                f"Distância EMA200: {dist:.2f}%\n"
+                f"OI: {oi_now:,.0f}\n"
+                f"Tipo: {tipo}\n"
                 f"⏰ {now_br()} BR"
             )
             await tg(session, msg)
 
     except Exception as e:
-        print("Erro:", e)
+        print(f"Erro em {sym}:", e)
 
 async def main():
     async with aiohttp.ClientSession() as session:
-        await tg(session, "<b>V10 - ANTECIPACAO REAL ATIVA</b>")
+        await tg(session, "<b>V10 - ZONA DE PRESSÃO ATIVA</b>\nEMA200 + Leque de Médias + BB Abrindo")
         while True:
             try:
                 async with session.get(f"{BINANCE}/fapi/v1/ticker/24hr") as r:
@@ -209,7 +166,7 @@ async def main():
                 symbols = [
                     d["symbol"] for d in data
                     if d["symbol"].endswith("USDT")
-                    and float(d.get("quoteVolume",0)) >= MIN_VOL24
+                    and float(d.get("quoteVolume", 0)) >= MIN_VOL24
                 ]
 
                 symbols = symbols[:TOP_N]
@@ -217,9 +174,9 @@ async def main():
                 await asyncio.gather(*[scan(session, s) for s in symbols])
 
             except Exception as e:
-                print(e)
+                print("Erro principal:", e)
 
             await asyncio.sleep(SCAN_INTERVAL)
 
-threading.Thread(target=lambda: app.run(host="0.0.0.0", port=int(os.environ.get("PORT",10000))), daemon=True).start()
+threading.Thread(target=lambda: app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000))), daemon=True).start()
 asyncio.run(main())
