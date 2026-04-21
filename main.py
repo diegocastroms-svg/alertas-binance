@@ -137,7 +137,7 @@ def calculate_macd(closes, fast=8, slow=17, signal=9):  # ← ALTERADO CONFORME 
 # ====================== SCAN ======================
 async def scan(session, sym):
     try:
-        async with session.get(f"{BINANCE}/fapi/v1/klines?symbol={sym}&interval=30m&limit=1000") as r:
+        async with session.get(f"{BINANCE}/fapi/v1/klines?symbol={sym}&interval=31H&limit=1000") as r:
             k = await r.json()
 
         if len(k) < 200:
