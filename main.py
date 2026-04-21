@@ -17,7 +17,7 @@ CHAT_ID = os.getenv("CHAT_ID", "").strip()
 MIN_VOL24 = 5_000_000
 TOP_N = 180
 SCAN_INTERVAL = 30
-COOLDOWN_SECONDS = 3600  # 1 hora de intervalo por moeda
+COOLDOWN_SECONDS = 7200  # 2 hora de intervalo por moeda
 
 cooldown = {}
 
@@ -115,8 +115,8 @@ async def scan(session, sym):
         bb_expandindo = (bb_up[-1] > bb_up[-2] and bb_down[-1] < bb_down[-2])
 
         # Verificação do Setup
-        setup_long = (na_zona_200 and tendencia_long and preco_ok_long and bb_expanding)
-        setup_short = (na_zona_200 and tendencia_short and preco_ok_short and bb_expanding)
+        setup_long = (na_zona_200 and tendencia_long and preco_ok_long and bb_expandindo)
+        setup_short = (na_zona_200 and tendencia_short and preco_ok_short and bb_expandindo)
 
         if (setup_long or setup_short) and can_alert(sym):
             oi_now = await get_oi(session, sym)
