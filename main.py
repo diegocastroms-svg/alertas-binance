@@ -12,7 +12,7 @@ BINANCE = "https://fapi.binance.com"
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 CHAT_ID = os.getenv("CHAT_ID", "").strip()
 
-MIN_VOL24 = 5_000_000
+MIN_VOL24 = 2_000_000
 TOP_N = 180
 SCAN_INTERVAL = 30
 
