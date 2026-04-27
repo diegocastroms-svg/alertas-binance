@@ -6,7 +6,7 @@ import threading
 app = Flask(__name__)
 @app.route("/")
 def home():
-    return "V11 LIGHT - 1H - DIST 2.5% (EMA200 + Leque + BB)", 200
+    return "V11 LIGHT - 1H ATIVO | 15M DESATIVADO", 200
 
 BINANCE = "https://fapi.binance.com"
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
@@ -15,6 +15,10 @@ CHAT_ID = os.getenv("CHAT_ID", "").strip()
 MIN_VOL24 = 5_000_000
 TOP_N = 180
 SCAN_INTERVAL = 30
+
+# CONTROLE DOS ALERTAS
+ENABLE_1H = True
+ENABLE_15M = False   # ← Desativado (mude para True quando quiser ligar novamente)
 
 # NOVO CONTROLE (independente por TF)
 last_alert = {}
@@ -75,110 +79,112 @@ async def scan(session, sym):
         now = time.time()
 
         # ===================== 1H =====================
-        async with session.get(f"{BINANCE}/fapi/v1/klines?symbol={sym}&interval=1h&limit=500") as r:
-            k = await r.json()
+        if ENABLE_1H:
+            async with session.get(f"{BINANCE}/fapi/v1/klines?symbol={sym}&interval=1h&limit=500") as r:
+                k = await r.json()
 
-        if len(k) >= 200:
+            if len(k) >= 200:
 
-            closes = [float(x[4]) for x in k]
-            price = closes[-1]
-            p_prev = closes[-2]
+                closes = [float(x[4]) for x in k]
+                price = closes[-1]
+                p_prev = closes[-2]
 
-            ema200 = ema(closes, 200)
-            bb_up, bb_down = bollinger_bands(closes)
-            bb_up_prev, bb_down_prev = bb_up[-2], bb_down[-2]
+                ema200 = ema(closes, 200)
+                bb_up, bb_down = bollinger_bands(closes)
+                bb_up_prev, bb_down_prev = bb_up[-2], bb_down[-2]
 
-            dist = abs(price - ema200[-1]) / ema200[-1]
-            perto = dist <= 0.02
-            cruzou = (p_prev < ema200[-1] <= price) or (p_prev > ema200[-1] >= price)
+                dist = abs(price - ema200[-1]) / ema200[-1]
+                perto = dist <= 0.02
+                cruzou = (p_prev < ema200[-1] <= price) or (p_prev > ema200[-1] >= price)
 
-            if (perto or cruzou):
+                if (perto or cruzou):
 
-                key = f"{sym}_1h"
-                if now - last_alert.get(key, 0) >= 14400:
+                    key = f"{sym}_1h"
+                    if now - last_alert.get(key, 0) >= 14400:
 
-                    oi_now = await get_oi(session, sym)
+                        oi_now = await get_oi(session, sym)
 
-                    if price >= bb_up[-1] and bb_up[-1] > bb_up_prev:
-                        msg = (
-                            f"🟪⏫ <b>ALERTA BINANCE LONG 1H</b>\n\n"
-                            f"Moeda: {sym.replace('USDT', '')}\n"
-                            f"Preço: {price:.5f}\n"
-                            f"Dist. EMA200: {dist*100:.2f}%\n"
-                            f"OI: {oi_now:,.0f}\n"
-                            f"⏰ {now_br()} BR"
-                        )
-                        await tg(session, msg)
-                        last_alert[key] = now
+                        if price >= bb_up[-1] and bb_up[-1] > bb_up_prev:
+                            msg = (
+                                f"🟪⏫ <b>ALERTA BINANCE LONG 1H</b>\n\n"
+                                f"Moeda: {sym.replace('USDT', '')}\n"
+                                f"Preço: {price:.5f}\n"
+                                f"Dist. EMA200: {dist*100:.2f}%\n"
+                                f"OI: {oi_now:,.0f}\n"
+                                f"⏰ {now_br()} BR"
+                            )
+                            await tg(session, msg)
+                            last_alert[key] = now
 
-                    elif price <= bb_down[-1] and bb_down[-1] < bb_down_prev:
-                        msg = (
-                            f"🟫⏬ <b>ALERTA BINANCE SHORT 1H</b>\n\n"
-                            f"Moeda: {sym.replace('USDT', '')}\n"
-                            f"Preço: {price:.5f}\n"
-                            f"Dist. EMA200: {dist*100:.2f}%\n"
-                            f"OI: {oi_now:,.0f}\n"
-                            f"⏰ {now_br()} BR"
-                        )
-                        await tg(session, msg)
-                        last_alert[key] = now
+                        elif price <= bb_down[-1] and bb_down[-1] < bb_down_prev:
+                            msg = (
+                                f"🟫⏬ <b>ALERTA BINANCE SHORT 1H</b>\n\n"
+                                f"Moeda: {sym.replace('USDT', '')}\n"
+                                f"Preço: {price:.5f}\n"
+                                f"Dist. EMA200: {dist*100:.2f}%\n"
+                                f"OI: {oi_now:,.0f}\n"
+                                f"⏰ {now_br()} BR"
+                            )
+                            await tg(session, msg)
+                            last_alert[key] = now
 
 
         # ===================== 15M =====================
-        async with session.get(f"{BINANCE}/fapi/v1/klines?symbol={sym}&interval=15m&limit=500") as r:
-            k = await r.json()
+        if ENABLE_15M:   # ←←← 15M DESATIVADO
+            async with session.get(f"{BINANCE}/fapi/v1/klines?symbol={sym}&interval=15m&limit=500") as r:
+                k = await r.json()
 
-        if len(k) >= 200:
+            if len(k) >= 200:
 
-            closes = [float(x[4]) for x in k]
-            price = closes[-1]
-            p_prev = closes[-2]
+                closes = [float(x[4]) for x in k]
+                price = closes[-1]
+                p_prev = closes[-2]
 
-            ema200 = ema(closes, 200)
-            bb_up, bb_down = bollinger_bands(closes)
-            bb_up_prev, bb_down_prev = bb_up[-2], bb_down[-2]
+                ema200 = ema(closes, 200)
+                bb_up, bb_down = bollinger_bands(closes)
+                bb_up_prev, bb_down_prev = bb_up[-2], bb_down[-2]
 
-            dist = abs(price - ema200[-1]) / ema200[-1]
-            perto = dist <= 0.015
-            cruzou = (p_prev < ema200[-1] <= price) or (p_prev > ema200[-1] >= price)
+                dist = abs(price - ema200[-1]) / ema200[-1]
+                perto = dist <= 0.015
+                cruzou = (p_prev < ema200[-1] <= price) or (p_prev > ema200[-1] >= price)
 
-            if (perto or cruzou):
+                if (perto or cruzou):
 
-                key = f"{sym}_15m"
-                if now - last_alert.get(key, 0) >= 14400:
+                    key = f"{sym}_15m"
+                    if now - last_alert.get(key, 0) >= 14400:
 
-                    oi_now = await get_oi(session, sym)
+                        oi_now = await get_oi(session, sym)
 
-                    if price >= bb_up[-1] and bb_up[-1] > bb_up_prev:
-                        msg = (
-                            f"👆👆 <b>ALERTA BINANCE LONG 15M</b>\n\n"
-                            f"Moeda: {sym.replace('USDT', '')}\n"
-                            f"Preço: {price:.5f}\n"
-                            f"Dist. EMA200: {dist*100:.2f}%\n"
-                            f"OI: {oi_now:,.0f}\n"
-                            f"⏰ {now_br()} BR"
-                        )
-                        await tg(session, msg)
-                        last_alert[key] = now
+                        if price >= bb_up[-1] and bb_up[-1] > bb_up_prev:
+                            msg = (
+                                f"👆👆 <b>ALERTA BINANCE LONG 15M</b>\n\n"
+                                f"Moeda: {sym.replace('USDT', '')}\n"
+                                f"Preço: {price:.5f}\n"
+                                f"Dist. EMA200: {dist*100:.2f}%\n"
+                                f"OI: {oi_now:,.0f}\n"
+                                f"⏰ {now_br()} BR"
+                            )
+                            await tg(session, msg)
+                            last_alert[key] = now
 
-                    elif price <= bb_down[-1] and bb_down[-1] < bb_down_prev:
-                        msg = (
-                            f"👇👇 <b>ALERTA BINANCE SHORT 15M</b>\n\n"
-                            f"Moeda: {sym.replace('USDT', '')}\n"
-                            f"Preço: {price:.5f}\n"
-                            f"Dist. EMA200: {dist*100:.2f}%\n"
-                            f"OI: {oi_now:,.0f}\n"
-                            f"⏰ {now_br()} BR"
-                        )
-                        await tg(session, msg)
-                        last_alert[key] = now
+                        elif price <= bb_down[-1] and bb_down[-1] < bb_down_prev:
+                            msg = (
+                                f"👇👇 <b>ALERTA BINANCE SHORT 15M</b>\n\n"
+                                f"Moeda: {sym.replace('USDT', '')}\n"
+                                f"Preço: {price:.5f}\n"
+                                f"Dist. EMA200: {dist*100:.2f}%\n"
+                                f"OI: {oi_now:,.0f}\n"
+                                f"⏰ {now_br()} BR"
+                            )
+                            await tg(session, msg)
+                            last_alert[key] = now
 
     except Exception:
         pass
 
 async def main():
     async with aiohttp.ClientSession() as session:
-        await tg(session, "<b>V11 LIGHT ATIVA (1h - 2.5%)</b>\nMonitorando Top 180 moedas.")
+        await tg(session, "<b>V11 LIGHT ATIVA</b>\n1H: ✅ Ativo\n15M: ❌ Desativado")
         while True:
             try:
                 async with session.get(f"{BINANCE}/fapi/v1/ticker/24hr") as r:
