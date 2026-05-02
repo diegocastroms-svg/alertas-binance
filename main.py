@@ -94,7 +94,7 @@ async def scan(session, sym):
                 bb_up_prev, bb_down_prev = bb_up[-2], bb_down[-2]
 
                 dist = abs(price - ema200[-1]) / ema200[-1]
-                perto = dist <= 0.02
+                perto = dist <= 0.04
                 cruzou = (p_prev < ema200[-1] <= price) or (p_prev > ema200[-1] >= price)
 
                 if (perto or cruzou):
