@@ -100,7 +100,7 @@ async def scan(session, sym):
                 if (perto or cruzou):
 
                     key = f"{sym}_1h"
-                    if now - last_alert.get(key, 0) >= 14400:
+                    if now - last_alert.get(key, 0) >= 21600:
 
                         oi_now = await get_oi(session, sym)
 
